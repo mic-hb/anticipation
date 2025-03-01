@@ -2,16 +2,15 @@ import traceback
 from argparse import ArgumentParser
 from concurrent.futures import ProcessPoolExecutor
 from glob import glob
+from functools import partial
 
 from tqdm import tqdm
 
 from anticipation.convert import midi_to_compound
 from anticipation.config import PREPROC_WORKERS
 
-from anticipation.mmvocab import vocab
 
-
-def convert_midi(filename, debug=False):
+def convert_midi(filename, vocab, debug=False):
     try:
         tokens = midi_to_compound(filename, vocab, debug=debug)
     except Exception:
@@ -28,13 +27,22 @@ def convert_midi(filename, debug=False):
 
 
 def main(args):
+    if args.vocab == 'triplet-midi':
+        from anticipation.vocabs.tripletmidi import vocab
+    elif args.vocab == 'local-midi':
+        from anticipation.vocabs.localmidi import vocab
+    else:
+        raise ValueError(f'Invalid vocabulary type "{args.vocab}"')
+
+    convert = partial(convert_midi, vocab=vocab)
+
     print(f'Midi time quantization is: {vocab["config"]["midi_quantization"]}')
     filenames = glob(args.dir + '/**/*.mid', recursive=True) \
             + glob(args.dir + '/**/*.midi', recursive=True)
 
     print(f'Preprocessing {len(filenames)} files with {PREPROC_WORKERS} workers')
     with ProcessPoolExecutor(max_workers=PREPROC_WORKERS) as executor:
-        results = list(tqdm(executor.map(convert_midi, filenames), desc='Preprocess', total=len(filenames)))
+        results = list(tqdm(executor.map(convert, filenames), desc='Preprocess', total=len(filenames)))
 
     discards = round(100*sum(results)/float(len(filenames)),2)
     print(f'Successfully processed {len(filenames) - sum(results)} files (discarded {discards}%)')
@@ -42,4 +50,5 @@ def main(args):
 if __name__ == '__main__':
     parser = ArgumentParser(description='prepares a MIDI dataset')
     parser.add_argument('dir', help='directory containing .mid files for training')
+    parser.add_argument('-v', '--vocab', default='triplet-midi', help='name of vocabulary to use for tokenization')
     main(parser.parse_args())
