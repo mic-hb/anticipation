@@ -4,6 +4,7 @@ from multiprocessing import Pool, RLock
 from glob import glob
 from tqdm import tqdm
 from pathlib import Path
+from functools import partial
 
 import numpy as np
 
@@ -11,31 +12,40 @@ from anticipation import ops
 from anticipation import tokenize
 
 
-def prepare_triplet_midi(midifile, task):
+def prepare_triplet_midi(midifile, vocab, task, transcript):
     with open(midifile, 'r') as f:
         events, truncations, status = tokenize.maybe_tokenize([int(token) for token in f.read().split()])
 
     if status > 0:
-        return events, status
+        return events, [], [], status
 
     # record the original end time before extracting control tokens
     end_time = ops.max_time(events, seconds=False)
 
     if  task == 'autoregress':
-        controls = []
-    elif task == 'instrument':
-        instruments = list(ops.get_instruments(events).keys())
-        if len(instruments) < 2:
-            # need at least two instruments for instrument anticipation
-            return events, 4 # status 4 == too few instruments
+        z = [vocab['task']['autoregress']]
+        if transcript:
+            z = [vocab['task']['autoregress_transcript']]
 
-        u = 1+np.random.randint(len(instruments)-1)
-        subset = np.random.choice(instruments, u, replace=False)
-        events, controls = tokenize.extract_instruments(events, subset)
-    elif task == 'span':
-        events, controls = tokenize.extract_spans(events, .05)
-    elif task == 'random':
-        events, controls = tokenize.extract_random(events, 10)
+        controls = []
+    else:
+        z = [vocab['task']['anticipate']]
+        if transcript:
+            z = [vocab['task']['anticipate_transcript']]
+
+        if task == 'instrument':
+            instruments = list(ops.get_instruments(events).keys())
+            if len(instruments) < 2:
+                # need at least two instruments for instrument anticipation
+                return events, 4 # status 4 == too few instruments
+
+            u = 1+np.random.randint(len(instruments)-1)
+            subset = np.random.choice(instruments, u, replace=False)
+            events, controls = tokenize.extract_instruments(events, subset)
+        elif task == 'span':
+            events, controls = tokenize.extract_spans(events, .05)
+        elif task == 'random':
+            events, controls = tokenize.extract_random(events, 10)
 
     # add rest tokens to events after extracting control tokens
     # (see Section 3.2 of the paper for why we do this)
@@ -45,10 +55,11 @@ def prepare_triplet_midi(midifile, task):
     tokens, controls = ops.anticipate(events, controls)
     assert len(controls) == 0 # should have consumed all controls (because of padding)
 
-    return tokens, 0
+    separator = [vocab['separator'] for _ in range(3)]
+    return tokens, z, separator, 0
 
 
-def pack_tokens(sequences, output, idx, prepare, z, separator, factor, config, seqlen):
+def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen):
     vocab_size = config['size']
     max_arrival = config['max_time']
     log = output + '.log'
@@ -62,7 +73,7 @@ def pack_tokens(sequences, output, idx, prepare, z, separator, factor, config, s
                 f.write(sequence + '\n')
 
             for _ in range(factor):
-                tokens, status = prepare(sequence)
+                tokens, z, separator, status = prepare(sequence)
                 if status > 0:
                     stats[status-1] += 1
                     break
@@ -90,39 +101,6 @@ def pack_tokens(sequences, output, idx, prepare, z, separator, factor, config, s
     return (seqcount, *stats)
 
 
-def preprocess_ar(midifiles, output, seqlen, task, factor, transcript, vocab, idx):
-    assert factor == 1, f'Autoregressive preprocessing has no randomness; cannot apply augmentation factor {factor}'
-
-    separator = [vocab['separator'] for _ in range(3)]
-    if transcript:
-        z = [vocab['task']['autoregress_transcript']]
-    else:
-        z = [vocab['task']['autoregress']]
-
-    prepare = lambda midifile: prepare_triplet_midi(midifile, task)
-
-    return pack_tokens(midifiles, output, idx, prepare, z, separator, factor, vocab['config'], seqlen=seqlen)
-
-
-def preprocess_aar(midifiles, output, seqlen, task, factor, transcript, vocab, idx):
-    separator = [vocab['separator'] for _ in range(3)]
-    if transcript:
-        z = [vocab['task']['anticipate_transcript']]
-    else:
-        z = [vocab['task']['anticipate']]
-
-    prepare = lambda midifile: prepare_triplet_midi(midifile, task)
-
-    return pack_tokens(midifiles, output, idx, prepare, z, separator, factor, vocab['config'], seqlen=seqlen)
-
-
-preproc_func = {
-    'autoregress' : preprocess_ar,
-    'random' : preprocess_aar,
-    'span' : preprocess_aar,
-    'instrument' : preprocess_aar,
-}
-
 def init_worker(lock):
     tqdm.set_lock(lock)
     np.random.seed(os.getpid())
@@ -132,17 +110,22 @@ def main(args):
 
     if args.vocab == 'triplet-midi':
         from anticipation.vocabs.tripletmidi import vocab
+        prepare = partial(prepare_triplet_midi, vocab=vocab, task=args.task, transcript=args.transcript)
+        #lambda midifile: prepare_triplet_midi(midifile, vocab, args.task, args.transcript)
+    elif args.vocab == 'local-midi':
+        from anticipation.vocabs.localmidi import vocab
     else:
         raise ValueError(f'Invalid vocabulary type "{args.vocab}"')
+
+    if args.task == 'autoregress':
+        assert args.factor == 1, f'Autoregressive preprocessing has no randomness; cannot apply augmentation factor {factor}'
 
     print('Tokenization parameters:')
     print(f"  vocab = {args.vocab}")
     print(f"  task = {args.task}")
     print(f"  context = {args.context}")
     print(f"  augmentation factor = {args.factor}")
-    print(f"  anticipation interval = {vocab['config']['anticipation']} seconds")
     print(f"  transcript? {args.transcript}")
-    print(f"  skew = {vocab['config']['skew']}")
 
     files = glob(os.path.join(args.datadir, '**/*.compound.txt'), recursive=True)
 
@@ -151,19 +134,20 @@ def main(args):
     outfiles = os.path.join(args.outdir, os.path.basename(args.datadir) + '.{t}.shard-{s:03}.txt')
     print('Outputs to:', outfiles)
     outputs = [outfiles.format(t=args.task, s=s) for s in range(len(shards))]
+    prepare = args.workers*[prepare]
     context = args.workers*[args.context]
     task = args.workers*[args.task]
     factor = args.workers*[args.factor]
-    vocab = args.workers*[vocab]
     transcript = args.workers*[args.transcript]
+    config = args.workers*[vocab['config']]
 
     print('Processing...')
     if args.debug:
-        results = preproc_func[args.task](shards[0], outputs[0], args.context, args.task, args.factor, args.transcript, vocab[0], 0)
+        results = pack_tokens(shards[0], outputs[0], 0, prepare, args.factor, config[0], args.context)
         results = [results]
     else:
         with Pool(processes=args.workers, initargs=(RLock(),), initializer=init_worker) as pool:
-            results = pool.starmap(preproc_func[args.task], zip(shards, outputs, context, task, factor, transcript, vocab, range(args.workers)))
+            results = pool.starmap(pack_tokens, zip(shards, outputs, range(args.workers), prepare, factor, config, context))
 
     seqcount, too_short, too_long, many_instr, few_instr, discarded_seqs = (sum(x) for x in zip(*results))
 

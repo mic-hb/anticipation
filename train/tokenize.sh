@@ -7,7 +7,8 @@ out_directory="$2" task="$3"
 context="$4"
 split="$5"
 factor="$6"
-transcript="$7"
+vocab="$7"
+transcript="$8"
 workers=16
 
 dataset="${data_directory##*/}"
@@ -15,7 +16,7 @@ datafile=$out_directory/"$dataset"."$task"."$split".txt
 
 tmpdir="tmp_$(date +%Y%m%d_%H%M%S)"
 mkdir -p $out_directory/$tmpdir
-python tokenize-new.py $data_directory $out_directory/$tmpdir $task $context -f $factor $transcript --workers $workers
+python tokenize-new.py $data_directory $out_directory/$tmpdir $task $context -f $factor $transcript -v $vocab --workers $workers
 
 echo "Writing to datafile: $datafile"
 
