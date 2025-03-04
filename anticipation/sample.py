@@ -659,17 +659,23 @@ def add_token_no_cache(model, task, tokens, instruments, human_instruments, top_
     # MLC always requires cache? not using here for now
 
     new_token = []
-    input_ids, offset = construct_prompt_no_cache(instruments, human_instruments, task, tokens, vocab, force_z_cont=force_z_cont)
-    with torch.no_grad():
-        for i in range(3):
+    current_tokens = tokens.copy()  # Make a copy to modify during generation
+    
+    for i in range(3):
+        # Regenerate input_ids for each token to include previously generated tokens in this triplet
+        input_ids, offset = construct_prompt_no_cache(instruments, human_instruments, task, current_tokens, vocab, force_z_cont=force_z_cont)
+        
+        with torch.no_grad():
             if save_input_ids_and_logits:
                 import os
                 os.makedirs('generate_plugin_sim/input_ids_and_logits', exist_ok=True)
                 with open(f'generate_plugin_sim/input_ids_and_logits/input_ids_{len(tokens)}_{i}.txt', 'w') as f:
                     f.write(str(input_ids.tolist()))
+                    
             input_ids = input_ids.unsqueeze(0).to(model.device)
             output = model(input_ids)
             logits = output.logits[0,-1]
+            
             if save_input_ids_and_logits:
                 import os
                 os.makedirs('generate_plugin_sim/input_ids_and_logits', exist_ok=True)
@@ -682,17 +688,26 @@ def add_token_no_cache(model, task, tokens, instruments, human_instruments, top_
             if i == 0:
                 logits = future_logits(logits, current_time - offset)
             elif i == 2:
-                logits = instr_logits(logits, tokens)
+                logits = instr_logits(logits, current_tokens)  # Use current_tokens here
 
             logits = masked_instr_logits(logits, masked_instrs)
             logits = nucleus(logits, top_p)
                 
             probs = F.softmax(logits/temperature, dim=-1)
-            input_ids = torch.multinomial(probs, 1)
-            new_token.append(int(input_ids))
+            next_token = torch.multinomial(probs, 1)
+            token_value = int(next_token)
+            
+            # Adjust time token for offset
+            if i == 0:
+                token_value += offset
+                
+            new_token.append(token_value)
+            
+            # Add the new token to current_tokens for the next iteration
+            if i < 2:  # Only for the first two tokens in the triplet
+                current_tokens.append(token_value)
 
-
-    new_token[0] += offset # revert to full sequence timing
+    # No need to adjust time token here since we did it during generation
     if debug:
         print(f'  OFFSET = {offset}, TIME = {tokens[::3][-5:]}')
 

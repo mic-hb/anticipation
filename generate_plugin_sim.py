@@ -254,7 +254,7 @@ def sort_tokens(tokens):
     return flattened_list
 
 
-human_events = jitter(human_events, 4, 3)
+human_events = [] #jitter(human_events, 4, 3)
 agent_events = jitter(agent_events, 4, 3)
 
 ### SIMULATE HUMAN INPUT
@@ -269,7 +269,7 @@ GENERATION_INTERVAL = 2
 use_MLC = False
 use_file = False
 impose_sorting = True
-use_cache = True
+use_cache = False
 
 inputs = ops.clip(
     agent_events, 0, simulation_start_time, clip_duration=True, seconds=True
@@ -420,40 +420,33 @@ with open(
 
 # inputs_midi = events_to_midi(make_events_safe(inputs), vocab)
 inputs_midi = events_to_midi(inputs, vocab)
-inputs_midi.save("generate_plugin_sim/inputs.mid")
+inputs_midi.save(f"generate_plugin_sim/inputs_cache_{str(use_cache)}.mid")
 
-# Post process prompts if cache is used
-if use_cache:
-    import ast
-    import glob
+# Post process prompts 
+import glob
+import ast
+from tqdm import tqdm
 
-    import tqdm
+input_ids_files = sorted(glob.glob('generate_plugin_sim/input_ids_and_logits/input_ids_*_*.txt'), key=lambda x: (int(x.split('_')[-2]), int(x.split('_')[-1].split('.')[0])))
 
-    input_ids_files = sorted(
-        glob.glob("generate_plugin_sim/input_ids_and_logits/input_ids_*_*.txt"),
-        key=lambda x: (int(x.split("_")[-2]), int(x.split("_")[-1].split(".")[0])),
-    )
+def process_input_file(file, current_prompt):
+    with open(file, 'r') as f:
+        tokens = ast.literal_eval(f.read())
+        
+        # If file has more than 1 token, it's a full prompt
+        if isinstance(tokens, list) and len(tokens) > 1:
+            current_prompt = tokens
+        else:
+            # Append single token to previous prompt
+            current_prompt = current_prompt + tokens
+        return current_prompt
 
-    def process_input_file(file, current_prompt):
-        with open(file, "r") as f:
-            tokens = ast.literal_eval(f.read())
+# Process input files sequentially
+tokens_list = []
+current_prompt = ""
+for file in tqdm(input_ids_files, desc="Processing input files"):
+    current_prompt = process_input_file(file, current_prompt)
 
-            # If file has more than 1 token, it's a full prompt
-            if isinstance(tokens, list) and len(tokens) > 1:
-                current_prompt = tokens
-            else:
-                # Append single token to previous prompt
-                current_prompt = current_prompt + tokens
-            return current_prompt
-
-    # Process input files sequentially
-    tokens_list = []
-    current_prompt = ""
-    for file in tqdm.tqdm(input_ids_files, desc="Processing input files"):
-        current_prompt = process_input_file(file, current_prompt)
-
-        output_path = os.path.join(
-            os.path.dirname(file), "joined_" + os.path.basename(file)
-        )
-        with open(output_path, "w") as f:
-            f.write(str(current_prompt))
+    output_path = os.path.join(os.path.dirname(file), "joined_" + os.path.basename(file))
+    with open(output_path, 'w') as f:
+        f.write(str(current_prompt))
