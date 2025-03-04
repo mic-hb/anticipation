@@ -254,7 +254,7 @@ def sort_tokens(tokens):
     return flattened_list
 
 
-human_events = [] #jitter(human_events, 4, 3)
+human_events = jitter(human_events, 4, 3)
 agent_events = jitter(agent_events, 4, 3)
 
 ### SIMULATE HUMAN INPUT
