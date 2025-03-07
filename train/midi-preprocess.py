@@ -9,7 +9,6 @@ from tqdm import tqdm
 from anticipation.convert import midi_to_compound
 from anticipation.config import PREPROC_WORKERS
 
-
 def convert_midi(filename, vocab, debug=False):
     try:
         tokens = midi_to_compound(filename, vocab, debug=debug)
