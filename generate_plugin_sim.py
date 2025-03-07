@@ -38,9 +38,12 @@ if not torch.cuda.is_available():
     # Add /opt/homebrew/bin/fluidsynth to PATH
     os.environ["PATH"] += ":/opt/homebrew/bin/"
 
+import ast
+import glob
 from pathlib import Path
 
 from mlc_llm.testing.debug_chat import DebugChat
+from tqdm import tqdm
 
 ### INITIALIZE MODEL
 
@@ -268,8 +271,13 @@ GENERATION_INTERVAL = 2
 
 use_MLC = False
 use_file = False
-impose_sorting = True
+impose_sorting = False
 use_cache = False
+
+# Create a suffix based on configuration parameters
+config_suffix = f"mlc_{use_MLC}_file_{use_file}_sort_{impose_sorting}_cache_{use_cache}"
+output_folder = f"generate_plugin_sim/{config_suffix}"
+os.makedirs(output_folder, exist_ok=True)
 
 inputs = ops.clip(
     agent_events, 0, simulation_start_time, clip_duration=True, seconds=True
@@ -339,29 +347,30 @@ for st in range(simulation_start_time, simulation_end_time + 1, GENERATION_INTER
             use_MLC=use_MLC,
             force_z_cont=force_z_cont,
             save_input_ids_and_logits=True,
+            input_ids_and_logits_output_folder=output_folder,
         )
     else:
-        os.makedirs(f"generate_plugin_sim/inputs_as_parts", exist_ok=True)
+        os.makedirs(f"{output_folder}/inputs_as_parts", exist_ok=True)
 
         with open(
-            f"generate_plugin_sim/inputs_as_parts/{start_time}_input_events_nb.txt", "w"
+            f"{output_folder}/inputs_as_parts/{start_time}_input_events_nb.txt", "w"
         ) as f:
             f.write(str(inputs))
 
         with open(
-            f"generate_plugin_sim/inputs_as_parts/{start_time}_chord_controls_nb.txt",
+            f"{output_folder}/inputs_as_parts/{start_time}_chord_controls_nb.txt",
             "w",
         ) as f:
             f.write(str(chord_controls))
 
         with open(
-            f"generate_plugin_sim/inputs_as_parts/{start_time}_human_controls_nb.txt",
+            f"{output_folder}/inputs_as_parts/{start_time}_human_controls_nb.txt",
             "w",
         ) as f:
             f.write(str(human_controls))
 
         with open(
-            f"generate_plugin_sim/inputs_as_parts/{start_time}_human_events_nb.txt", "w"
+            f"{output_folder}/inputs_as_parts/{start_time}_human_events_nb.txt", "w"
         ) as f:
             f.write(str(human_events))
 
@@ -382,6 +391,7 @@ for st in range(simulation_start_time, simulation_end_time + 1, GENERATION_INTER
                 use_MLC=use_MLC,
                 force_z_cont=force_z_cont,
                 save_input_ids_and_logits=True,
+                input_ids_and_logits_output_folder=output_folder,
             )
         else:
             accompaniment = _generate_live_chunk_no_cache(
@@ -400,6 +410,7 @@ for st in range(simulation_start_time, simulation_end_time + 1, GENERATION_INTER
                 use_MLC=use_MLC,
                 force_z_cont=force_z_cont,
                 save_input_ids_and_logits=True,
+                input_ids_and_logits_output_folder=output_folder,
             )
 
     # Recursive input: add accompaniment to inputs
@@ -414,25 +425,25 @@ for st in range(simulation_start_time, simulation_end_time + 1, GENERATION_INTER
 ops.print_tokens(inputs)
 
 with open(
-    f"generate_plugin_sim/{simulation_start_time}_{simulation_end_time}_inputs.txt", "w"
+    f"{output_folder}/{simulation_start_time}_{simulation_end_time}_inputs.txt", "w"
 ) as f:
     f.write(str(inputs))
 
 # inputs_midi = events_to_midi(make_events_safe(inputs), vocab)
 inputs_midi = events_to_midi(inputs, vocab)
-inputs_midi.save(f"generate_plugin_sim/inputs_cache_{str(use_cache)}.mid")
+inputs_midi.save(f"{output_folder}/inputs_config_{config_suffix}.mid")
 
-# Post process prompts 
-import glob
-import ast
-from tqdm import tqdm
+# Post process prompts
+input_ids_files = sorted(
+    glob.glob(f"{output_folder}/input_ids_and_logits/input_ids_*_*.txt"),
+    key=lambda x: (int(x.split("_")[-2]), int(x.split("_")[-1].split(".")[0])),
+)
 
-input_ids_files = sorted(glob.glob('generate_plugin_sim/input_ids_and_logits/input_ids_*_*.txt'), key=lambda x: (int(x.split('_')[-2]), int(x.split('_')[-1].split('.')[0])))
 
 def process_input_file(file, current_prompt):
-    with open(file, 'r') as f:
+    with open(file, "r") as f:
         tokens = ast.literal_eval(f.read())
-        
+
         # If file has more than 1 token, it's a full prompt
         if isinstance(tokens, list) and len(tokens) > 1:
             current_prompt = tokens
@@ -441,12 +452,15 @@ def process_input_file(file, current_prompt):
             current_prompt = current_prompt + tokens
         return current_prompt
 
+
 # Process input files sequentially
 tokens_list = []
 current_prompt = ""
 for file in tqdm(input_ids_files, desc="Processing input files"):
     current_prompt = process_input_file(file, current_prompt)
 
-    output_path = os.path.join(os.path.dirname(file), "joined_" + os.path.basename(file))
-    with open(output_path, 'w') as f:
+    output_path = os.path.join(
+        os.path.dirname(file), "joined_" + os.path.basename(file)
+    )
+    with open(output_path, "w") as f:
         f.write(str(current_prompt))
