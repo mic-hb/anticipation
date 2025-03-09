@@ -257,25 +257,27 @@ def sort_tokens(tokens):
     return flattened_list
 
 
-human_events = jitter(human_events, 4, 3)
-agent_events = jitter(agent_events, 4, 3)
+use_MLC = False
+use_file = False
+impose_sorting = True
+use_cache = False
+use_jitter = False
+
+if use_jitter:
+    agent_events = jitter(agent_events, 4, 3)
+    human_events = jitter(human_events, 4, 3)
 
 ### SIMULATE HUMAN INPUT
 
 clock_start = time.time()
 
 simulation_start_time = 8  # NOTE: in the plugin, this function is triggered a second before simulation_start_time!
-simulation_end_time = 21
+simulation_end_time = 110
 
 GENERATION_INTERVAL = 2
 
-use_MLC = False
-use_file = False
-impose_sorting = False
-use_cache = False
-
 # Create a suffix based on configuration parameters
-config_suffix = f"mlc_{use_MLC}_file_{use_file}_sort_{impose_sorting}_cache_{use_cache}"
+config_suffix = f"mlc_{use_MLC}_file_{use_file}_sort_{impose_sorting}_cache_{use_cache}_jitter_{use_jitter}"
 output_folder = f"generate_plugin_sim/{config_suffix}"
 os.makedirs(output_folder, exist_ok=True)
 
