@@ -11,6 +11,76 @@ import numpy as np
 from anticipation import ops
 from anticipation import tokenize
 
+def prepare_local_midi(midifile, vocab, task, transcript):
+    with open(midifile, 'r') as f:
+        events, truncations, status = tokenize.maybe_tokenize([int(token) for token in f.read().split()])
+
+    # events are already quantized by quantization amount
+    if status > 0:
+        return events, [], [], status
+
+    # record the original end time before extracting control tokens
+    end_time = ops.max_time(events, seconds=False)
+
+    if  task == 'autoregress':
+        # length of z if it varies and contains different metadata?
+        z = None
+        
+        # no autoregress_transcript in local_midi?
+        # if transcript:
+        #     z = [vocab['task']['autoregress_transcript']]
+        controls = []
+    # else: # NOTE: there is no 'task' or anticipation definitions in local-midi vocab
+    #     z = [vocab['task']['anticipate']]
+    #     if transcript:
+    #         z = [vocab['task']['anticipate_transcript']]
+
+    #     if task == 'instrument':
+    #         instruments = list(ops.get_instruments(events).keys())
+    #         if len(instruments) < 2:
+    #             # need at least two instruments for instrument anticipation
+    #             return events, 4 # status 4 == too few instruments
+
+    #         u = 1+np.random.randint(len(instruments)-1)
+    #         subset = np.random.choice(instruments, u, replace=False)
+    #         events, controls = tokenize.extract_instruments(events, subset)
+    #     elif task == 'span':
+    #         events, controls = tokenize.extract_spans(events, .05)
+    #     elif task == 'random':
+    #         events, controls = tokenize.extract_random(events, 10)
+
+    # add rest tokens to events after extracting control tokens
+    # (see Section 3.2 of the paper for why we do this)
+    events = ops.pad(events, end_time) # do we still want to do this?
+
+    # logic to insert ticks and relativize according to inserted tick
+    time_res = vocab["config"]["midi_quantization"]
+    recent_tick = 0
+    
+    events_with_tick = []
+    for event in events:
+        time, dur, note = event
+        while time >= round(recent_tick * time_res):
+            # do ticks get inserted with their actual time value?
+            events_with_tick.append((round(recent_tick * time_res), -1, vocab['tick'])) # what should duration and note be for a tick?
+            recent_tick += 1
+        
+        elativize = round((recent_tick - 1) * time_res) if recent_tick > 0 else 0
+        events_with_tick.append((time - relativize, dur, note))
+        
+
+    # interleave the events and anticipated controls
+    # NOTE: if autoregress, then controls is empty
+    tokens, controls = ops.anticipate(events_with_tick, controls)
+    assert len(controls) == 0 # should have consumed all controls (because of padding)
+
+    # separator doesn't exist in localmidi vocab, so don't create array and return
+    # separator = [vocab['separator'] for _ in range(3)]
+    # return tokens, z, separator, 0
+    return tokens, z, None, 0
+    
+    
+
 
 def prepare_triplet_midi(midifile, vocab, task, transcript):
     with open(midifile, 'r') as f:
@@ -50,8 +120,9 @@ def prepare_triplet_midi(midifile, vocab, task, transcript):
     # add rest tokens to events after extracting control tokens
     # (see Section 3.2 of the paper for why we do this)
     events = ops.pad(events, end_time)
-
+    
     # interleave the events and anticipated controls
+    # NOTE: if autoregress, then controls is empty
     tokens, controls = ops.anticipate(events, controls)
     assert len(controls) == 0 # should have consumed all controls (because of padding)
 
@@ -79,17 +150,25 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen):
                     break
 
                 # write out full contexts to file
-                concatenated_tokens.extend(separator + tokens)
+                # separator is None for local-midi
+                if separator != None:
+                     concatenated_tokens.extend(separator + tokens)
+                else:
+                    concatenated_tokens.extend(tokens)
+                
                 while len(concatenated_tokens) >= seqlen-len(z):
                     seq = concatenated_tokens[0:seqlen-len(z)]
                     concatenated_tokens = concatenated_tokens[len(seq):]
 
-                    # relativize time to the context 
-                    seq = ops.translate(seq, -ops.min_time(seq, seconds=False), seconds=False)
-                    assert ops.min_time(seq, seconds=False) == 0
-                    if ops.max_time(seq, seconds=False) >= max_arrival:
-                        stats[4] += 1
-                        continue
+                    # relativize time to the context
+                    # NOTE: this portion only thing that happens in triplet-midi but not local-midi
+
+                    if config['vocab'] == 'triplet-midi':
+                        seq = ops.translate(seq, -ops.min_time(seq, seconds=False), seconds=False)
+                        assert ops.min_time(seq, seconds=False) == 0
+                        if ops.max_time(seq, seconds=False) >= max_arrival:
+                            stats[4] += 1
+                            continue
 
                     seq = z + seq
 

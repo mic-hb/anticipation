@@ -51,6 +51,7 @@ VOCAB_SIZE = ANTI_TR+1
 
 vocab = {
     'config' : {
+        'name': 'triplet-midi',
         'skew' : False,
         'anticipation' : DELTA,
         'midi_quantization' : MIDI_QUANTIZATION,

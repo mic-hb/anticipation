@@ -41,6 +41,7 @@ VOCAB_SIZE = DELTA_OFFSET + MAX_DELTA
 
 vocab = {
     'config' : {
+        'name': 'local-midi',
         'midi_quantization' : MIDI_QUANTIZATION,
         'max_arrival' : MAX_TIME,
         'max_duration' : MAX_DUR,
