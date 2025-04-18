@@ -12,7 +12,7 @@ from anticipation import ops
 from anticipation import tokenize
 
 def prepare_local_midi(midifile, vocab, task, transcript):
-    with open(midifile, 'r') as f:
+    with open(midifile, 'r') as f: # events might be a flat array with groups of three elements being a singular event
         events, truncations, status = tokenize.maybe_tokenize([int(token) for token in f.read().split()])
 
     # events are already quantized by quantization amount
@@ -58,14 +58,13 @@ def prepare_local_midi(midifile, vocab, task, transcript):
     recent_tick = 0
     
     events_with_tick = []
-    for event in events:
-        time, dur, note = event
+    for time, dur, note in zip(events[0::3], events[1::3], events[2::3])
         while time >= round(recent_tick * time_res):
             # do ticks get inserted with their actual time value?
             events_with_tick.append((round(recent_tick * time_res), -1, vocab['tick'])) # what should duration and note be for a tick?
             recent_tick += 1
         
-        elativize = round((recent_tick - 1) * time_res) if recent_tick > 0 else 0
+        relativize = round((recent_tick - 1) * time_res) if recent_tick > 0 else 0
         events_with_tick.append((time - relativize, dur, note))
         
 
@@ -193,6 +192,7 @@ def main(args):
         #lambda midifile: prepare_triplet_midi(midifile, vocab, args.task, args.transcript)
     elif args.vocab == 'local-midi':
         from anticipation.vocabs.localmidi import vocab
+        prepare = partial(prepare_local_midi, vocab=vocab, task=args.task, transcript=args.transcript)
     else:
         raise ValueError(f'Invalid vocabulary type "{args.vocab}"')
 
