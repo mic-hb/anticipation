@@ -51,7 +51,8 @@ def prepare_local_midi(midifile, vocab, task, transcript):
 
     # add rest tokens to events after extracting control tokens
     # (see Section 3.2 of the paper for why we do this)
-    events = ops.pad(events, end_time) # do we still want to do this?
+    # not necessary since we have ticks
+    # events = ops.pad(events, end_time) # do we still want to do this?
 
     # logic to insert ticks and relativize according to inserted tick
     time_res = vocab["config"]["midi_quantization"]
@@ -65,7 +66,7 @@ def prepare_local_midi(midifile, vocab, task, transcript):
             recent_tick += 1
         
         relativize = round((recent_tick - 1) * time_res) if recent_tick > 0 else 0
-        events_with_tick.append((time - relativize, dur, note))
+        events_with_tick.append((time - relativize, dur, note)) # should I be appending in flat way and not group of 3?
         
 
     # interleave the events and anticipated controls
@@ -118,6 +119,7 @@ def prepare_triplet_midi(midifile, vocab, task, transcript):
 
     # add rest tokens to events after extracting control tokens
     # (see Section 3.2 of the paper for why we do this)
+
     events = ops.pad(events, end_time)
     
     # interleave the events and anticipated controls
@@ -178,6 +180,45 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen):
 
     return (seqcount, *stats)
 
+def pack_tokens_local_midi(sequences, output, idx, prepare, factor, config, seqlen):
+    vocab_size = config['size']
+    max_arrival = config['max_time']
+    time_res = config["midi_quantization"]
+    log = output + '.log'
+
+    seqcount = 0
+    stats = 5*[0] # (short, long, too many instruments, too few instruments, inexpressible)
+    with open(output, 'w') as outfile:
+        seq = [] # needs to survive across multiple sequences since a single seq could contain events from different sequences
+        for sequence in tqdm(sequences, desc=f'#{idx}', position=idx+1, leave=True): # sequence represents a singular midifile
+            z = [] # redefine z for this particular sequence
+            with open(log, 'a') as f:
+                f.write(sequence + '\n')
+            
+            with open(sequence, 'r') as midifile:
+                events, truncations, status = tokenize.maybe_tokenize([int(token) for token in midifile.read().split()])
+                
+                recent_tick = 0
+
+                for time, dur, note in zip(events[0::3], events[1::3], events[2::3]): 
+                    if len(seq) < seqlen - len(z):
+                        while time >= round(recent_tick * time_res): # NOTE: could end up exceeding 1024 right here
+                            # do ticks get inserted with their actual time value? -> not a problem anymore because ticks are appended as singleton
+                            seq.append(vocab['tick']) # NOTE: VOCAB ISN'T DEFINED IN CONTEXT
+                            recent_tick += 1
+                        
+                        relativize = round((recent_tick - 1) * time_res) if recent_tick > 0 else 0
+                        seq.append(time - relativize)
+                        seq.append(dur)
+                        seq.append(note)
+                    else:
+                        # append to file and reset sequence
+                        seq = z + seq
+                        outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
+                        seq = []
+                        recent_tick = 0 # reset tick for new sequence
+
+                # add sep token here outside for since events context ended?
 
 def init_worker(lock):
     tqdm.set_lock(lock)
