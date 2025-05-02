@@ -400,3 +400,54 @@ def midi_to_events(midifile, debug=False):
 
 def midi_to_mm(midifile, vocab, debug=False):
     return compound_to_mm(midi_to_compound(midifile, vocab, debug=debug), vocab)
+
+def lm_to_midi(tokens, vocab, debug=False):
+    return compound_to_midi(lm_to_compound(tokens, vocab, debug=debug), vocab, debug=debug)
+
+def lm_to_compound(tokens, vocab, debug=False):
+    time_res = vocab['config']['midi_quantization']
+    tick_token = vocab['tick']
+    seq_end_token = vocab['sequence_end']
+    seq_start_token = vocab['flags']['sequence_start']
+    seq_cold_start = vocab['flags']['cold_start']
+    seq_transcript = vocab['flags']['transcript']
+    seq_anticipation = vocab['flags']['anticipation']
+
+    seq = []
+    time = 0
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == tick_token:
+            time += 1
+            i += 1
+        elif tok == seq_end_token: # end of sequence so rest for next 'song'
+            time = 0
+            i += 1
+        elif tok not in {seq_start_token, seq_cold_start, seq_transcript, seq_anticipation}:
+            if tok >= 0 and tok <= 99: # time token
+                delta = tokens[i]
+                abs_time = round(time * time_res) + delta if time > 0 else delta
+                seq.append(abs_time)
+            else: # dur or note
+                seq.append(tok)
+            i += 1
+        else:
+            i += 1
+
+    # sequence shouldn't have anything but the time, dur, note triplets
+    assert len(seq) % 3 == 0
+    # add instrument and velocities back to sequence
+    out = 5*(len(seq)//3)*[0]
+    out[0::5] = seq[0::3]
+    out[1::5] = seq[1::3]
+    out[2::5] = [tok - (2**7)*(tok//2**7) for tok in seq[2::3]]
+    out[3::5] = [tok//2**7 for tok in seq[2::3]]
+    out[4::5] = (len(seq)//3)*[72] # default velocity
+
+    assert max(out[1::5]) < MAX_DUR
+    assert max(out[2::5]) < MAX_PITCH
+    assert max(out[3::5]) < MAX_INSTR
+    assert all(tok >= 0 for tok in out)
+    
+    return out

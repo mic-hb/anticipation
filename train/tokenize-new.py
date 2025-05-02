@@ -11,76 +11,34 @@ import numpy as np
 from anticipation import ops
 from anticipation import tokenize
 
-def prepare_local_midi(midifile, vocab, task, transcript):
-    with open(midifile, 'r') as f: # events might be a flat array with groups of three elements being a singular event
-        events, truncations, status = tokenize.maybe_tokenize([int(token) for token in f.read().split()])
 
-    # events are already quantized by quantization amount
+def prepare_local_midi(midifile, vocab, task, transcript):
+    with open(midifile, 'r') as f:
+        events, truncations, status = tokenize.maybe_tokenize([int(token) for token in f.read().split()])
     if status > 0:
         return events, [], [], status
-
-    # record the original end time before extracting control tokens
-    end_time = ops.max_time(events, seconds=False)
-
-    if  task == 'autoregress':
-        # length of z if it varies and contains different metadata?
-        z = None
-        
-        # no autoregress_transcript in local_midi?
-        # if transcript:
-        #     z = [vocab['task']['autoregress_transcript']]
-        controls = []
-    # else: # NOTE: there is no 'task' or anticipation definitions in local-midi vocab
-    #     z = [vocab['task']['anticipate']]
-    #     if transcript:
-    #         z = [vocab['task']['anticipate_transcript']]
-
-    #     if task == 'instrument':
-    #         instruments = list(ops.get_instruments(events).keys())
-    #         if len(instruments) < 2:
-    #             # need at least two instruments for instrument anticipation
-    #             return events, 4 # status 4 == too few instruments
-
-    #         u = 1+np.random.randint(len(instruments)-1)
-    #         subset = np.random.choice(instruments, u, replace=False)
-    #         events, controls = tokenize.extract_instruments(events, subset)
-    #     elif task == 'span':
-    #         events, controls = tokenize.extract_spans(events, .05)
-    #     elif task == 'random':
-    #         events, controls = tokenize.extract_random(events, 10)
-
-    # add rest tokens to events after extracting control tokens
-    # (see Section 3.2 of the paper for why we do this)
-    # not necessary since we have ticks
-    # events = ops.pad(events, end_time) # do we still want to do this?
-
-    # logic to insert ticks and relativize according to inserted tick
+    
+    if task == 'autoregress':
+        z = [vocab['flags']['sequence_start']] # BOS tag, could be more in the future
+        # no "if transcript"
+    else: # anticipation
+        pass
+    
     time_res = vocab["config"]["midi_quantization"]
     recent_tick = 0
-    
-    events_with_tick = []
-    for time, dur, note in zip(events[0::3], events[1::3], events[2::3])
+    tokens = []
+
+    for time, dur, note in zip(events[0::3], events[1::3], events[2::3]):
         while time >= round(recent_tick * time_res):
-            # do ticks get inserted with their actual time value?
-            events_with_tick.append((round(recent_tick * time_res), -1, vocab['tick'])) # what should duration and note be for a tick?
+            tokens.append(vocab['tick']) # insert tick
             recent_tick += 1
-        
         relativize = round((recent_tick - 1) * time_res) if recent_tick > 0 else 0
-        events_with_tick.append((time - relativize, dur, note)) # should I be appending in flat way and not group of 3?
-        
-
-    # interleave the events and anticipated controls
-    # NOTE: if autoregress, then controls is empty
-    tokens, controls = ops.anticipate(events_with_tick, controls)
-    assert len(controls) == 0 # should have consumed all controls (because of padding)
-
-    # separator doesn't exist in localmidi vocab, so don't create array and return
-    # separator = [vocab['separator'] for _ in range(3)]
-    # return tokens, z, separator, 0
-    return tokens, z, None, 0
+        tokens.append(time - relativize)
+        tokens.append(dur)
+        tokens.append(note)
     
-    
-
+    separator = vocab['sequence_end']
+    return tokens, z, separator, 0
 
 def prepare_triplet_midi(midifile, vocab, task, transcript):
     with open(midifile, 'r') as f:
@@ -119,11 +77,9 @@ def prepare_triplet_midi(midifile, vocab, task, transcript):
 
     # add rest tokens to events after extracting control tokens
     # (see Section 3.2 of the paper for why we do this)
-
     events = ops.pad(events, end_time)
-    
+
     # interleave the events and anticipated controls
-    # NOTE: if autoregress, then controls is empty
     tokens, controls = ops.anticipate(events, controls)
     assert len(controls) == 0 # should have consumed all controls (because of padding)
 
@@ -131,7 +87,7 @@ def prepare_triplet_midi(midifile, vocab, task, transcript):
     return tokens, z, separator, 0
 
 
-def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen):
+def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen, vocab):
     vocab_size = config['size']
     max_arrival = config['max_time']
     log = output + '.log'
@@ -140,6 +96,7 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen):
     stats = 5*[0] # (short, long, too many instruments, too few instruments, inexpressible)
     with open(output, 'w') as outfile:
         concatenated_tokens = []
+        z_tokens = []
         for sequence in tqdm(sequences, desc=f'#{idx}', position=idx+1, leave=True):
             with open(log, 'a') as f:
                 f.write(sequence + '\n')
@@ -152,14 +109,21 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen):
 
                 # write out full contexts to file
                 # separator is None for local-midi
-                if separator != None:
-                     concatenated_tokens.extend(separator + tokens)
+                if config['vocab'] == 'local-midi':
+                    concatenated_tokens.extend(separator + z + tokens) # this is entirely new sequence being concatenated to list, so new z
+                    z_tokens.extend([z] * len(separator + z + tokens))
                 else:
-                    concatenated_tokens.extend(tokens)
+                    concatenated_tokens.extend(separator + tokens)
+                    z_tokens.extend([z] * len(separator + tokens))
                 
+                z = z_tokens[0] # need to define z to be the correct z, not just most recent
                 while len(concatenated_tokens) >= seqlen-len(z):
                     seq = concatenated_tokens[0:seqlen-len(z)]
+                    z_seq = z_tokens[0:seqlen-len(z)]
+                    z = z_seq[0]
+                    
                     concatenated_tokens = concatenated_tokens[len(seq):]
+                    z_tokens = z_tokens[len(seq):]
 
                     # relativize time to the context
                     # NOTE: this portion only thing that happens in triplet-midi but not local-midi
@@ -170,9 +134,8 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen):
                         if ops.max_time(seq, seconds=False) >= max_arrival:
                             stats[4] += 1
                             continue
-
-                    seq = z + seq
-
+                    
+                    seq = z[1:] + seq # remove BOS tag before prepending
                     assert max(seq) < vocab_size
 
                     outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
@@ -180,45 +143,6 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen):
 
     return (seqcount, *stats)
 
-def pack_tokens_local_midi(sequences, output, idx, prepare, factor, config, seqlen):
-    vocab_size = config['size']
-    max_arrival = config['max_time']
-    time_res = config["midi_quantization"]
-    log = output + '.log'
-
-    seqcount = 0
-    stats = 5*[0] # (short, long, too many instruments, too few instruments, inexpressible)
-    with open(output, 'w') as outfile:
-        seq = [] # needs to survive across multiple sequences since a single seq could contain events from different sequences
-        for sequence in tqdm(sequences, desc=f'#{idx}', position=idx+1, leave=True): # sequence represents a singular midifile
-            z = [] # redefine z for this particular sequence
-            with open(log, 'a') as f:
-                f.write(sequence + '\n')
-            
-            with open(sequence, 'r') as midifile:
-                events, truncations, status = tokenize.maybe_tokenize([int(token) for token in midifile.read().split()])
-                
-                recent_tick = 0
-
-                for time, dur, note in zip(events[0::3], events[1::3], events[2::3]): 
-                    if len(seq) < seqlen - len(z):
-                        while time >= round(recent_tick * time_res): # NOTE: could end up exceeding 1024 right here
-                            # do ticks get inserted with their actual time value? -> not a problem anymore because ticks are appended as singleton
-                            seq.append(vocab['tick']) # NOTE: VOCAB ISN'T DEFINED IN CONTEXT
-                            recent_tick += 1
-                        
-                        relativize = round((recent_tick - 1) * time_res) if recent_tick > 0 else 0
-                        seq.append(time - relativize)
-                        seq.append(dur)
-                        seq.append(note)
-                    else:
-                        # append to file and reset sequence
-                        seq = z + seq
-                        outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
-                        seq = []
-                        recent_tick = 0 # reset tick for new sequence
-
-                # add sep token here outside for since events context ended?
 
 def init_worker(lock):
     tqdm.set_lock(lock)
@@ -263,11 +187,11 @@ def main(args):
 
     print('Processing...')
     if args.debug:
-        results = pack_tokens(shards[0], outputs[0], 0, prepare, args.factor, config[0], args.context)
+        results = pack_tokens(shards[0], outputs[0], 0, prepare, args.factor, config[0], args.context, vocab)
         results = [results]
     else:
         with Pool(processes=args.workers, initargs=(RLock(),), initializer=init_worker) as pool:
-            results = pool.starmap(pack_tokens, zip(shards, outputs, range(args.workers), prepare, factor, config, context))
+            results = pool.starmap(pack_tokens, zip(shards, outputs, range(args.workers), prepare, factor, config, context, args.workers*[vocab]))
 
     seqcount, too_short, too_long, many_instr, few_instr, discarded_seqs = (sum(x) for x in zip(*results))
 
