@@ -136,6 +136,7 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen, vocab):
                             continue
                     
                     seq = z[1:] + seq # remove BOS tag before prepending
+                    # maybe need to check if the sequence starts with seq_end or already starts with the new z tag (so equal to any of the flags)
                     assert max(seq) < vocab_size
 
                     outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
