@@ -9,7 +9,7 @@ split="$5"
 factor="$6"
 vocab="$7"
 transcript="$8"
-workers=16
+workers="${9:-16}"
 
 dataset="${data_directory##*/}"
 datafile=$out_directory/"$dataset"."$task"."$split".txt

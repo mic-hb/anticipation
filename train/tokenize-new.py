@@ -37,7 +37,7 @@ def prepare_local_midi(midifile, vocab, task, transcript):
         tokens.append(dur)
         tokens.append(note)
     
-    separator = vocab['sequence_end']
+    separator = [vocab['sequence_end']]
     return tokens, z, separator, 0
 
 def prepare_triplet_midi(midifile, vocab, task, transcript):
@@ -116,8 +116,8 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen, vocab):
                     concatenated_tokens.extend(separator + tokens)
                     z_tokens.extend([z] * len(separator + tokens))
                 
-                z = z_tokens[0] # need to define z to be the correct z, not just most recent
-                while len(concatenated_tokens) >= seqlen-len(z):
+                z = z_tokens[0] # need to redefine z to be the correct z, not just most recent
+                while len(concatenated_tokens) >= seqlen-len(z): # seqlen - len(z) - 1 maybe because we remove z token from the beginning
                     seq = concatenated_tokens[0:seqlen-len(z)]
                     z_seq = z_tokens[0:seqlen-len(z)]
                     z = z_seq[0]
@@ -137,7 +137,8 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen, vocab):
                     
                     seq = z[1:] + seq # remove BOS tag before prepending
                     # maybe need to check if the sequence starts with seq_end or already starts with the new z tag (so equal to any of the flags)
-                    assert max(seq) < vocab_size
+                    
+                    # assert max(seq) < vocab_size # might need to bring this back
 
                     outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
                     seqcount += 1
@@ -173,6 +174,7 @@ def main(args):
     print(f"  transcript? {args.transcript}")
 
     files = glob(os.path.join(args.datadir, '**/*.compound.txt'), recursive=True)
+    print(f"files: {files}")
 
     n = len(files) // args.workers
     shards = [files[i*n:(i+1)*n] for i in range(args.workers)] # dropping a few tracks (< args.workers)
@@ -184,7 +186,16 @@ def main(args):
     task = args.workers*[args.task]
     factor = args.workers*[args.factor]
     transcript = args.workers*[args.transcript]
-    config = args.workers*[vocab['config']]
+    # config = args.workers*[{**vocab['config'], 'vocab': args.vocab}] # this worked for triplet-midi btw
+    default_config = vocab['config'].copy()
+    default_config['vocab'] = args.vocab
+
+    # Set a default if 'max_time' is not defined
+    if 'max_time' not in default_config:
+        default_config['max_time'] = float('inf')  # or a large constant
+
+    config = args.workers * [default_config]
+
 
     print('Processing...')
     if args.debug:

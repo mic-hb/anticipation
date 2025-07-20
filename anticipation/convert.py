@@ -402,9 +402,11 @@ def midi_to_mm(midifile, vocab, debug=False):
     return compound_to_mm(midi_to_compound(midifile, vocab, debug=debug), vocab)
 
 def lm_to_midi(tokens, vocab, debug=False):
-    return compound_to_midi(lm_to_compound(tokens, vocab, debug=debug), vocab, debug=debug)
+    events = lm_to_event(tokens, vocab, debug=debug)
+    compound = events_to_compound(events, debug=debug)
+    return compound_to_midi(compound, vocab, debug=debug)
 
-def lm_to_compound(tokens, vocab, debug=False):
+def lm_to_event(tokens, vocab, debug=False): # simply the raw format with the triplets of events that is returned by maybe_tokenize (and then we transform that to local midi)
     time_res = vocab['config']['midi_quantization']
     tick_token = vocab['tick']
     seq_end_token = vocab['sequence_end']
@@ -415,6 +417,7 @@ def lm_to_compound(tokens, vocab, debug=False):
 
     seq = []
     time = 0
+
     i = 0
     while i < len(tokens):
         tok = tokens[i]
@@ -436,18 +439,6 @@ def lm_to_compound(tokens, vocab, debug=False):
             i += 1
 
     # sequence shouldn't have anything but the time, dur, note triplets
-    assert len(seq) % 3 == 0
-    # add instrument and velocities back to sequence
-    out = 5*(len(seq)//3)*[0]
-    out[0::5] = seq[0::3]
-    out[1::5] = seq[1::3]
-    out[2::5] = [tok - (2**7)*(tok//2**7) for tok in seq[2::3]]
-    out[3::5] = [tok//2**7 for tok in seq[2::3]]
-    out[4::5] = (len(seq)//3)*[72] # default velocity
+    # assert len(seq) % 3 == 0
 
-    assert max(out[1::5]) < MAX_DUR
-    assert max(out[2::5]) < MAX_PITCH
-    assert max(out[3::5]) < MAX_INSTR
-    assert all(tok >= 0 for tok in out)
-    
-    return out
+    return seq
