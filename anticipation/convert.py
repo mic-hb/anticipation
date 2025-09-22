@@ -406,39 +406,38 @@ def lm_to_midi(tokens, vocab, debug=False):
     compound = events_to_compound(events, debug=debug)
     return compound_to_midi(compound, vocab, debug=debug)
 
-def lm_to_event(tokens, vocab, debug=False): # simply the raw format with the triplets of events that is returned by maybe_tokenize (and then we transform that to local midi)
-    time_res = vocab['config']['midi_quantization']
-    tick_token = vocab['tick']
-    seq_end_token = vocab['sequence_end']
-    seq_start_token = vocab['flags']['sequence_start']
-    seq_cold_start = vocab['flags']['cold_start']
-    seq_transcript = vocab['flags']['transcript']
-    seq_anticipation = vocab['flags']['anticipation']
+def lm_to_event(tokens, vocab, debug=True):
+    time_res = vocab["config"]["midi_quantization"]
+    tick_token = vocab["tick"]
+    seq_end_token = vocab["sequence_end"]
+    flags = set(vocab.get("flags", {}).values())
 
     seq = []
-    time = 0
-
+    time_ticks = 0
     i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok == tick_token:
-            time += 1
-            i += 1
-        elif tok == seq_end_token: # end of sequence so rest for next 'song'
-            time = 0
-            i += 1
-        elif tok not in {seq_start_token, seq_cold_start, seq_transcript, seq_anticipation}:
-            if tok >= 0 and tok <= 99: # time token
-                delta = tokens[i]
-                abs_time = round(time * time_res) + delta if time > 0 else delta
-                seq.append(abs_time)
-            else: # dur or note
-                seq.append(tok)
-            i += 1
-        else:
-            i += 1
+    n = len(tokens)
 
-    # sequence shouldn't have anything but the time, dur, note triplets
-    # assert len(seq) % 3 == 0
+    while i < n:
+        tok = tokens[i]
+
+        if tok == tick_token:
+            time_ticks += 1
+            i += 1
+        elif tok == seq_end_token:
+            time_ticks = 0
+            i += 1
+        elif tok in flags:
+            i += 1
+        else: # need 3 tokens: [delta, dur, note]
+            if i + 2 >= n:
+                print(f"WARNING: truncated event at end of sequence (idx={i}, len={n})")
+                break
+
+            delta, dur, note = tokens[i], tokens[i+1], tokens[i+2]
+            abs_time = (round((time_ticks - 1) * time_res) + delta) if time_ticks > 0 else delta
+            seq.extend([abs_time, dur, note])
+            i += 3
+
+    assert len(seq) % 3 == 0
 
     return seq

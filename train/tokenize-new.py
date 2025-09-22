@@ -11,7 +11,6 @@ import numpy as np
 from anticipation import ops
 from anticipation import tokenize
 
-
 def prepare_local_midi(midifile, vocab, task, transcript):
     with open(midifile, 'r') as f:
         events, truncations, status = tokenize.maybe_tokenize([int(token) for token in f.read().split()])
@@ -21,7 +20,7 @@ def prepare_local_midi(midifile, vocab, task, transcript):
     if task == 'autoregress':
         z = [vocab['flags']['sequence_start']] # BOS tag, could be more in the future
         # no "if transcript"
-    else: # anticipation
+    else: # anticipation, implementing later
         pass
     
     time_res = vocab["config"]["midi_quantization"]
@@ -36,6 +35,7 @@ def prepare_local_midi(midifile, vocab, task, transcript):
         tokens.append(time - relativize)
         tokens.append(dur)
         tokens.append(note)
+        
     
     separator = [vocab['sequence_end']]
     return tokens, z, separator, 0
@@ -134,11 +134,11 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen, vocab):
                         if ops.max_time(seq, seconds=False) >= max_arrival:
                             stats[4] += 1
                             continue
-                    
+
                     seq = z[1:] + seq # remove BOS tag before prepending
                     # maybe need to check if the sequence starts with seq_end or already starts with the new z tag (so equal to any of the flags)
                     
-                    # assert max(seq) < vocab_size # might need to bring this back
+                    assert max(seq) < vocab_size # NOTE: This is failing right now
 
                     outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
                     seqcount += 1
@@ -186,7 +186,7 @@ def main(args):
     task = args.workers*[args.task]
     factor = args.workers*[args.factor]
     transcript = args.workers*[args.transcript]
-    # config = args.workers*[{**vocab['config'], 'vocab': args.vocab}] # this worked for triplet-midi btw
+    # config = args.workers*[{**vocab['config'], 'vocab': args.vocab}] # this worked before for triplet-midi
     default_config = vocab['config'].copy()
     default_config['vocab'] = args.vocab
 

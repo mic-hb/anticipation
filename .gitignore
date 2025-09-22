@@ -1,2 +1,4 @@
 **/__pycache__/
 anticipation.egg-info
+build/
+output/
