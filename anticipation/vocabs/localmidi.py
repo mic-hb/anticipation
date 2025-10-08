@@ -24,19 +24,22 @@ EVENT_OFFSET = 0
 TIME_OFFSET = EVENT_OFFSET + 0
 DUR_OFFSET = EVENT_OFFSET + MAX_TIME
 NOTE_OFFSET = DUR_OFFSET + MAX_DUR
-TICK = NOTE_OFFSET + MAX_NOTE
-EOS = TICK+1
 
 # the control block
-CONTROL_OFFSET = NOTE_OFFSET + MAX_NOTE + 2
-ATIME_OFFSET = CONTROL_OFFSET + 0        # anticipated arrival times
+CONTROL_OFFSET = NOTE_OFFSET + MAX_NOTE
+ATIME_OFFSET = CONTROL_OFFSET + 0
+ADUR_OFFSET = ATIME_OFFSET + MAX_TIME
+ANOTE_OFFSET = ADUR_OFFSET + MAX_DUR
 
-GLOBAL_CONTROL_OFFSET = ATIME_OFFSET + MAX_TIME
+SPECIAL_OFFSET = ANOTE_OFFSET + MAX_NOTE
+TICK = SPECIAL_OFFSET + 0
+SEPARATOR = SPECIAL_OFFSET + 1
+
+GLOBAL_CONTROL_OFFSET = SPECIAL_OFFSET + 2
 CONTROL_END  = GLOBAL_CONTROL_OFFSET + 0
-BOS = GLOBAL_CONTROL_OFFSET + 1
-COLD_START = GLOBAL_CONTROL_OFFSET + 2
-TRANSCRIPT = GLOBAL_CONTROL_OFFSET + 3
-DELTA_OFFSET = GLOBAL_CONTROL_OFFSET + 4
+COLD_START = GLOBAL_CONTROL_OFFSET + 1
+TRANSCRIPT = GLOBAL_CONTROL_OFFSET + 2
+DELTA_OFFSET = GLOBAL_CONTROL_OFFSET + 3
 VOCAB_SIZE = DELTA_OFFSET + MAX_DELTA
 
 vocab = {
@@ -57,17 +60,16 @@ vocab = {
     'control_offset' : CONTROL_OFFSET,
     'global_control_offset' : CONTROL_OFFSET,
 
-    # special "notes"
+    # special tokens
 
     'tick' : TICK,
-    'sequence_end' : EOS,
+    'separator' : SEPARATOR,
 
     # global control tokens
 
     'control_end' : CONTROL_END,         # marks the end of the global control prefix
 
     'flags' : {                          # flags that are on appear in this order
-        'sequence_start' : BOS,
         'cold_start' : COLD_START,
         'transcript' : TRANSCRIPT,
         'anticipation': DELTA_OFFSET,
@@ -88,13 +90,16 @@ if __name__ == '__main__':
     print('  -> arrival time offset :', TIME_OFFSET)
     print('  -> duration offset :', DUR_OFFSET)
     print('  -> note offset :', NOTE_OFFSET)
-    print('    * tick :', TICK)
-    print('    * eos:', EOS)
+    print('Midi Control Block:', CONTROL_OFFSET)
     print('  -> anticipated arrival time offset:', ATIME_OFFSET)
+    print('  -> anticipated duration offset:', ADUR_OFFSET)
+    print('  -> anticipated note offset:', ANOTE_OFFSET)
+    print('Special Tokens:', SPECIAL_OFFSET)
+    print('    * tick :', TICK)
+    print('    * separator:', SEPARATOR)
     print('Global Control Block:', GLOBAL_CONTROL_OFFSET)
     print('  -> end of control prefix:', CONTROL_END)
     print('  -> global control flags:')
-    print('    * bos:', BOS)
     print('    * cold start:', COLD_START)
     print('    * transcript:', TRANSCRIPT)
     print(f'    * anticipation interval (range): {DELTA_OFFSET}-{DELTA_OFFSET+MAX_DELTA}')

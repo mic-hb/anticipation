@@ -19,7 +19,7 @@ def prepare_local_midi(midifile, tripletmidivocab, localmidivocab, task, transcr
         return events, [], [], status
     
     if task == 'autoregress':
-        z = [localmidivocab['flags']['sequence_start']] # BOS tag, could be more in the future
+        z = [localmidivocab['control_end']] # BOS tag, could be more in the future
         # no "if transcript"
     else: # anticipation, implementing later
         pass
@@ -42,11 +42,8 @@ def prepare_local_midi(midifile, tripletmidivocab, localmidivocab, task, transcr
             # print(f"dur: {dur}")
             tokens.append(note - tripletmidivocab['note_offset'] + localmidivocab['note_offset']) 
             # print(f"note: {note}")
-        else:
-            print("yes")
-        
     
-    separator = [localmidivocab['sequence_end']]
+    separator = [localmidivocab['separator']]
     return tokens, z, separator, 0
 
 def prepare_triplet_midi(midifile, vocab, task, transcript):
@@ -112,7 +109,7 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen, vocab):
 
             for _ in range(factor):
                 tokens, z, separator, status = prepare(sequence)
-                print(f"max of tokens: {max(tokens)}")
+                #print(f"max of tokens: {max(tokens)}")
 
                 if status > 0:
                     stats[status-1] += 1
@@ -120,15 +117,11 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen, vocab):
 
                 # write out full contexts to file
                 # separator is None for local-midi
-                if config['vocab'] == 'local-midi':
-                    concatenated_tokens.extend(separator + z + tokens) # this is entirely new sequence being concatenated to list, so new z
-                    z_tokens.extend([z] * len(separator + z + tokens))
-                else:
-                    concatenated_tokens.extend(separator + tokens)
-                    z_tokens.extend([z] * len(separator + tokens))
-                
+                concatenated_tokens.extend(separator + z + tokens) # this is entirely new sequence being concatenated to list, so new z
+                z_tokens.extend([z] * len(separator + z + tokens))
+
                 z = z_tokens[0] # need to redefine z to be the correct z, not just most recent
-                while len(concatenated_tokens) >= seqlen-len(z): # seqlen - len(z) - 1 maybe because we remove z token from the beginning
+                while len(concatenated_tokens) >= seqlen-len(z):
                     seq = concatenated_tokens[0:seqlen-len(z)]
                     z_seq = z_tokens[0:seqlen-len(z)]
                     z = z_seq[0]
@@ -136,21 +129,9 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen, vocab):
                     concatenated_tokens = concatenated_tokens[len(seq):]
                     z_tokens = z_tokens[len(seq):]
 
-                    # relativize time to the context
-                    # NOTE: this portion only thing that happens in triplet-midi but not local-midi
-
-                    if config['vocab'] == 'triplet-midi':
-                        seq = ops.translate(seq, -ops.min_time(seq, seconds=False), seconds=False)
-                        assert ops.min_time(seq, seconds=False) == 0
-                        if ops.max_time(seq, seconds=False) >= max_arrival:
-                            stats[4] += 1
-                            continue
-
-                    seq = z[1:] + seq # remove BOS tag before prepending
-                    # maybe need to check if the sequence starts with seq_end or already starts with the new z tag (so equal to any of the flags)
+                    seq = z + seq
                     
-                    # print(f"max seq: {max(seq)}")
-                    assert max(seq) < vocab_size # NOTE: might not be failing anymore
+                    assert max(seq) < vocab_size
 
                     outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
                     seqcount += 1
@@ -191,7 +172,7 @@ def main(args):
     print(f"  transcript? {args.transcript}")
 
     files = glob(os.path.join(args.datadir, '**/*.compound.txt'), recursive=True)
-    print(f"files: {files}")
+    #print(f"files: {files}")
 
     n = len(files) // args.workers
     shards = [files[i*n:(i+1)*n] for i in range(args.workers)] # dropping a few tracks (< args.workers)
