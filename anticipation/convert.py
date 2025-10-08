@@ -9,6 +9,8 @@ import mido
 from anticipation.config import *
 from anticipation.vocab import *
 from anticipation.ops import unpad
+from anticipation.vocabs.tripletmidi import vocab as tripletmidivocab
+from anticipation.vocabs.localmidi import vocab as localmidivocab
 
 
 def midi_to_interarrival(midifile, debug=False, stats=False):
@@ -294,7 +296,9 @@ def compound_to_events(tokens, stats=False):
 
 
 def events_to_compound(tokens, debug=False):
+    print(f"prev token length: {len(tokens)}")
     tokens = unpad(tokens)
+    print(len(tokens))
 
     # move all tokens to zero-offset for synthesis
     tokens = [tok - CONTROL_OFFSET if tok >= CONTROL_OFFSET and tok != SEPARATOR else tok
@@ -393,6 +397,7 @@ def compound_to_mm(tokens, vocab, stats=False):
 
 
 def events_to_midi(tokens, vocab, debug=False):
+    print(f"even prev token len: {len(tokens)}")
     return compound_to_midi(events_to_compound(tokens, debug=debug), vocab, debug=debug)
 
 def midi_to_events(midifile, debug=False):
@@ -402,11 +407,12 @@ def midi_to_mm(midifile, vocab, debug=False):
     return compound_to_mm(midi_to_compound(midifile, vocab, debug=debug), vocab)
 
 def lm_to_midi(tokens, vocab, debug=False):
-    events = lm_to_event(tokens, vocab, debug=debug)
+    # events = lm_to_event(tokens, vocab, debug=debug)
+    events = lm_to_event_variant(tokens, vocab, debug=debug)
     compound = events_to_compound(events, debug=debug)
     return compound_to_midi(compound, vocab, debug=debug)
 
-def lm_to_event(tokens, vocab, debug=True):
+def lm_to_event(tokens, vocab, debug=True): # add the local midi offset and then subtract (should be able to exactly recover the offset)
     time_res = vocab["config"]["midi_quantization"]
     tick_token = vocab["tick"]
     seq_end_token = vocab["sequence_end"]
@@ -438,6 +444,49 @@ def lm_to_event(tokens, vocab, debug=True):
             seq.extend([abs_time, dur, note])
             i += 3
 
+    assert len(seq) % 3 == 0
+
+    return seq
+
+
+def lm_to_event_variant(tokens, vocab, debug=True): # add the local midi offset and then subtract (should be able to exactly recover the offset)
+    print(len(tokens))
+    time_res = vocab["config"]["midi_quantization"]
+    tick_token = vocab["tick"]
+    seq_end_token = vocab["sequence_end"]
+    flags = set(vocab.get("flags", {}).values()) # includes BOS token
+
+    seq = []
+    time_ticks = 0
+    i = 0
+    n = len(tokens)
+
+    while i < n:
+        tok = tokens[i]
+
+        if tok == tick_token:
+            time_ticks += 1
+            i += 1
+        elif tok == seq_end_token:
+            time_ticks = 0
+            i += 1
+        elif tok in flags:
+            i += 1
+        else: # need 3 tokens: [delta, dur, note]
+            if i + 2 >= n:
+                print(f"WARNING: truncated event at end of sequence (idx={i}, len={n})")
+                while (i < n):
+                    print(f"{i}th token: {tokens[i]}")
+                    i += 1
+                break
+            
+            # adding back the offsets
+            delta, dur, note = tokens[i], tokens[i+1] + tripletmidivocab['duration_offset'] - localmidivocab['duration_offset'], tokens[i+2] + tripletmidivocab['note_offset'] - localmidivocab['note_offset']
+
+            abs_time = (round((time_ticks - 1) * time_res) + delta) if time_ticks > 0 else delta
+            seq.extend([abs_time, dur, note])
+            i += 3
+    
     assert len(seq) % 3 == 0
 
     return seq

@@ -28,10 +28,13 @@ if __name__ == '__main__':
 
             if args.vocab == 'triplet-midi':
                 from anticipation.vocabs.tripletmidi import vocab
+                print(f"sonify token length: {len(tokens)}")
                 tokens = [tok for tok in tokens if tok < vocab['special_offset']]
+                print(f"after removing special offset: {len(tokens)}")
                 assert(len(tokens) % 3 == 0)
                 mid = events_to_midi(tokens, vocab)
             else: # vocab = local-midi
                 from anticipation.vocabs.localmidi import vocab
+                # tokens = [tok for tok in tokens if tok < vocab['special_offset']]
                 mid = lm_to_midi(tokens, vocab)
             mid.save(f'output/{Path(args.filename).stem}{i}.mid')

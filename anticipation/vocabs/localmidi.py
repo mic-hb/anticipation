@@ -52,6 +52,7 @@ vocab = {
 
     'event_offset' : EVENT_OFFSET,
     'time_offset' : TIME_OFFSET,
+    'duration_offset' : DUR_OFFSET,
     'note_offset' : NOTE_OFFSET,
     'control_offset' : CONTROL_OFFSET,
     'global_control_offset' : CONTROL_OFFSET,

@@ -11,33 +11,42 @@ import numpy as np
 from anticipation import ops
 from anticipation import tokenize
 
-def prepare_local_midi(midifile, vocab, task, transcript):
+def prepare_local_midi(midifile, tripletmidivocab, localmidivocab, task, transcript):
     with open(midifile, 'r') as f:
         events, truncations, status = tokenize.maybe_tokenize([int(token) for token in f.read().split()])
+        # print(f"max of events: {max(events)}")
     if status > 0:
         return events, [], [], status
     
     if task == 'autoregress':
-        z = [vocab['flags']['sequence_start']] # BOS tag, could be more in the future
+        z = [localmidivocab['flags']['sequence_start']] # BOS tag, could be more in the future
         # no "if transcript"
     else: # anticipation, implementing later
         pass
     
-    time_res = vocab["config"]["midi_quantization"]
+    time_res = localmidivocab["config"]["midi_quantization"]
     recent_tick = 0
     tokens = []
 
+    # separators are in groups of three here, strip them out
+    # fix the note durations by subtracting offset and then adding the note offset
     for time, dur, note in zip(events[0::3], events[1::3], events[2::3]):
-        while time >= round(recent_tick * time_res):
-            tokens.append(vocab['tick']) # insert tick
-            recent_tick += 1
-        relativize = round((recent_tick - 1) * time_res) if recent_tick > 0 else 0
-        tokens.append(time - relativize)
-        tokens.append(dur)
-        tokens.append(note)
+        if time != tripletmidivocab['separator'] and dur != tripletmidivocab['separator'] and note != tripletmidivocab['separator']: # separator in convert.py is pulled from vocab.py but it has same value as tripletmidivocab's separator (i.e. 55025) --> skip any of the separators
+            while time >= round(recent_tick * time_res):
+                tokens.append(localmidivocab['tick']) # insert tick
+                recent_tick += 1
+            relativize = round((recent_tick - 1) * time_res) if recent_tick > 0 else 0
+            tokens.append(time - relativize)
+            # print(f"time: {time - relativize}")
+            tokens.append(dur - tripletmidivocab['duration_offset'] + localmidivocab['duration_offset'])
+            # print(f"dur: {dur}")
+            tokens.append(note - tripletmidivocab['note_offset'] + localmidivocab['note_offset']) 
+            # print(f"note: {note}")
+        else:
+            print("yes")
         
     
-    separator = [vocab['sequence_end']]
+    separator = [localmidivocab['sequence_end']]
     return tokens, z, separator, 0
 
 def prepare_triplet_midi(midifile, vocab, task, transcript):
@@ -103,6 +112,8 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen, vocab):
 
             for _ in range(factor):
                 tokens, z, separator, status = prepare(sequence)
+                print(f"max of tokens: {max(tokens)}")
+
                 if status > 0:
                     stats[status-1] += 1
                     break
@@ -138,7 +149,8 @@ def pack_tokens(sequences, output, idx, prepare, factor, config, seqlen, vocab):
                     seq = z[1:] + seq # remove BOS tag before prepending
                     # maybe need to check if the sequence starts with seq_end or already starts with the new z tag (so equal to any of the flags)
                     
-                    assert max(seq) < vocab_size # NOTE: This is failing right now
+                    # print(f"max seq: {max(seq)}")
+                    assert max(seq) < vocab_size # NOTE: might not be failing anymore
 
                     outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
                     seqcount += 1
@@ -154,12 +166,17 @@ def main(args):
     print('Tokenizing a dataset at:', args.datadir)
 
     if args.vocab == 'triplet-midi':
-        from anticipation.vocabs.tripletmidi import vocab
-        prepare = partial(prepare_triplet_midi, vocab=vocab, task=args.task, transcript=args.transcript)
+        from anticipation.vocabs.tripletmidi import vocab as tripletmidivocab
+        prepare = partial(prepare_triplet_midi, vocab=tripletmidivocab, task=args.task, transcript=args.transcript)
         #lambda midifile: prepare_triplet_midi(midifile, vocab, args.task, args.transcript)
     elif args.vocab == 'local-midi':
-        from anticipation.vocabs.localmidi import vocab
-        prepare = partial(prepare_local_midi, vocab=vocab, task=args.task, transcript=args.transcript)
+        from anticipation.vocabs.tripletmidi import vocab as tripletmidivocab
+        from anticipation.vocabs.localmidi import vocab as localmidivocab
+
+        # print("triplet vocab keys:", tripletmidivocab.keys())
+        # print("local vocab keys:", localmidivocab.keys())
+
+        prepare = partial(prepare_local_midi, tripletmidivocab=tripletmidivocab, localmidivocab=localmidivocab, task=args.task, transcript=args.transcript)
     else:
         raise ValueError(f'Invalid vocabulary type "{args.vocab}"')
 
@@ -187,7 +204,12 @@ def main(args):
     factor = args.workers*[args.factor]
     transcript = args.workers*[args.transcript]
     # config = args.workers*[{**vocab['config'], 'vocab': args.vocab}] # this worked before for triplet-midi
-    default_config = vocab['config'].copy()
+    
+    if args.vocab == 'local-midi':
+        default_config = localmidivocab['config'].copy()
+    else:
+        default_config = tripletmidivocab['config'].copy()
+
     default_config['vocab'] = args.vocab
 
     # Set a default if 'max_time' is not defined
@@ -196,14 +218,15 @@ def main(args):
 
     config = args.workers * [default_config]
 
+    chosen_vocab = localmidivocab if args.vocab == 'local-midi' else tripletmidivocab
 
     print('Processing...')
     if args.debug:
-        results = pack_tokens(shards[0], outputs[0], 0, prepare, args.factor, config[0], args.context, vocab)
+        results = pack_tokens(shards[0], outputs[0], 0, prepare, args.factor, config[0], args.context, chosen_vocab)
         results = [results]
     else:
         with Pool(processes=args.workers, initargs=(RLock(),), initializer=init_worker) as pool:
-            results = pool.starmap(pack_tokens, zip(shards, outputs, range(args.workers), prepare, factor, config, context, args.workers*[vocab]))
+            results = pool.starmap(pack_tokens, zip(shards, outputs, range(args.workers), prepare, factor, config, context, args.workers*[chosen_vocab]))
 
     seqcount, too_short, too_long, many_instr, few_instr, discarded_seqs = (sum(x) for x in zip(*results))
 
