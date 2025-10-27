@@ -235,6 +235,7 @@ def compound_to_midi(tokens, vocab, debug=False):
                         idx = 9
                         message = mido.Message('program_change', channel=idx, program=0)
                     else:
+                        print(f"channel: {idx}")
                         message = mido.Message('program_change', channel=idx, program=instrument)
                     track.append(message)
                     num_tracks += 1
@@ -294,7 +295,6 @@ def compound_to_events(tokens, stats=False):
 
     return tokens
 
-
 def events_to_compound(tokens, debug=False):
     print(f"prev token length: {len(tokens)}")
     tokens = unpad(tokens)
@@ -339,7 +339,6 @@ def events_to_compound(tokens, debug=False):
     assert all(tok >= 0 for tok in out)
 
     return out
-
 
 def compound_to_mm(tokens, vocab, stats=False):
     assert len(tokens) % 5 == 0
@@ -407,16 +406,15 @@ def midi_to_mm(midifile, vocab, debug=False):
     return compound_to_mm(midi_to_compound(midifile, vocab, debug=debug), vocab)
 
 def lm_to_midi(tokens, vocab, debug=False):
-    # events = lm_to_event(tokens, vocab, debug=debug)
-    events = lm_to_event_variant(tokens, vocab, debug=debug)
+    events = lm_to_event(tokens, vocab, debug=debug)
     compound = events_to_compound(events, debug=debug)
     return compound_to_midi(compound, vocab, debug=debug)
 
-def lm_to_event(tokens, vocab, debug=True): # add the local midi offset and then subtract (should be able to exactly recover the offset)
-    time_res = vocab["config"]["midi_quantization"]
-    tick_token = vocab["tick"]
-    seq_end_token = vocab["sequence_end"]
-    flags = set(vocab.get("flags", {}).values())
+def lm_to_event(tokens, vocab, debug=False):
+    time_res = localmidivocab["config"]["midi_quantization"]
+    tick_token = localmidivocab["tick"]
+    sep = localmidivocab['separator']
+    flags = set(localmidivocab.get("flags", {}).values()) if "flags" in localmidivocab else set()
 
     seq = []
     time_ticks = 0
@@ -429,64 +427,26 @@ def lm_to_event(tokens, vocab, debug=True): # add the local midi offset and then
         if tok == tick_token:
             time_ticks += 1
             i += 1
-        elif tok == seq_end_token:
-            time_ticks = 0
+        elif tok in flags or tok == vocab['control_end'] or tok == localmidivocab["separator"]:
             i += 1
-        elif tok in flags:
-            i += 1
-        else: # need 3 tokens: [delta, dur, note]
+        else: # need [delta, dur, note]
             if i + 2 >= n:
-                print(f"WARNING: truncated event at end of sequence (idx={i}, len={n})")
+                if debug:
+                    print(f"truncated event at idx={i}")
                 break
 
-            delta, dur, note = tokens[i], tokens[i+1], tokens[i+2]
-            abs_time = (round((time_ticks - 1) * time_res) + delta) if time_ticks > 0 else delta
+            delta_local = tokens[i]
+            dur_local = tokens[i + 1]
+            note_local = tokens[i + 2]
+
+            dur = dur_local - localmidivocab["duration_offset"] + tripletmidivocab["duration_offset"]
+            note = note_local - localmidivocab["note_offset"] + tripletmidivocab["note_offset"]
+
+            abs_time = (round((time_ticks - 1) * time_res) + delta_local) if time_ticks > 0 else delta_local
+
             seq.extend([abs_time, dur, note])
             i += 3
 
-    assert len(seq) % 3 == 0
-
-    return seq
-
-
-def lm_to_event_variant(tokens, vocab, debug=True): # add the local midi offset and then subtract (should be able to exactly recover the offset)
-    print(len(tokens))
-    time_res = vocab["config"]["midi_quantization"]
-    tick_token = vocab["tick"]
-    seq_end_token = vocab["sequence_end"]
-    flags = set(vocab.get("flags", {}).values()) # includes BOS token
-
-    seq = []
-    time_ticks = 0
-    i = 0
-    n = len(tokens)
-
-    while i < n:
-        tok = tokens[i]
-
-        if tok == tick_token:
-            time_ticks += 1
-            i += 1
-        elif tok == seq_end_token:
-            time_ticks = 0
-            i += 1
-        elif tok in flags:
-            i += 1
-        else: # need 3 tokens: [delta, dur, note]
-            if i + 2 >= n:
-                print(f"WARNING: truncated event at end of sequence (idx={i}, len={n})")
-                while (i < n):
-                    print(f"{i}th token: {tokens[i]}")
-                    i += 1
-                break
-            
-            # adding back the offsets
-            delta, dur, note = tokens[i], tokens[i+1] + tripletmidivocab['duration_offset'] - localmidivocab['duration_offset'], tokens[i+2] + tripletmidivocab['note_offset'] - localmidivocab['note_offset']
-
-            abs_time = (round((time_ticks - 1) * time_res) + delta) if time_ticks > 0 else delta
-            seq.extend([abs_time, dur, note])
-            i += 3
-    
     assert len(seq) % 3 == 0
 
     return seq
