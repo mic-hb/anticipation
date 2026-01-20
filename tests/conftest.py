@@ -49,11 +49,15 @@ def patch_config_and_reload(monkeypatch: pytest.MonkeyPatch) -> TestConfigPatche
     importlib.reload(anticipation_vocab)
     importlib.reload(anticipation_tokenize_cl)
 
+def _parse_midi_tokenized_text(midi_token_string: str) -> list[list[int]]:
+    sequences = midi_token_string.strip().split("\n")
+    return [list(map(int, x.split(" "))) for x in sequences]
 
 def get_tokens_from_midi_file(
     midi_file_path: Path,
     augment_factor: int = 10,
-    return_original_compound: bool = False
+    return_original_compound: bool = False,
+    do_random_augmentation: bool = True,
 ) -> dict[str, Any]:
     assert midi_file_path.exists()
     assert midi_file_path.is_file()
@@ -80,11 +84,13 @@ def get_tokens_from_midi_file(
             output_fname,
             # 1 = standard AR training
             # 10 = lowest acceptable anticipation augment factor
-            augment_factor=augment_factor
+            augment_factor=augment_factor,
+            do_random_augmentation=do_random_augmentation,
         )
-        midi_tokens = Path(output_fname).read_text()
+        midi_tokens: str = Path(output_fname).read_text()
+        parsed_midi_tokens = _parse_midi_tokenized_text(midi_tokens)
         parse_info = {
-            "midi_tokens": midi_tokens,
+            "midi_tokens": parsed_midi_tokens,
             "seqcount": seqcount,
             "rest_count": rest_count,
             "num_too_short": num_too_short,

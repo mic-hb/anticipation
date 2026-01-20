@@ -23,7 +23,8 @@ def extract_spans(all_events, rate):
         # end of an anticipated span; decide when to do it again (next_span)
         if span and time >= end_span:
             span = False
-            next_span = time+int(TIME_RESOLUTION*np.random.exponential(1./rate))
+            d = np.random.exponential(1./rate)
+            next_span = time+int(TIME_RESOLUTION*d)
 
         # anticipate a 3-second span
         if (not span) and time >= next_span:
@@ -72,7 +73,7 @@ def extract_instruments(all_events, instruments):
     return events, controls
 
 
-def maybe_tokenize(compound_tokens):
+def maybe_tokenize(compound_tokens: list[int]):
     # skip sequences with very few events
     if len(compound_tokens) < COMPOUND_SIZE*MIN_TRACK_EVENTS:
         return None, None, 1 # short track
@@ -135,7 +136,7 @@ def tokenize_ia(datafiles, output, augment_factor, idx=0, debug=False):
     return (seqcount, rest_count, stats[0], stats[1], stats[2], stats[3], all_truncations)
 
 
-def tokenize(datafiles, output, augment_factor, idx=0, debug=False):
+def tokenize(datafiles, output, augment_factor, idx=0, do_random_augmentation: bool = True, debug: bool = False):
     tokens = []
     all_truncations = 0
     seqcount = rest_count = 0
@@ -167,8 +168,11 @@ def tokenize(datafiles, output, augment_factor, idx=0, debug=False):
                     events, controls = extract_spans(all_events, lmbda)
                 elif k % 10 < 6:
                     # random augmentation
-                    r = np.random.randint(1,ANTICIPATION_RATES)
-                    events, controls = extract_random(all_events, r)
+                    if do_random_augmentation:
+                        r = np.random.randint(1,ANTICIPATION_RATES)
+                        events, controls = extract_random(all_events, r)
+                    else:
+                        continue
                 else:
                     if len(instruments) > 1:
                         # instrument augmentation: at least one, but not all instruments
