@@ -36,18 +36,25 @@ def patch_config_and_reload(monkeypatch: pytest.MonkeyPatch) -> TestConfigPatche
     """
     import anticipation.tokenize as anticipation_tokenize_cl
     import anticipation.vocab as anticipation_vocab
+    import anticipation.ops as anticipation_ops
     from anticipation import config as anticipation_config
     def _apply(**kwargs):
         for k, v in kwargs.items():
             monkeypatch.setattr(anticipation_config, k, v)
+
+        # reload everything that depends on config but not config itself
+        # this propagates our test-time changes throughout the code
         importlib.reload(anticipation_vocab)
         importlib.reload(anticipation_tokenize_cl)
+        importlib.reload(anticipation_ops)
     yield _apply
+
     # undo any changes done to the config by reloading it (and things
     # that depend on it) during teardown
     importlib.reload(anticipation_config)
     importlib.reload(anticipation_vocab)
     importlib.reload(anticipation_tokenize_cl)
+    importlib.reload(anticipation_ops)
 
 def _parse_midi_tokenized_text(midi_token_string: str) -> list[list[int]]:
     sequences = midi_token_string.strip().split("\n")

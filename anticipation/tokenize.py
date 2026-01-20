@@ -12,9 +12,11 @@ from anticipation.vocab import *
 from anticipation.convert import compound_to_events, midi_to_interarrival
 
 
+
 def extract_spans(all_events, rate):
     events = []
     controls = []
+    spans = []
     span = True
     next_span = end_span = TIME_OFFSET+0
     for time, dur, note in zip(all_events[0::3],all_events[1::3],all_events[2::3]):
@@ -25,11 +27,14 @@ def extract_spans(all_events, rate):
             span = False
             d = np.random.exponential(1./rate)
             next_span = time+int(TIME_RESOLUTION*d)
+            # tuples of [(start_time, end_time),...]
+            spans.append((next_span, ))
 
         # anticipate a 3-second span
         if (not span) and time >= next_span:
             span = True
             end_span = time + DELTA*TIME_RESOLUTION
+            spans.append((*spans.pop(-1), end_span))
 
         if span:
             # mark this event as a control
@@ -37,7 +42,7 @@ def extract_spans(all_events, rate):
         else:
             events.extend([time, dur, note])
 
-    return events, controls
+    return events, controls, spans
 
 
 ANTICIPATION_RATES = 10
@@ -165,7 +170,7 @@ def tokenize(datafiles, output, augment_factor, idx=0, do_random_augmentation: b
                 elif k % 10 == 1:
                     # span augmentation
                     lmbda = .05
-                    events, controls = extract_spans(all_events, lmbda)
+                    events, controls, _ = extract_spans(all_events, lmbda)
                 elif k % 10 < 6:
                     # random augmentation
                     if do_random_augmentation:
