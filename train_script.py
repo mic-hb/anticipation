@@ -3,6 +3,7 @@ import argparse
 from typing import Dict, List, Optional, Any
 
 import torch
+
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
@@ -85,6 +86,18 @@ class GPT2LightningModule(pl.LightningModule):
             rank_zero_info(f"Loaded pre-trained model from {pretrained_checkpoint}")
         else:
             self.model = GPT2LMHeadModel(config)
+
+        # if pretrained_checkpoint:
+        #     rank_zero_info(f"Loading pre-trained model from {pretrained_checkpoint}")
+        #     self.model = GPT2LMHeadModel.from_pretrained(
+        #         pretrained_checkpoint,
+        #         config=config,
+        #         low_cpu_mem_usage=True,
+        #         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        #         device_map=None   # <- load fully on CPU first
+        #     )
+        # else:
+        #     self.model = GPT2LMHeadModel(config)
 
         self.model.gradient_checkpointing_enable()
         self.model.config.bos_token_id = self.model.config.eos_token_id = 0
@@ -225,7 +238,11 @@ class HuggingFaceCheckpoint(ModelCheckpoint):
         step_dir = os.path.join(self.dirpath, f"step-{trainer.global_step}")
 
         raw_model = pl_module.model if hasattr(pl_module, "model") else pl_module
-        raw_model.save_pretrained(step_dir)
+        raw_model.save_pretrained(
+            step_dir,
+            safe_serialization=True,
+            max_shard_size="2GB"
+        )
 
 
 def main(args):
@@ -296,7 +313,6 @@ def main(args):
 
     trainer.fit(model)
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GPT-2 training script using PyTorch Lightning")
     parser.add_argument("--data_dir", type=str, help="Output directory for checkpoints")
@@ -308,17 +324,17 @@ if __name__ == "__main__":
     parser.add_argument("--seq_len", type=int, default=1024, help="Dataset sequence length")
         
     # Model parameters
-    parser.add_argument("--hidden_dim", type=int, default=512, help="Model hidden dimensions")
-    parser.add_argument("--num_heads", type=int, default=6, help="Model number of attention heads")
-    parser.add_argument("--num_layers", type=int, default=6, help="Model number of layers")
+    parser.add_argument("--hidden_dim", type=int, default=768, help="Model hidden dimensions") # 768
+    parser.add_argument("--num_heads", type=int, default=12, help="Model number of attention heads") # 12
+    parser.add_argument("--num_layers", type=int, default=12, help="Model number of layers") # 12
     parser.add_argument("--embed_pdrop", type=float, default=0.1, help="Apply embedding dropout")
     parser.add_argument("--resid_pdrop", type=float, default=0.1, help="Apply residual dropout")
-        
+
     # Optimization parameters
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--num_train_steps", type=int, default=50000, help="Number of training steps")
+    parser.add_argument("--num_train_steps", type=int, default=100000, help="Number of training steps") #100000
     parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--train_batch_size", type=int, default=512, help="Batch size for training")
+    parser.add_argument("--train_batch_size", type=int, default=512, help="Batch size for training") # keep 512 batch size
     parser.add_argument("--eval_batch_size", type=int, default=128, help="Batch size for evaluation")
     parser.add_argument("--warmup_steps", type=int, default=200, help="Number of warmup steps")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay")
@@ -326,11 +342,11 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
     parser.add_argument("--bf16", action="store_true", help="Use bfloat16 mixed precision training")
     parser.add_argument("--steps_per_eval", type=int, default=1000, help="Number of steps between validation evals")
-    parser.add_argument("--steps_per_checkpoint", type=int, default=1000, help="Number of steps between checkpoints")
+    parser.add_argument("--steps_per_checkpoint", type=int, default=1000, help="Number of steps between checkpoints") #set back to 1000
     
     # System parameters
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes")
-    parser.add_argument("--gpus_per_node", type=int, default=1, help="Number of GPUs per node")
+    parser.add_argument("--gpus_per_node", type=int, default=1, help="Number of GPUs per node") # 4 gpus
     
     args = parser.parse_args()
     
