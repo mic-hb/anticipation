@@ -30,6 +30,7 @@ def _events_to_df(events: Iterable[Event]) -> pd.DataFrame:
                 e.midi_note(),
                 e.note().to_name(),
                 e.special_code,
+                e.is_control,
             )
         )
 
@@ -43,6 +44,7 @@ def _events_to_df(events: Iterable[Event]) -> pd.DataFrame:
             "note",
             "note_name",
             "special_code",
+            "is_control",
         ],
     )
     if (df["duration"] < 0).any():
@@ -170,49 +172,64 @@ def plot_pianoroll_with_index_timeline(
             midi_program_code
         )
 
-        x: list[Optional[int]] = []
-        y: list[Optional[int]] = []
-        custom: list[Optional[list[Any]]] = []
-
+        # jitter so we can distinguish between different instruments that
+        # happen at the exact same time on the exact same note
         y_off, x_off = program_offsets[midi_program_code]
 
-        for idx, start, end, note, note_name, dur in sub[
-            ["idx", "start", "end", "note", "note_name", "duration"]
-        ].itertuples(index=False):
-            x0 = int(start) + x_off
-            x1 = int(end) + x_off
-            yv = int(note) + y_off
+        for label, sub2, dash, width, opacity in [
+            ("notes", sub[sub["is_control"] == False], "solid", 8, 1.0),
+            ("control", sub[sub["is_control"] == True], "1, 1, 1", 8, 1.0),
+        ]:
+            if sub2.empty:
+                continue
 
-            x.extend([x0, x1, None])
-            y.extend([yv, yv, None])
+            x: list[Optional[float]] = []
+            y: list[Optional[float]] = []
+            custom: list[Optional[list[Any]]] = []
 
-            row = [note_name, int(note), int(start), int(end), int(dur), int(idx)]
-            custom.extend([row, row, None])
+            for idx, start, end, note, note_name, dur in sub2[
+                ["idx", "start", "end", "note", "note_name", "duration"]
+            ].itertuples(index=False):
+                x0 = int(start) + x_off
+                x1 = int(end) + x_off
+                yv = int(note) + y_off
 
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=y,
-                customdata=custom,
-                mode="lines+markers",
-                line=dict(width=6, color=program_to_color[midi_program_code]),
-                marker=dict(
-                    symbol="line-ns",
-                    size=11,
-                    angleref="previous",
-                    standoff=3,
+                x.extend([x0, x1, None])
+                y.extend([yv, yv, None])
+
+                row = [note_name, int(note), int(start), int(end), int(dur), int(idx)]
+                custom.extend([row, row, None])
+
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=y,
+                    customdata=custom,
+                    mode="lines+markers",
+                    line=dict(
+                        # width=6, color=program_to_color[midi_program_code]
+                        width=6,
+                        dash=dash,
+                        color=program_to_color[midi_program_code],
+                    ),
+                    marker=dict(
+                        symbol="line-ns",
+                        size=11,
+                        angleref="previous",
+                        standoff=3,
+                    ),
+                    opacity=0.72,
+                    name=f"{midi_program_code}: {midi_program_name}",
+                    meta={
+                        "program": int(midi_program_code),
+                        "program_name": midi_program_name,
+                    },
+                    showlegend=(True if label == "notes" else False),
+                    hovertemplate=hover_template_roll,
+                    connectgaps=False,
+                    legendgroup=f"prog_{midi_program_code}",
                 ),
-                opacity=0.72,
-                name=f"{midi_program_code}: {midi_program_name}",
-                meta={
-                    "program": int(midi_program_code),
-                    "program_name": midi_program_name,
-                },
-                hovertemplate=hover_template_roll,
-                connectgaps=False,
-                legendgroup=f"prog_{midi_program_code}",
-            ),
-        )
+            )
 
     df_seq = df_notes.sort_values(["idx"], kind="mergesort").copy()
     df_seq["x_mid"] = (df_seq["start"] + df_seq["end"]) / 2.0
