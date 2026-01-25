@@ -1,9 +1,11 @@
 from typing import Optional, Any, Dict, Iterable, List
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.colors import qualitative
+from plotly.subplots import make_subplots
 
 from tests.util.entities import (
     Event,
@@ -13,7 +15,6 @@ from tests.util.entities import (
 
 
 def _events_to_df(events: Iterable[Event]) -> pd.DataFrame:
-    # Materialize so Iterable/generator behavior is deterministic.
     events_list = list(events)
     if len(events_list) == 0:
         raise ValueError("events is empty")
@@ -66,7 +67,13 @@ def _build_program_palette(programs: list[int]) -> Dict[int, str]:
     return {p: palette[i % len(palette)] for i, p in enumerate(programs_sorted)}
 
 
-def _add_boundaries_to_subplot(fig: go.Figure, df_boundaries: pd.DataFrame) -> None:
+def _add_boundaries_to_subplot(
+    fig: go.Figure,
+    df_boundaries: pd.DataFrame,
+    delta: float,
+    time_resolution: int,
+    first_control,
+) -> None:
     """
     Adds boundary lines + annotations to the *top* subplot only.
     Uses subplot-aware add_shape/add_annotation so it doesn't span the index subplot.
@@ -81,7 +88,7 @@ def _add_boundaries_to_subplot(fig: go.Figure, df_boundaries: pd.DataFrame) -> N
         elif special_code == EventSpecialCode.ANTICIPATION_TOKEN:
             display_text = "anticipate"
         elif special_code == EventSpecialCode.SEQ_SEPARATION_TOKENS:
-            display_text = "new sample"
+            display_text = "separator"
         else:
             display_text = "?"
 
@@ -92,7 +99,6 @@ def _add_boundaries_to_subplot(fig: go.Figure, df_boundaries: pd.DataFrame) -> N
             line_props = {"dash": "dash", "width": 1}
             yshift = 10
 
-        # Boundary line (top subplot only)
         fig.add_shape(
             type="line",
             x0=t,
@@ -103,6 +109,21 @@ def _add_boundaries_to_subplot(fig: go.Figure, df_boundaries: pd.DataFrame) -> N
             yref="y domain",
             line=line_props,
             layer="above",
+            row=1,
+            col=1,
+        )
+        fig.add_shape(
+            type="line",
+            x0=t,
+            x1=t,
+            y0=0,
+            y1=1,
+            xref="x",
+            yref="y domain",
+            line=line_props,
+            layer="above",
+            row=2,
+            col=1,
         )
 
         # Annotation (top subplot only)
@@ -115,19 +136,80 @@ def _add_boundaries_to_subplot(fig: go.Figure, df_boundaries: pd.DataFrame) -> N
             showarrow=False,
             yanchor="bottom",
             yshift=yshift,
+            row=1,
+            col=1,
+        )
+
+    first_delta_sec_in_ticks = int(delta * time_resolution)
+    fig.add_shape(
+        type="line",
+        x0=first_delta_sec_in_ticks,
+        x1=first_delta_sec_in_ticks,
+        y0=0,
+        y1=1,
+        xref="x",
+        yref="y domain",
+        layer="above",
+        row=2,
+        col=1,
+        line={"dash": "dash", "width": 0.7},
+    )
+    fig.add_annotation(
+        x=first_delta_sec_in_ticks,
+        y=1,
+        xref="x",
+        yref="y domain",
+        text="Delta Seconds",
+        showarrow=False,
+        yanchor="bottom",
+        yshift=0,
+        row=2,
+        col=1,
+    )
+
+    if first_control is not None:
+        fig.add_shape(
+            type="line",
+            x0=0,
+            x1=1,
+            y0=first_control.idx,
+            y1=first_control.idx,
+            xref="x domain",
+            yref="y",
+            layer="above",
+            row=2,
+            col=1,
+            line={"dash": "dot", "width": 0.7},
+        )
+        fig.add_annotation(
+            # the far right of the graph is 1 (?)
+            x=1,
+            y=first_control.idx,
+            xref="x domain",
+            yref="y",
+            text="Earliest Control Index",
+            showarrow=False,
+            yanchor="bottom",
+            yshift=0,
+            row=2,
+            col=1,
         )
 
 
 def plot_pianoroll_with_index_timeline(
     events: list[Event],
+    delta: float,
+    time_resolution: int,
     *,
     title: str = "MIDI Piano Roll",
     height: int = 1000,
-    keep_rangeslider: bool = True,
     y_jitter: float = 0.18,
-    x_jitter: int = 1,
+    x_jitter: int = 2,
 ) -> go.Figure:
     df = _events_to_df(events)
+    first_control = next(
+        df[df["is_control"]][["idx", "start"]].sort_values(by="idx").itertuples(), None
+    )
     is_boundary = df["special_code"] != EventSpecialCode.TYPICAL_EVENT
     df_boundaries = df.loc[is_boundary].copy()
     df_notes = df.loc[~is_boundary].copy()
@@ -141,7 +223,13 @@ def plot_pianoroll_with_index_timeline(
     program_to_color = _build_program_palette(programs_sorted)
 
     # Subplots: top = roll, bottom = index timeline
-    fig = go.Figure()
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.6, 0.4],
+    )
 
     # --- Row 1: Piano roll (one trace per program) ---
     hover_template_roll = (
@@ -150,7 +238,8 @@ def plot_pianoroll_with_index_timeline(
         "Start: %{customdata[2]} ticks<br>"
         "End: %{customdata[3]} ticks<br>"
         "Dur: %{customdata[4]} ticks<br>"
-        "Idx: %{customdata[5]}"
+        "Idx: %{customdata[5]}<br>"
+        "Is control: %{customdata[6]}"
         "<extra></extra>"
     )
 
@@ -176,9 +265,10 @@ def plot_pianoroll_with_index_timeline(
         # happen at the exact same time on the exact same note
         y_off, x_off = program_offsets[midi_program_code]
 
+        in_legend = False
         for label, sub2, dash, width, opacity in [
-            ("notes", sub[sub["is_control"] == False], "solid", 8, 1.0),
-            ("control", sub[sub["is_control"] == True], "1, 1, 1", 8, 1.0),
+            ("notes", sub[sub["is_control"] == False], "solid", 8, 0.5),
+            ("control", sub[sub["is_control"] == True], "dot", 8, 1.0),
         ]:
             if sub2.empty:
                 continue
@@ -187,65 +277,65 @@ def plot_pianoroll_with_index_timeline(
             y: list[Optional[float]] = []
             custom: list[Optional[list[Any]]] = []
 
-            for idx, start, end, note, note_name, dur in sub2[
-                ["idx", "start", "end", "note", "note_name", "duration"]
+            for idx, start, end, note, note_name, dur, is_control in sub2[
+                ["idx", "start", "end", "note", "note_name", "duration", "is_control"]
             ].itertuples(index=False):
                 x0 = int(start) + x_off
                 x1 = int(end) + x_off
                 yv = int(note) + y_off
 
+                if is_control:
+                    yv += 0.2
+
                 x.extend([x0, x1, None])
                 y.extend([yv, yv, None])
 
-                row = [note_name, int(note), int(start), int(end), int(dur), int(idx)]
+                row = [
+                    note_name,
+                    int(note),
+                    int(start),
+                    int(end),
+                    int(dur),
+                    int(idx),
+                    bool(is_control),
+                ]
                 custom.extend([row, row, None])
 
             fig.add_trace(
-                go.Scatter(
+                go.Scattergl(
                     x=x,
                     y=y,
                     customdata=custom,
                     mode="lines+markers",
                     line=dict(
-                        # width=6, color=program_to_color[midi_program_code]
                         width=6,
                         dash=dash,
                         color=program_to_color[midi_program_code],
                     ),
                     marker=dict(
                         symbol="line-ns",
-                        size=11,
-                        angleref="previous",
-                        standoff=3,
+                        size=20,
                     ),
-                    opacity=0.72,
+                    opacity=opacity,
                     name=f"{midi_program_code}: {midi_program_name}",
                     meta={
                         "program": int(midi_program_code),
                         "program_name": midi_program_name,
                     },
-                    showlegend=(True if label == "notes" else False),
+                    showlegend=(True if not in_legend else False),
                     hovertemplate=hover_template_roll,
                     connectgaps=False,
                     legendgroup=f"prog_{midi_program_code}",
+                    xaxis="x2",
                 ),
+                row=1,
+                col=1,
             )
+            in_legend = True
 
     df_seq = df_notes.sort_values(["idx"], kind="mergesort").copy()
     df_seq["x_mid"] = (df_seq["start"] + df_seq["end"]) / 2.0
 
-    fig.update_layout(
-        xaxis=dict(
-            title="ticks from start",
-            type="linear",
-            rangeslider=dict(visible=keep_rangeslider, thickness=0.08),
-        ),
-        xaxis2=dict(
-            overlaying="x",  # draw in same plot area
-            matches="x",  # keep identical range/zoom
-            visible=False,  # hide axis decorations
-        ),
-    )
     fig.add_trace(
         go.Scatter(
             x=df_seq["x_mid"].to_list(),
@@ -258,7 +348,7 @@ def plot_pianoroll_with_index_timeline(
                 symbol="arrow",
                 size=11,
                 angleref="previous",
-                standoff=3,
+                standoff=4,
             ),
             text=df_seq["idx"].astype(int).astype(str).to_list(),
             textposition="top center",
@@ -269,18 +359,103 @@ def plot_pianoroll_with_index_timeline(
             showlegend=True,
             xaxis="x2",  # <-- key line
         ),
+        row=1,
+        col=1,
     )
-    _add_boundaries_to_subplot(fig, df_boundaries)
-    fig.update_yaxes(title_text="MIDI note")
+    # dummy trace to keep rangeslider alive on xaxis
+    t0 = float(df["start"].min())
+    t1 = float(df["end"].max())
+
+    fig.add_trace(
+        go.Scatter(
+            x=[t0, t1],
+            y=[0, 0],
+            mode="lines",
+            line=dict(width=0),
+            opacity=0.0,
+            hoverinfo="skip",
+            showlegend=False,
+            xaxis="x",  # stays on x
+            yaxis="y",
+        ),
+        row=1,
+        col=1,
+    )
+    _add_boundaries_to_subplot(
+        fig, df_boundaries, delta, time_resolution, first_control,
+    )
+
+    # --- Row 2: Index timeline (time vs idx) ---
+    # We keep the same per-program coloring to make correlations easier.
+    hover_template_idx = (
+        "Idx: %{customdata[0]}<br>"
+        "Time: %{x} ticks<br>"
+        "Program: %{customdata[1]} (%{customdata[2]})<br>"
+        "Note: %{customdata[3]} (%{customdata[4]})<br>"
+        "Is Control: %{customdata[5]}<br>"
+        "<extra></extra>"
+    )
+
+    for midi_program_code in programs_sorted:
+        sub = df_notes[df_notes["program"] == midi_program_code].copy()
+        midi_program_name = get_midi_instrument_name_from_midi_instrument_code(
+            midi_program_code
+        )
+        sub = sub.sort_values(["start", "idx"], kind="mergesort")
+
+        fig.add_trace(
+            go.Scatter(
+                x=sub["start"].astype(int).tolist(),
+                y=sub["idx"].astype(int).tolist(),
+                mode="markers",
+                marker=dict(
+                    size=9,
+                    color=program_to_color[midi_program_code],
+                    symbol=[
+                        "star" if is_ctrl else "square-open"
+                        for is_ctrl in sub["is_control"].astype(bool).tolist()
+                    ],
+                    opacity=0.6,
+                ),
+                name=f"{midi_program_code}: {midi_program_name} (idx)",
+                showlegend=False,  # keep legend focused on instruments in top plot
+                legendgroup=f"prog_{midi_program_code}",
+                customdata=np.stack(
+                    [
+                        sub["idx"].astype(int).to_numpy(),
+                        sub["program"].astype(int).to_numpy(),
+                        np.array([midi_program_name] * len(sub), dtype=object),
+                        sub["note_name"].astype(str).to_numpy(),
+                        sub["note"].astype(int).to_numpy(),
+                        sub["is_control"].astype(bool).to_numpy(),
+                    ],
+                    axis=1,
+                ),
+                hovertemplate=hover_template_idx,
+            ),
+            row=2,
+            col=1,
+        )
+
+    fig.update_yaxes(
+        title_text="sequence idx",
+        row=2,
+        col=1,
+        constrain="range",
+        minallowed=0,
+        maxallowed=len(events),
+    )
+    fig.update_yaxes(
+        title_text="MIDI note", row=1, col=1, constrain="range", minallowed=0
+    )
     fig.update_layout(
         title=title,
         height=height,
         margin=dict(l=70, r=30, t=60, b=60),
         hovermode="closest",
-        dragmode=False,  # preserves hover-first interaction
         legend_title_text="Program",
     )
-
+    fig.update_layout(uirevision=True)
     return fig
 
 
@@ -291,18 +466,15 @@ def write_fig_html(
     fig.write_html(
         str(save_to_path.absolute()),
         auto_open=auto_open,
-        config={
-            "displayModeBar": False,
-            "scrollZoom": False,
-            "doubleClick": False,
-        },
     )
 
 
 def get_figure_and_open(
     events: list[Event],
+    delta: float,
+    time_resolution: int,
     path: Path,
     auto_open: bool = True,
 ) -> None:
-    fig1 = plot_pianoroll_with_index_timeline(events)
+    fig1 = plot_pianoroll_with_index_timeline(events, delta, time_resolution)
     write_fig_html(fig1, path, auto_open=auto_open)
