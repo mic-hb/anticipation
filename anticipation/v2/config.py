@@ -28,13 +28,13 @@ class Vocab:
     # add the number of new blocks in v2 here
     # added:
     # - PAD
-    # - METRONOME
+    # - TICK
     VOCAB_SIZE: int = v1_vocab.VOCAB_SIZE + 2
 
     # https://github.com/jthickstun/anticipation/blob/6927699c5243fd91d1d252211c29885377d9dda5/train/tokenize-new.py#L33
     # https://github.com/jthickstun/anticipation/blob/6927699c5243fd91d1d252211c29885377d9dda5/anticipation/vocabs/localmidi.py#L65
     # aka 'tick'
-    METRONOME: int = _last_token_in_v1 + 1
+    TICK: int = _last_token_in_v1 + 1
     PAD: int = _last_token_in_v1 + 2
 
 
@@ -55,7 +55,6 @@ class AnticipationV2Settings:
     max_track_instruments: int = 16
     max_midi_pitch: int = 128
     max_note_duration_in_seconds: int = 10
-    use_metronome_token: bool = False
     context_size: int = 1024
     event_size: int = 3
     m: int = 341
@@ -70,7 +69,7 @@ class AnticipationV2Settings:
     num_instrument_anticipation_augmentations_per_midi_file: int = 4
     num_random_anticipation_augmentations_per_midi_file: int = 4
     span_anticipation_lambda: float = 0.05
-    do_relativize_time_to_ctx: bool = True
+    tick_token_frequency_in_midi_ticks: int = 100
 
     # anticipation interval
     delta: int = 5

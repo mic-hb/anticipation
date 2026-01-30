@@ -25,7 +25,8 @@ def _events_to_df(events: Iterable[Event]) -> pd.DataFrame:
         norm.append(
             (
                 i,
-                e.midi_time(),
+                # e.midi_time(),
+                e.absolute_time,
                 e.midi_duration(),
                 e.midi_instrument(),
                 e.midi_note(),
@@ -33,6 +34,7 @@ def _events_to_df(events: Iterable[Event]) -> pd.DataFrame:
                 e.special_code,
                 e.is_control,
                 e.original_idx_in_token_seq,
+                e.midi_time(),
             )
         )
 
@@ -48,6 +50,7 @@ def _events_to_df(events: Iterable[Event]) -> pd.DataFrame:
             "special_code",
             "is_control",
             "original_idx_in_token_seq",
+            "rel_time_start",
         ],
     )
     if (df["duration"] < 0).any():
@@ -74,22 +77,21 @@ def _add_boundaries_to_subplot(
     df_boundaries: pd.DataFrame,
     delta: float,
     time_resolution: int,
-    first_control,
 ) -> None:
     """
     Adds boundary lines + annotations to the *top* subplot only.
     Uses subplot-aware add_shape/add_annotation so it doesn't span the index subplot.
     """
     dfb = df_boundaries.sort_values(by="start", kind="mergesort")
-    for row in dfb.itertuples(index=False):
-        special_code = row.special_code
-        if row.original_idx_in_token_seq % 1024 == 0:
+    for row in dfb.to_dict("records"):
+        # special_code = row["special_code"]
+        if row["original_idx_in_token_seq"] % 1024 == 0:
             fig.add_shape(
                 type="line",
                 x0=0,
                 x1=1,
-                y0=row.idx,
-                y1=row.idx,
+                y0=row["idx"],
+                y1=row["idx"],
                 xref="x domain",
                 yref="y",
                 layer="above",
@@ -100,7 +102,7 @@ def _add_boundaries_to_subplot(
             fig.add_annotation(
                 # the far right of the graph is 1 (?)
                 x=1,
-                y=row.idx,
+                y=row["idx"],
                 xref="x domain",
                 yref="y",
                 text="context",
@@ -150,10 +152,10 @@ def plot_pianoroll_with_index_timeline(
     x_jitter: int = 2,
 ) -> go.Figure:
     df = _events_to_df(events)
-    first_control = next(
-        df[df["is_control"]][["idx", "start"]].sort_values(by="idx").itertuples(), None
+    is_boundary = ~(
+        (df["special_code"] == EventSpecialCode.TYPICAL_EVENT)
+        | (df["special_code"] == EventSpecialCode.TICK)
     )
-    is_boundary = df["special_code"] != EventSpecialCode.TYPICAL_EVENT
     df_boundaries = df.loc[is_boundary].copy()
     df_notes = df.loc[~is_boundary].copy()
 
@@ -178,11 +180,13 @@ def plot_pianoroll_with_index_timeline(
     hover_template_roll = (
         "Program: %{meta.program} (%{meta.program_name})<br>"
         "Note: %{customdata[0]} (%{customdata[1]})<br>"
-        "Start: %{customdata[2]} ticks<br>"
-        "End: %{customdata[3]} ticks<br>"
+        "Start (absolute): %{customdata[2]} ticks<br>"
+        "Start (relative): %{customdata[8]} ticks<br>"
+        "End (absolute): %{customdata[3]} ticks<br>"
         "Dur: %{customdata[4]} ticks<br>"
-        "Idx: %{customdata[5]}<br>"
-        "Is control: %{customdata[6]}"
+        "Event Idx: %{customdata[5]}<br>"
+        "Token Idx: %{customdata[7]}<br>"
+        "Is Control: %{customdata[6]}"
         "<extra></extra>"
     )
 
@@ -229,6 +233,7 @@ def plot_pianoroll_with_index_timeline(
                 dur,
                 is_control,
                 original_idx_in_token_seq,
+                rel_time_start,
             ) in sub2[
                 [
                     "idx",
@@ -239,6 +244,7 @@ def plot_pianoroll_with_index_timeline(
                     "duration",
                     "is_control",
                     "original_idx_in_token_seq",
+                    "rel_time_start",
                 ]
             ].itertuples(index=False):
                 x0 = int(start) + x_off
@@ -260,9 +266,16 @@ def plot_pianoroll_with_index_timeline(
                     int(idx),
                     bool(is_control),
                     int(original_idx_in_token_seq),
+                    int(rel_time_start),
                 ]
                 custom.extend([row, row, None])
 
+            marker_settings = {
+                130: {
+                    "symbol": "triangle-sw",
+                    "size": 14,
+                }
+            }
             fig.add_trace(
                 go.Scattergl(
                     x=x,
@@ -274,9 +287,15 @@ def plot_pianoroll_with_index_timeline(
                         dash=dash,
                         color=program_to_color[midi_program_code],
                     ),
-                    marker=dict(
-                        symbol="line-ns",
-                        size=20,
+                    marker=(
+                        marker_settings.get(midi_program_code)
+                        or (
+                            dict(
+                                # defaults
+                                symbol="line-ns",
+                                size=20,
+                            )
+                        )
                     ),
                     opacity=opacity,
                     name=f"{midi_program_code}: {midi_program_name}",
@@ -315,11 +334,8 @@ def plot_pianoroll_with_index_timeline(
             text=df_seq["idx"].astype(int).astype(str).to_list(),
             textposition="top center",
             textfont=dict(size=10),
-            hovertemplate=(
-                "Idx: %{text}<br>Time(mid): %{x:.0f} ticks<br>Note: %{y}<extra></extra>"
-            ),
             showlegend=True,
-            xaxis="x2",  # <-- key line
+            xaxis="x2",
         ),
         row=1,
         col=1,
@@ -344,86 +360,24 @@ def plot_pianoroll_with_index_timeline(
         col=1,
     )
 
-    seq_boundary_times = []
-    k = 0
-    while k < len(events) - 1:
-        curr_event = events[k]
-        if curr_event.special_code == EventSpecialCode.ANTICIPATION_TOKEN:
-            j = k - 1
-            next_event = curr_event
-            while 0 < j and events[j].is_control:
-                next_event = events[j]
-                j -= 1
-
-            seq_boundary_times.append((next_event.midi_time(), "anticipate"))
-        elif curr_event.special_code == EventSpecialCode.AUTOREGRESSIVE_TOKEN:
-            j = k - 1
-            next_event = curr_event
-            while 0 < j and events[j].is_control:
-                next_event = events[j]
-                j -= 1
-
-            seq_boundary_times.append((next_event.midi_time(), "autoregress"))
-        k += 1
-
-    for seq_bound in seq_boundary_times:
-        t, label = seq_bound
-        fig.add_shape(
-            type="line",
-            x0=t,
-            x1=t,
-            y0=0,
-            y1=1,
-            xref="x",
-            yref="y domain",
-            line={"dash": "dot", "width": 0.7},
-            layer="above",
-            row=1,
-            col=1,
-        )
-        fig.add_shape(
-            type="line",
-            x0=t,
-            x1=t,
-            y0=0,
-            y1=1,
-            xref="x",
-            yref="y domain",
-            line={"dash": "dot", "width": 0.7},
-            layer="above",
-            row=2,
-            col=1,
-        )
-        fig.add_annotation(
-            x=t,
-            y=1,
-            xref="x",
-            yref="y domain",
-            text=label,
-            showarrow=False,
-            yanchor="bottom",
-            yshift=0,
-            row=1,
-            col=1,
-        )
-
+    # adds all the context lines and delta seconds
     _add_boundaries_to_subplot(
         fig,
         df_boundaries,
         delta,
         time_resolution,
-        first_control,
     )
 
     # --- Row 2: Index timeline (time vs idx) ---
     # We keep the same per-program coloring to make correlations easier.
     hover_template_idx = (
-        "Idx: %{customdata[0]}<br>"
-        "Time: %{x} ticks<br>"
+        "Start (absolute): %{x} ticks<br>"
+        "Start (relative): %{customdata[7]} ticks<br>"
         "Program: %{customdata[1]} (%{customdata[2]})<br>"
         "Note: %{customdata[3]} (%{customdata[4]})<br>"
         "Is Control: %{customdata[5]}<br>"
-        "Original index in token seq: %{customdata[6]}<br>"
+        "Event Idx: %{customdata[0]}<br>"
+        "Token Idx: %{customdata[6]}<br>"
         "<extra></extra>"
     )
 
@@ -460,6 +414,7 @@ def plot_pianoroll_with_index_timeline(
                         sub["note"].astype(int).to_numpy(),
                         sub["is_control"].astype(bool).to_numpy(),
                         sub["original_idx_in_token_seq"].astype(int).to_numpy(),
+                        sub["rel_time_start"].astype(int).to_numpy(),
                     ],
                     axis=1,
                 ),

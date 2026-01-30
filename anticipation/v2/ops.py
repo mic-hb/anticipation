@@ -4,7 +4,7 @@ Their functionality is the same as v1 ops unless stated otherwise.
 """
 
 from collections import defaultdict
-from typing import Optional, Union, Iterator
+from typing import Optional, Union, Iterator, Iterable
 
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import Token
@@ -20,7 +20,7 @@ def get_punctuation_tokens_idx(
         v.REST: 0,
         v.ANTICIPATE: 0,
         v.AUTOREGRESS: 0,
-        v.METRONOME: 0,
+        v.TICK: 0,
     }
     for i, e in enumerate(tokens):
         if e in investigate:
@@ -242,13 +242,11 @@ def relativize_token_seq_time(
     )
 
 
-def is_flag_token(token: Token, settings: AnticipationV2Settings) -> bool:
-    return token == settings.vocab.ANTICIPATE or token == settings.vocab.AUTOREGRESS
-
-
 def streaming_anticipate(
-    events: list[Token], controls: list[Token], settings: AnticipationV2Settings
-) -> Iterator[tuple[int, int, int]]:
+    events: Iterator[tuple[Token, ...]],
+    controls: Iterator[tuple[Token, ...]],
+    settings: AnticipationV2Settings,
+) -> Iterator[tuple[Token, ...]]:
     """
     Interleave a sequence of events with anticipated controls.
 
@@ -261,26 +259,124 @@ def streaming_anticipate(
         a generator that returns interleaved events and controls by anticipatory
         ordering that may be consumed as a stream
     """
+    if isinstance(events, list):
+        raise TypeError(
+            "Streaming anticipate must take iterators, not lists. The event argument is a list."
+        )
+    if isinstance(controls, list):
+        raise TypeError(
+            "Streaming anticipate must take iterators, not lists. The controls argument is a list."
+        )
+
     delta_ticks = settings.delta * settings.time_resolution
     event_time = 0
-    control_time = controls[0] - settings.vocab.ATIME_OFFSET
-    for i in range(0, len(events), 3):
-        time, dur, note = events[i : i + 3]
-        while event_time >= control_time - delta_ticks:
-            # returning this as a tuple as protection against subsequent
-            # mutations
-            yield tuple(controls[0:3])
 
-            controls = controls[3:]  # consume this control
-            control_time = (
-                controls[0] - settings.vocab.ATIME_OFFSET
-                if len(controls) > 0
-                else float("inf")
+    curr_control = next(controls, None)
+    if curr_control is None:
+        # no controls exist, just iterate over events
+        # return the iterator object
+        return events
+
+    first_control_time = curr_control[0] - settings.vocab.ATIME_OFFSET
+    control_time = first_control_time
+
+    for cur_event in events:
+        if len(cur_event) == 3:
+            # a triple
+            time, dur, note = cur_event
+            while event_time >= control_time - delta_ticks:
+                yield curr_control
+                curr_control = next(controls, None)
+                control_time = (
+                    curr_control[0] - settings.vocab.ATIME_OFFSET
+                    if curr_control is not None
+                    else float("inf")
+                )
+            assert note < settings.vocab.CONTROL_OFFSET
+            event_time = time - settings.vocab.TIME_OFFSET
+            yield time, dur, note
+        else:
+            # a tick, just return it
+            yield cur_event
+
+
+def streaming_add_ticks(
+    events: list[Token], settings: AnticipationV2Settings
+) -> Iterator[tuple[Token, ...]]:
+    # TODO: should this take an iterator as input? THinking...
+    add_every = settings.tick_token_frequency_in_midi_ticks
+    recent_tick = 0
+
+    # original logic: https://github.com/jthickstun/anticipation/blob/6927699c5243fd91d1d252211c29885377d9dda5/train/tokenize-new.py#L33
+    for i in range(0, len(events), 3):
+        time, duration, note = events[i : i + 3]
+        while time >= round(recent_tick * add_every):
+            # tick - a tick is only a single token!
+            yield (settings.vocab.TICK,)
+            recent_tick += 1
+
+        yield (
+            time,
+            duration,
+            note,
+        )
+
+
+def streaming_relativize_to_tick(
+    token_stream_iterator: Iterator[tuple[Token, ...]], settings: AnticipationV2Settings
+) -> Iterator[tuple[Token, ...]]:
+    if isinstance(token_stream_iterator, list):
+        raise TypeError(
+            "Streaming relativize must take iterators, not lists. The token_stream_iterator argument is a list."
+        )
+
+    add_every = settings.tick_token_frequency_in_midi_ticks
+    recent_tick = 0
+    for next_element in token_stream_iterator:
+        if len(next_element) == 1:
+            # this is a tick
+            recent_tick += 1
+            to_add = next_element
+        elif len(next_element) == 3:
+            relativize = round((recent_tick - 1) * add_every) if recent_tick > 0 else 0
+            to_add = (
+                next_element[0] - relativize,
+                next_element[1],
+                next_element[2],
+            )
+        else:
+            raise ValueError(
+                f"Incorrect length of event tuple. Must be 1 or 3. Got: {len(next_element)}"
             )
 
-        assert note < settings.vocab.CONTROL_OFFSET
-        event_time = time - settings.vocab.TIME_OFFSET
+        yield to_add
 
-        # returning this as a tuple as protection against subsequent
-        # mutations
-        yield time, dur, note
+
+def pack(
+    stream: Iterable[tuple[Token, ...]],
+    seq_header: tuple[Token, ...],
+    settings: AnticipationV2Settings,
+) -> list[Token]:
+    chunks = []
+    buf = [*seq_header, settings.vocab.SEPARATOR]
+    for next_element in stream:
+        if len(buf) + len(next_element) > settings.context_size:
+            # 1 flag token, (ctx - 1) events/controls
+            buf += [settings.vocab.PAD] * (settings.context_size - len(buf))
+            chunks.extend(buf)
+
+            # buffer starts with its preamble/header
+            buf = [*seq_header]
+
+        buf += list(next_element)
+
+    # handle trailing suffix, but only if it has things in it
+    # that are not header info
+    if len(buf) > len(seq_header):
+        # don't pad the end though because we can just start another
+        # sample
+        # Q: what if it is just a tick though?
+        # A: I think that should be fine, as long as the next seq is separated
+        chunks.extend(buf)
+
+    return chunks

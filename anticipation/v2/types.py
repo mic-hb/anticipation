@@ -2,6 +2,8 @@ from enum import Enum
 
 # type aliases
 Token = int
+MIDITick = int
+MIDINote = int
 MIDIProgramCode = int
 
 

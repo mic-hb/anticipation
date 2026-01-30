@@ -2,6 +2,7 @@ from collections import defaultdict
 
 from pathlib import Path
 from typing import Optional, Iterable
+import warnings
 
 import numpy as np
 
@@ -91,11 +92,6 @@ def maybe_tokenize(
     return events, num_note_truncations, None
 
 
-def add_metronome_token(tokens: list[Token]) -> list[Token]:
-    # TODO: think about how this might work with anticipation...
-    return tokens
-
-
 def tokenize_midi_file(
     my_midi_file: Path, settings: AnticipationV2Settings
 ) -> tuple[
@@ -124,9 +120,6 @@ def tokenize_midi_file(
         all_midi_program_codes = list(v2_ops.get_instruments(all_events, settings))
         end_time_in_ticks: int = v2_ops.max_time(all_events, settings, seconds=False)
 
-        if settings.use_metronome_token:
-            all_events = add_metronome_token(all_events)
-
     return (
         all_events,
         num_note_truncations,
@@ -151,14 +144,16 @@ def tokenize(
             end_time_in_ticks,
         ) = tokenize_midi_file(midi_file, settings)
         if reason_ignored is not None:
+            warnings.warn(
+                f"Sequence in file {midi_file} was ignored for reason: {reason_ignored}",
+                UserWarning,
+            )
             stats[reason_ignored] += 1
             continue
 
         # 1. pure autoregressive sequence
         for _ in range(settings.num_autoregressive_seq_per_midi_file):
-            buf += _get_augmentation_autoregressive(
-                tokenized_midi, end_time_in_ticks, settings
-            )
+            buf += _get_augmentation_autoregressive(tokenized_midi, settings)
 
         # 2. instrument anticipation
         for _ in range(
@@ -178,43 +173,32 @@ def tokenize(
             buf.extend(span_anticipation_seq)
 
         # 4. random anticipation augmentations (?)
-
     return buf
 
 
 def _get_augmentation_autoregressive(
-    tokens: list[Token], end_time_in_ticks: int, settings: AnticipationV2Settings
+    tokens: list[Token], settings: AnticipationV2Settings
 ) -> list[Token]:
     assert len(tokens) % 3 == 0, "bad length"
     if settings.debug:
         _check_no_punctuation_tokens(tokens, settings)
 
-    v = settings.vocab
-    padded_tokens = v2_ops.add_rests(tokens, settings, end_time_in_ticks)
-    chunks = []
+    # step through events and ticks
+    stream = v2_ops.streaming_relativize_to_tick(
+        v2_ops.streaming_add_ticks(tokens, settings), settings
+    )
 
-    # sequence starts like: (FLAG, SEP, notes...)
-    buf = [v.AUTOREGRESS, v.SEPARATOR]
-    for i in range(0, len(padded_tokens), 3):
-        next_triple = padded_tokens[i : i + 3]
+    return v2_ops.pack(
+        stream, seq_header=(settings.vocab.AUTOREGRESS,), settings=settings
+    )
 
-        if len(buf) + len(next_triple) > settings.context_size:
-            # flush buffer when we can't fit another triple
-            buf += [v.PAD] * (settings.context_size - len(buf))
-            chunks.extend(buf)
 
-            # buffer starts with the flag token
-            buf = [v.AUTOREGRESS]
-
-        buf += list(next_triple)
-
-    # handle trailing suffix
-    if len(buf) > 1:
-        # don't pad the end though because we can just start another
-        # sample
-        chunks.extend(buf)
-
-    return chunks
+def _sample_instrument_subset(all_midi_program_codes: list[int]) -> list[int]:
+    # instrument augmentation: at least one, but not all instruments
+    # each time this is called it is like a random subset draw!
+    u = 1 + np.random.randint(len(all_midi_program_codes) - 1)
+    instrument_subset = np.random.choice(all_midi_program_codes, u, replace=False)
+    return list(instrument_subset)
 
 
 def _get_augmentation_instrument(
@@ -223,45 +207,26 @@ def _get_augmentation_instrument(
     settings: AnticipationV2Settings,
 ) -> list[Token]:
     assert len(tokens) % 3 == 0, "bad length"
-
     if settings.debug:
         _check_no_punctuation_tokens(tokens, settings)
 
-    # instrument augmentation: at least one, but not all instruments
-    # each time this is called it is like a random subset draw!
-    u = 1 + np.random.randint(len(all_midi_program_codes) - 1)
-    instrument_subset = np.random.choice(all_midi_program_codes, u, replace=False)
-    events, controls = v1_extract_instruments(tokens, instrument_subset)
-
-    events = v2_ops.add_rests(
-        events,
-        settings,
-        start_time_in_ticks=v2_ops.min_time(events, settings, seconds=False),
-        end_time_in_ticks=v2_ops.max_time(events, settings, seconds=False),
+    # in v1, REST tokens are not present in token sequence before calling
+    # instrument extraction...
+    events, controls = v1_extract_instruments(
+        tokens, _sample_instrument_subset(all_midi_program_codes)
     )
-    chunks = []
-    buf = [
-        settings.vocab.ANTICIPATE,
-        settings.vocab.SEPARATOR,
-    ]
-    for next_triple in v2_ops.streaming_anticipate(events, controls, settings):
-        if len(buf) + len(next_triple) > settings.context_size:
-            # 1 flag token, (ctx - 1) events/controls
-            buf += [settings.vocab.PAD] * (settings.context_size - len(buf))
-            chunks.extend(buf)
+    assert len(controls) % 3 == 0
+    assert len(events) % 3 == 0
 
-            # buffer starts with the flag token
-            buf = [settings.vocab.ANTICIPATE]
-
-        buf += list(next_triple)
-
-    # handle trailing suffix
-    if len(buf) > 1:
-        # don't pad the end though because we can just start another
-        # sample
-        chunks.extend(buf)
-
-    return chunks
+    # add ticks to the events only
+    event_stream = v2_ops.streaming_add_ticks(events, settings)
+    control_stream = (controls[i : i + 3] for i in range(0, len(controls), 3))
+    stream = v2_ops.streaming_relativize_to_tick(
+        v2_ops.streaming_anticipate(event_stream, control_stream, settings), settings
+    )
+    return v2_ops.pack(
+        stream, seq_header=(settings.vocab.ANTICIPATE,), settings=settings
+    )
 
 
 def _get_span_augmentation(

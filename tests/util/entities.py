@@ -11,6 +11,7 @@ import anticipation.vocab as v
 import anticipation.ops as ops
 
 from anticipation.v2.config import AnticipationV2Settings
+from anticipation.v2.types import Token, MIDITick, MIDIProgramCode, MIDINote
 
 from tests.util.constants import MIDI_PROGRAM_NAMES
 
@@ -25,6 +26,7 @@ class EventSpecialCode(Enum):
     AUTOREGRESSIVE_TOKEN = 1
     ANTICIPATION_TOKEN = 2
     SEQ_SEPARATION_TOKENS = 3
+    TICK = 4
 
 
 class Note:
@@ -39,7 +41,7 @@ class Note:
     NAME_PC_MAP = {name: i for i, name in enumerate(NAMES)}
     _NOTE_RE = re.compile(r"^([A-G]#?)(-?\d+)$")
 
-    def __init__(self, midi_note_int: int) -> None:
+    def __init__(self, midi_note_int: MIDINote) -> None:
         if not (0 <= midi_note_int < 128):
             raise ValueError(
                 f"MIDI note integer must be in [0, 127], got {midi_note_int}"
@@ -47,7 +49,7 @@ class Note:
         self.midi_note_int = midi_note_int
 
     @classmethod
-    def make(cls, midi_note_int_or_name: Union[str, int]) -> "Note":
+    def make(cls, midi_note_int_or_name: Union[str, MIDINote]) -> "Note":
         if isinstance(midi_note_int_or_name, int):
             return Note(midi_note_int_or_name)
         elif isinstance(midi_note_int_or_name, str):
@@ -75,7 +77,7 @@ class Note:
         octave = (self.midi_note_int // 12) - 2
         return f"{self.NAMES[pitch_class]}{octave}"
 
-    def __int__(self) -> int:
+    def __int__(self) -> MIDINote:
         return self.midi_note_int
 
     def __str__(self) -> str:
@@ -90,12 +92,14 @@ class Note:
         return f"Note(midi={self.midi_note_int}, name='{self.to_name()}')"
 
 
-def get_note_instrument_token(instrument_midi_code: int, note_midi_code: int) -> int:
+def get_note_instrument_token(
+    instrument_midi_code: MIDIProgramCode, note_midi_code: MIDINote
+) -> Token:
     return v.NOTE_OFFSET + (v.MAX_PITCH * instrument_midi_code + note_midi_code)
 
 
 def get_midi_instrument_name_from_midi_instrument_code(
-    instrument_midi_code: int,
+    instrument_midi_code: MIDIProgramCode,
 ) -> str:
     if 0 <= instrument_midi_code < len(MIDI_PROGRAM_NAMES):
         return MIDI_PROGRAM_NAMES[instrument_midi_code]
@@ -104,26 +108,32 @@ def get_midi_instrument_name_from_midi_instrument_code(
         return "Drums (Channel 9)"
     elif instrument_midi_code == 129:
         return "REST"
+    elif instrument_midi_code == 130:
+        return "TICK"
     else:
         return "?"
 
 
 @dataclass
 class Event:
-    time: int
-    duration: int
-    note_instr: int
+    time: Token
+    duration: Token
+    note_instr: Token
+
+    # these are all 'derived', meaning they are not
+    # direct properties of a token sequence
     is_control: bool
     original_idx_in_token_seq: int
     special_code: EventSpecialCode = EventSpecialCode.TYPICAL_EVENT
+    absolute_time: MIDITick = 0
 
     @classmethod
     def from_midi_values(
         cls,
-        midi_time: int,
-        midi_duration: int,
-        midi_instrument: int,
-        midi_note: Union[int, str],
+        midi_time: MIDITick,
+        midi_duration: MIDITick,
+        midi_instrument: MIDIProgramCode,
+        midi_note: Union[MIDINote, str],
         is_control: bool = False,
         special_code: EventSpecialCode = EventSpecialCode.TYPICAL_EVENT,
         original_idx_in_token_seq: int = 0,
@@ -143,18 +153,20 @@ class Event:
                 midi_instrument, parsed_note.midi_note_int
             )
 
+        absolute_midi_time = midi_time + time_offset
         return Event(
-            time=midi_time + time_offset,
+            time=absolute_midi_time,
             duration=midi_duration + dur_offset,
             note_instr=note_instr + note_offset,
             is_control=is_control,
             special_code=special_code,
             original_idx_in_token_seq=original_idx_in_token_seq,
+            absolute_time=absolute_midi_time,
         )
 
     @classmethod
     def from_token_seq(
-        cls, raw_event_token_seq: list[int], settings: AnticipationV2Settings
+        cls, raw_event_token_seq: list[Token], settings: AnticipationV2Settings
     ) -> list["Event"]:
         if not raw_event_token_seq:
             return []
@@ -173,6 +185,8 @@ class Event:
             seconds=False,
         )
 
+        ticks_seen = 0
+        prev_tick_abs_time = 0
         while i < len(raw_event_token_seq):
             if raw_event_token_seq[i] in (v.AUTOREGRESS, v.ANTICIPATE):
                 # handle flag
@@ -184,7 +198,7 @@ class Event:
                 )
                 events.append(
                     Event(
-                        time=prev_t,
+                        time=v.TIME_OFFSET,
                         duration=v.DUR_OFFSET,
                         note_instr=get_note_instrument_token(0, 0),
                         is_control=False,
@@ -198,12 +212,13 @@ class Event:
                 # handle sep
                 events.append(
                     Event(
-                        time=prev_t + 1,
+                        time=v.TIME_OFFSET + 1,
                         duration=v.DUR_OFFSET,
                         note_instr=get_note_instrument_token(0, 0),
                         is_control=False,
                         special_code=EventSpecialCode.SEQ_SEPARATION_TOKENS,
                         original_idx_in_token_seq=i,
+                        absolute_time=v.TIME_OFFSET + 1,
                     )
                 )
                 i += 1
@@ -211,19 +226,39 @@ class Event:
             elif raw_event_token_seq[i] == settings.vocab.PAD:
                 i += 1
                 continue
+            elif raw_event_token_seq[i] == settings.vocab.TICK:
+                # tick token
+                tick_abs_time = ticks_seen * settings.tick_token_frequency_in_midi_ticks
+                events.append(
+                    Event(
+                        time=settings.vocab.TIME_OFFSET,
+                        duration=settings.vocab.DUR_OFFSET,
+                        note_instr=get_note_instrument_token(130, 0),
+                        is_control=False,
+                        special_code=EventSpecialCode.TICK,
+                        original_idx_in_token_seq=i,
+                        absolute_time=tick_abs_time,
+                    )
+                )
+                prev_tick_abs_time = tick_abs_time
+                ticks_seen += 1
+                i += 1
+                continue
             else:
                 # typical event
                 e = raw_event_token_seq[i : i + 3]
                 t, d, n = e
-                events.append(
-                    Event(
-                        time=t,
-                        duration=d,
-                        note_instr=n,
-                        is_control=(t >= v.ATIME_OFFSET),
-                        original_idx_in_token_seq=i,
-                    )
+                new_event = Event(
+                    time=t,
+                    duration=d,
+                    note_instr=n,
+                    is_control=(t >= v.ATIME_OFFSET),
+                    original_idx_in_token_seq=i,
+                    absolute_time=0,
                 )
+                new_event.absolute_time = prev_tick_abs_time + new_event.midi_time()
+                events.append(new_event)
+
                 if events[-1].is_control:
                     prev_t = t - v.ATIME_OFFSET
                 else:
@@ -232,7 +267,7 @@ class Event:
 
         return events
 
-    def midi_time(self) -> int:
+    def midi_time(self) -> MIDITick:
         if self.time < v.TIME_OFFSET:
             return self.time
         else:
@@ -241,17 +276,17 @@ class Event:
             else:
                 return self.time - v.TIME_OFFSET
 
-    def midi_duration(self) -> int:
+    def midi_duration(self) -> MIDITick:
         if self.is_control:
             return self.duration - v.ADUR_OFFSET
         else:
             return self.duration - v.DUR_OFFSET
 
-    def midi_note(self) -> int:
+    def midi_note(self) -> MIDINote:
         note, _ = self._separate_note_instr()
         return note
 
-    def midi_instrument(self) -> int:
+    def midi_instrument(self) -> MIDIProgramCode:
         # midi instrument aka midi 'program code'
         _, instrument = self._separate_note_instr()
         return instrument
@@ -261,7 +296,7 @@ class Event:
             self.midi_instrument()
         )
 
-    def _separate_note_instr(self) -> tuple[int, int]:
+    def _separate_note_instr(self) -> tuple[MIDINote, MIDIProgramCode]:
         t = v.CONTROL_OFFSET if self.is_control else 0
         b = self.note_instr - v.NOTE_OFFSET - t
         note = b - (2**7) * (b // 2**7)
@@ -272,7 +307,7 @@ class Event:
     def note(self) -> Note:
         return Note(self.midi_note())
 
-    def as_tokens(self) -> tuple[int, ...]:
+    def as_tokens(self) -> tuple[Token, ...]:
         if self.special_code == 1:
             return (v.AUTOREGRESS,)
         elif self.special_code == 2:
@@ -285,8 +320,11 @@ class Event:
     def is_rest(self, settings: AnticipationV2Settings) -> bool:
         return self.note_instr == settings.vocab.REST
 
+    def is_tick(self) -> bool:
+        return self.special_code == EventSpecialCode.TICK
+
     def __repr__(self) -> str:
-        return "Event(midi_time={0}, midi_duration={1}, midi_note={2} ({6}), midi_instrument={3}, is_control={4}, special_code={5})".format(
+        return "Event(midi_time={0}, midi_duration={1}, midi_note={2} ({6}), midi_instrument={3}, is_control={4}, special_code={5}, absolute_midi_time={7})".format(
             self.midi_time(),
             self.midi_duration(),
             self.midi_note(),
@@ -294,4 +332,5 @@ class Event:
             self.is_control,
             self.special_code,
             self.note().to_name(),
+            self.absolute_time,
         )
