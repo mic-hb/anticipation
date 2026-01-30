@@ -125,7 +125,7 @@ def interarrival_to_midi(tokens, debug=False):
     return mid
 
 
-def midi_to_compound(midifile, debug=False):
+def midi_to_compound(midifile, debug=False, time_resolution: int = TIME_RESOLUTION):
     if type(midifile) == str:
         midi = mido.MidiFile(midifile)
     else:
@@ -153,7 +153,7 @@ def midi_to_compound(midifile, debug=False):
 
             if message.type == 'note_on' and message.velocity > 0: # onset
                 # time quantization
-                time_in_ticks = round(TIME_RESOLUTION*time)
+                time_in_ticks = round(time_resolution*time)
 
                 # Our compound word is: (time, duration, note, instr, velocity)
                 tokens.append(time_in_ticks) # 5ms resolution
@@ -171,7 +171,7 @@ def midi_to_compound(midifile, debug=False):
                     if debug:
                         print('WARNING: ignoring bad offset')
                 else:
-                    duration_ticks = round(TIME_RESOLUTION*(time-onset_time))
+                    duration_ticks = round(time_resolution*(time-onset_time))
                     tokens[5*open_idx + 1] = duration_ticks
                     #del open_notes[(instr,message.note,message.channel)]
         elif message.type == 'set_tempo':

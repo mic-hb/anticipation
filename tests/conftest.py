@@ -30,6 +30,7 @@ def lmd_0_example_midi_path() -> Path:
     # from split 0, first file in name order
     return TEST_DATA_PATH / "0a0a2b0e4d3b7bf4c5383ba025c4683e.mid"
 
+
 @pytest.fixture(scope="function")
 def patch_config_and_reload(monkeypatch: pytest.MonkeyPatch) -> TestConfigPatcher:
     """

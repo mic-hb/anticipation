@@ -32,6 +32,7 @@ def _events_to_df(events: Iterable[Event]) -> pd.DataFrame:
                 e.note().to_name(),
                 e.special_code,
                 e.is_control,
+                e.original_idx_in_token_seq,
             )
         )
 
@@ -46,6 +47,7 @@ def _events_to_df(events: Iterable[Event]) -> pd.DataFrame:
             "note_name",
             "special_code",
             "is_control",
+            "original_idx_in_token_seq",
         ],
     )
     if (df["duration"] < 0).any():
@@ -80,65 +82,34 @@ def _add_boundaries_to_subplot(
     """
     dfb = df_boundaries.sort_values(by="start", kind="mergesort")
     for row in dfb.itertuples(index=False):
-        t = int(row.start)
         special_code = row.special_code
-
-        if special_code == EventSpecialCode.AUTOREGRESSIVE_TOKEN:
-            display_text = "autoregress"
-        elif special_code == EventSpecialCode.ANTICIPATION_TOKEN:
-            display_text = "anticipate"
-        elif special_code == EventSpecialCode.SEQ_SEPARATION_TOKENS:
-            display_text = "separator"
-        else:
-            display_text = "?"
-
-        if special_code == EventSpecialCode.SEQ_SEPARATION_TOKENS:
-            line_props = {"width": 1}
-            yshift = 0
-        else:
-            line_props = {"dash": "dash", "width": 1}
-            yshift = 10
-
-        fig.add_shape(
-            type="line",
-            x0=t,
-            x1=t,
-            y0=0,
-            y1=1,
-            xref="x",
-            yref="y domain",
-            line=line_props,
-            layer="above",
-            row=1,
-            col=1,
-        )
-        fig.add_shape(
-            type="line",
-            x0=t,
-            x1=t,
-            y0=0,
-            y1=1,
-            xref="x",
-            yref="y domain",
-            line=line_props,
-            layer="above",
-            row=2,
-            col=1,
-        )
-
-        # Annotation (top subplot only)
-        fig.add_annotation(
-            x=t,
-            y=1,
-            xref="x",
-            yref="y domain",
-            text=display_text,
-            showarrow=False,
-            yanchor="bottom",
-            yshift=yshift,
-            row=1,
-            col=1,
-        )
+        if row.original_idx_in_token_seq % 1024 == 0:
+            fig.add_shape(
+                type="line",
+                x0=0,
+                x1=1,
+                y0=row.idx,
+                y1=row.idx,
+                xref="x domain",
+                yref="y",
+                layer="above",
+                row=2,
+                col=1,
+                line={"dash": "dot", "width": 0.7},
+            )
+            fig.add_annotation(
+                # the far right of the graph is 1 (?)
+                x=1,
+                y=row.idx,
+                xref="x domain",
+                yref="y",
+                text="context",
+                showarrow=False,
+                yanchor="bottom",
+                yshift=0,
+                row=2,
+                col=1,
+            )
 
     first_delta_sec_in_ticks = int(delta * time_resolution)
     fig.add_shape(
@@ -166,34 +137,6 @@ def _add_boundaries_to_subplot(
         row=2,
         col=1,
     )
-
-    if first_control is not None:
-        fig.add_shape(
-            type="line",
-            x0=0,
-            x1=1,
-            y0=first_control.idx,
-            y1=first_control.idx,
-            xref="x domain",
-            yref="y",
-            layer="above",
-            row=2,
-            col=1,
-            line={"dash": "dot", "width": 0.7},
-        )
-        fig.add_annotation(
-            # the far right of the graph is 1 (?)
-            x=1,
-            y=first_control.idx,
-            xref="x domain",
-            yref="y",
-            text="Earliest Control Index",
-            showarrow=False,
-            yanchor="bottom",
-            yshift=0,
-            row=2,
-            col=1,
-        )
 
 
 def plot_pianoroll_with_index_timeline(
@@ -277,8 +220,26 @@ def plot_pianoroll_with_index_timeline(
             y: list[Optional[float]] = []
             custom: list[Optional[list[Any]]] = []
 
-            for idx, start, end, note, note_name, dur, is_control in sub2[
-                ["idx", "start", "end", "note", "note_name", "duration", "is_control"]
+            for (
+                idx,
+                start,
+                end,
+                note,
+                note_name,
+                dur,
+                is_control,
+                original_idx_in_token_seq,
+            ) in sub2[
+                [
+                    "idx",
+                    "start",
+                    "end",
+                    "note",
+                    "note_name",
+                    "duration",
+                    "is_control",
+                    "original_idx_in_token_seq",
+                ]
             ].itertuples(index=False):
                 x0 = int(start) + x_off
                 x1 = int(end) + x_off
@@ -298,6 +259,7 @@ def plot_pianoroll_with_index_timeline(
                     int(dur),
                     int(idx),
                     bool(is_control),
+                    int(original_idx_in_token_seq),
                 ]
                 custom.extend([row, row, None])
 
@@ -381,8 +343,76 @@ def plot_pianoroll_with_index_timeline(
         row=1,
         col=1,
     )
+
+    seq_boundary_times = []
+    k = 0
+    while k < len(events) - 1:
+        curr_event = events[k]
+        if curr_event.special_code == EventSpecialCode.ANTICIPATION_TOKEN:
+            j = k - 1
+            next_event = curr_event
+            while 0 < j and events[j].is_control:
+                next_event = events[j]
+                j -= 1
+
+            seq_boundary_times.append((next_event.midi_time(), "anticipate"))
+        elif curr_event.special_code == EventSpecialCode.AUTOREGRESSIVE_TOKEN:
+            j = k - 1
+            next_event = curr_event
+            while 0 < j and events[j].is_control:
+                next_event = events[j]
+                j -= 1
+
+            seq_boundary_times.append((next_event.midi_time(), "autoregress"))
+        k += 1
+
+    for seq_bound in seq_boundary_times:
+        t, label = seq_bound
+        fig.add_shape(
+            type="line",
+            x0=t,
+            x1=t,
+            y0=0,
+            y1=1,
+            xref="x",
+            yref="y domain",
+            line={"dash": "dot", "width": 0.7},
+            layer="above",
+            row=1,
+            col=1,
+        )
+        fig.add_shape(
+            type="line",
+            x0=t,
+            x1=t,
+            y0=0,
+            y1=1,
+            xref="x",
+            yref="y domain",
+            line={"dash": "dot", "width": 0.7},
+            layer="above",
+            row=2,
+            col=1,
+        )
+        fig.add_annotation(
+            x=t,
+            y=1,
+            xref="x",
+            yref="y domain",
+            text=label,
+            showarrow=False,
+            yanchor="bottom",
+            yshift=0,
+            row=1,
+            col=1,
+        )
+
     _add_boundaries_to_subplot(
-        fig, df_boundaries, delta, time_resolution, first_control,
+        fig,
+        df_boundaries,
+        delta,
+        time_resolution,
+        first_control,
     )
 
     # --- Row 2: Index timeline (time vs idx) ---
@@ -393,6 +423,7 @@ def plot_pianoroll_with_index_timeline(
         "Program: %{customdata[1]} (%{customdata[2]})<br>"
         "Note: %{customdata[3]} (%{customdata[4]})<br>"
         "Is Control: %{customdata[5]}<br>"
+        "Original index in token seq: %{customdata[6]}<br>"
         "<extra></extra>"
     )
 
@@ -428,6 +459,7 @@ def plot_pianoroll_with_index_timeline(
                         sub["note_name"].astype(str).to_numpy(),
                         sub["note"].astype(int).to_numpy(),
                         sub["is_control"].astype(bool).to_numpy(),
+                        sub["original_idx_in_token_seq"].astype(int).to_numpy(),
                     ],
                     axis=1,
                 ),

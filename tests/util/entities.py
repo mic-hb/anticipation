@@ -10,6 +10,8 @@ import re
 import anticipation.vocab as v
 import anticipation.ops as ops
 
+from anticipation.v2.config import AnticipationV2Settings
+
 from tests.util.constants import MIDI_PROGRAM_NAMES
 
 
@@ -112,6 +114,7 @@ class Event:
     duration: int
     note_instr: int
     is_control: bool
+    original_idx_in_token_seq: int
     special_code: EventSpecialCode = EventSpecialCode.TYPICAL_EVENT
 
     @classmethod
@@ -123,6 +126,7 @@ class Event:
         midi_note: Union[int, str],
         is_control: bool = False,
         special_code: EventSpecialCode = EventSpecialCode.TYPICAL_EVENT,
+        original_idx_in_token_seq: int = 0,
     ) -> "Event":
         note_offset = v.CONTROL_OFFSET if is_control else 0
         time_offset = v.ATIME_OFFSET if is_control else v.TIME_OFFSET
@@ -145,23 +149,33 @@ class Event:
             note_instr=note_instr + note_offset,
             is_control=is_control,
             special_code=special_code,
+            original_idx_in_token_seq=original_idx_in_token_seq,
         )
 
     @classmethod
-    def from_token_seq(cls, raw_event_token_seq: list[int]) -> list["Event"]:
+    def from_token_seq(
+        cls, raw_event_token_seq: list[int], settings: AnticipationV2Settings
+    ) -> list["Event"]:
         if not raw_event_token_seq:
             return []
 
+        v = settings.vocab
+        i = 0
         events = []
+
         # the function ops.min_time expects sequence to not contain any flag tokens
         prev_t = ops.min_time(
-            [x for x in raw_event_token_seq if x not in (v.ANTICIPATE, v.AUTOREGRESS)],
+            [
+                x
+                for x in raw_event_token_seq[i:]
+                if x not in (v.ANTICIPATE, v.AUTOREGRESS, v.PAD, v.SEPARATOR)
+            ],
             seconds=False,
         )
 
-        i = 0
         while i < len(raw_event_token_seq):
             if raw_event_token_seq[i] in (v.AUTOREGRESS, v.ANTICIPATE):
+                # handle flag
                 ar = raw_event_token_seq[i] == v.AUTOREGRESS
                 special_code = (
                     EventSpecialCode.AUTOREGRESSIVE_TOKEN
@@ -174,12 +188,14 @@ class Event:
                         duration=v.DUR_OFFSET,
                         note_instr=get_note_instrument_token(0, 0),
                         is_control=False,
+                        original_idx_in_token_seq=i,
                         special_code=special_code,
                     )
                 )
                 i += 1
-
-            if raw_event_token_seq[i] == v.SEPARATOR:
+                continue
+            elif raw_event_token_seq[i] == v.SEPARATOR:
+                # handle sep
                 events.append(
                     Event(
                         time=prev_t + 1,
@@ -187,22 +203,32 @@ class Event:
                         note_instr=get_note_instrument_token(0, 0),
                         is_control=False,
                         special_code=EventSpecialCode.SEQ_SEPARATION_TOKENS,
+                        original_idx_in_token_seq=i,
                     )
                 )
-                i += 3
-
-            e = raw_event_token_seq[i : i + 3]
-            t, d, n = e
-            events.append(
-                Event(
-                    time=t, duration=d, note_instr=n, is_control=(t >= v.ATIME_OFFSET)
-                )
-            )
-            if events[-1].is_control:
-                prev_t = t - v.ATIME_OFFSET
+                i += 1
+                continue
+            elif raw_event_token_seq[i] == settings.vocab.PAD:
+                i += 1
+                continue
             else:
-                prev_t = t
-            i += 3
+                # typical event
+                e = raw_event_token_seq[i : i + 3]
+                t, d, n = e
+                events.append(
+                    Event(
+                        time=t,
+                        duration=d,
+                        note_instr=n,
+                        is_control=(t >= v.ATIME_OFFSET),
+                        original_idx_in_token_seq=i,
+                    )
+                )
+                if events[-1].is_control:
+                    prev_t = t - v.ATIME_OFFSET
+                else:
+                    prev_t = t
+                i += 3
 
         return events
 
@@ -255,6 +281,9 @@ class Event:
             return v.SEPARATOR, v.SEPARATOR, v.SEPARATOR
         else:
             return self.time, self.duration, self.note_instr
+
+    def is_rest(self, settings: AnticipationV2Settings) -> bool:
+        return self.note_instr == settings.vocab.REST
 
     def __repr__(self) -> str:
         return "Event(midi_time={0}, midi_duration={1}, midi_note={2} ({6}), midi_instrument={3}, is_control={4}, special_code={5})".format(

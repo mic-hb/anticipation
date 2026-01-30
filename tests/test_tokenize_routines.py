@@ -4,11 +4,14 @@ import numpy as np
 
 from unittest.mock import patch
 
+import pytest
+
 from anticipation import config
 from anticipation.tokenize import maybe_tokenize, extract_spans
 import anticipation.ops as ops
 import anticipation.vocab as v
 from anticipation.convert import midi_to_compound
+from anticipation.v2.config import AnticipationV2Settings, Vocab
 
 from tests.conftest import (
     get_tokens_from_midi_file,
@@ -18,6 +21,16 @@ from tests.conftest import (
 )
 from tests.util.visualize_sequence import get_figure_and_open
 from tests.util.entities import Note, Event
+
+
+@pytest.fixture()
+def v1_default_settings() -> AnticipationV2Settings:
+    # I've written this so all the defaults are the same as what they were in v1
+    # this object mostly does nothing in the context of these test cases
+    # because the code uses what is written in `anticipation.config`. The fixture
+    # `patch_config_and_reload` can edit those at test time.
+    vocab = Vocab()
+    return AnticipationV2Settings(vocab=vocab)
 
 
 def test_note_parsing() -> None:
@@ -40,12 +53,18 @@ def test_note_parsing() -> None:
     assert int(Note.make("G8")) == 127
 
 
-def test_parse_event_instances() -> None:
+def test_parse_event_instances(v1_default_settings: AnticipationV2Settings) -> None:
     token_seq = [0, 10050, 11036, 50, 10050, 11038, 100, 10050, 11040]
-    event_seq = Event.from_token_seq(token_seq)
-    assert event_seq[0] == Event.from_midi_values(0, 50, 0, "C1")
-    assert event_seq[1] == Event.from_midi_values(50, 50, 0, "D1")
-    assert event_seq[2] == Event.from_midi_values(100, 50, 0, "E1")
+    event_seq = Event.from_token_seq(token_seq, v1_default_settings)
+    assert event_seq[0] == Event.from_midi_values(
+        0, 50, 0, "C1", original_idx_in_token_seq=0
+    )
+    assert event_seq[1] == Event.from_midi_values(
+        50, 50, 0, "D1", original_idx_in_token_seq=3
+    )
+    assert event_seq[2] == Event.from_midi_values(
+        100, 50, 0, "E1", original_idx_in_token_seq=6
+    )
 
 
 def test_patch_config_at_test_time(patch_config_and_reload: TestConfigPatcher) -> None:
@@ -60,7 +79,9 @@ def test_config_patch_rolled_back() -> None:
 
 
 def test_extract_span_and_anticipate_for_small_sequence(
-    c_major_midi_path: Path, patch_config_and_reload: TestConfigPatcher
+    c_major_midi_path: Path,
+    patch_config_and_reload: TestConfigPatcher,
+    v1_default_settings: AnticipationV2Settings,
 ) -> None:
     padding_density = 100
     anticipation_interval_seconds = 1
@@ -182,7 +203,7 @@ def test_extract_span_and_anticipate_for_small_sequence(
     ]
 
     get_figure_and_open(
-        Event.from_token_seq(tokens),
+        Event.from_token_seq(tokens, v1_default_settings),
         delta=config.DELTA,
         time_resolution=config.TIME_RESOLUTION,
         path=(VISUALIZATIONS_PATH / "viz_small_sequence_anticipated.html"),
@@ -191,7 +212,9 @@ def test_extract_span_and_anticipate_for_small_sequence(
 
 
 def test_tokenization_small_sequence_ar(
-    c_major_midi_path: Path, patch_config_and_reload: TestConfigPatcher
+    c_major_midi_path: Path,
+    patch_config_and_reload: TestConfigPatcher,
+    v1_default_settings: AnticipationV2Settings,
 ) -> None:
     m = 10
     event_size = 3
@@ -260,7 +283,7 @@ def test_tokenization_small_sequence_ar(
 
     # visualize the piano roll
     get_figure_and_open(
-        Event.from_token_seq(seq_1),
+        Event.from_token_seq(seq_1, v1_default_settings),
         delta=config.DELTA,
         time_resolution=config.TIME_RESOLUTION,
         path=(VISUALIZATIONS_PATH / "viz_small_sequence_ar.html"),
@@ -270,6 +293,7 @@ def test_tokenization_small_sequence_ar(
 
 def test_tokenization_lakh_anticipation_get_cold_start(
     lmd_0_example_midi_path: Path,
+    v1_default_settings: AnticipationV2Settings,
 ) -> None:
     with patch("anticipation.tokenize.np.random.choice", return_value=[128]):
         # force the call to np.random.choice to always return [128] for tokenize.py
@@ -296,12 +320,49 @@ def test_tokenization_lakh_anticipation_get_cold_start(
     for i, s in enumerate(tokens[:5]):
         assert len(s) == 1024
         get_figure_and_open(
-            Event.from_token_seq(s),
+            Event.from_token_seq(s, v1_default_settings),
             delta=config.DELTA,
             time_resolution=config.TIME_RESOLUTION,
             path=(VISUALIZATIONS_PATH / f"{i}_viz_seq_anticipated_cold_start.html"),
             auto_open=False,
         )
+
+
+def test_tokenization_lakh_boundary_special_tokens(
+    lmd_0_example_midi_path: Path,
+) -> None:
+    np.random.seed(1)
+    parse_info = get_tokens_from_midi_file(
+        lmd_0_example_midi_path,
+        augment_factor=10,
+        include_original=True,
+        do_span_augmentation=True,
+        do_random_augmentation=False,
+        do_instrument_augmentation=True,
+    )
+
+    # a list of sequences of tokens
+    tokens: list[list[int]] = parse_info["tokens"]
+    assert parse_info["num_too_short"] == 0
+    assert parse_info["num_too_long"] == 0
+    assert parse_info["num_too_many_instruments"] == 0
+    assert parse_info["num_inexpressible"] == 0
+    assert parse_info["seqcount"] == len(tokens) == 50
+
+    # these are separated by a newline on disk save
+    for seq in tokens:
+        assert len(seq) == 1024
+
+        # the first token is always one of these BOS-like tokens
+        assert seq[0] in (v.AUTOREGRESS, v.ANTICIPATE)
+
+        # if it is the AR/AN flag, then, the next token
+        # can either be a separator...
+        if seq[1] == v.SEPARATOR:
+            assert all([x == v.SEPARATOR for x in seq[1:4]])
+        else:
+            # or it can be events
+            assert seq[1] not in (v.AUTOREGRESS, v.ANTICIPATE, v.SEPARATOR)
 
 
 def tmp_seq_pack(
@@ -360,7 +421,9 @@ def mark_spans_without_separating(all_events, rate):
     return events_and_controls, spans
 
 
-def test_tokenization_lakh_no_packing(lmd_0_example_midi_path: Path) -> None:
+def test_tokenization_lakh_no_packing(
+    lmd_0_example_midi_path: Path, v1_default_settings: AnticipationV2Settings
+) -> None:
     # tokenize the midi directly
     midi_preprocess_token_list: list[int] = midi_to_compound(
         str(lmd_0_example_midi_path.absolute())
@@ -393,7 +456,7 @@ def test_tokenization_lakh_no_packing(lmd_0_example_midi_path: Path) -> None:
     rejoined = [x for b in chunks for x in b]
 
     # now we should have the sequence but without any sequence packing boundaries
-    events = Event.from_token_seq(rejoined)
+    events = Event.from_token_seq(rejoined, v1_default_settings)
     # assert len(events) == 3762
     # events_bass_only = [x for x in events if x.midi_instrument() == 36]
     # for e in events:

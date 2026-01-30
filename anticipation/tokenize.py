@@ -154,8 +154,6 @@ def tokenize(datafiles, output, augment_factor, idx=0, debug=False, include_orig
 
             instruments = list(ops.get_instruments(all_events).keys())
             end_time = ops.max_time(all_events, seconds=False)
-            print(instruments)
-
             # different random augmentations
             # pp 24
             # 10% without anticipation (standard AR)
@@ -190,8 +188,6 @@ def tokenize(datafiles, output, augment_factor, idx=0, debug=False, include_orig
                             # instrument augmentation: at least one, but not all instruments
                             u = 1+np.random.randint(len(instruments)-1)
                             subset = np.random.choice(instruments, u, replace=False)
-                            print(subset)
-                            subset = [128]
                             events, controls = extract_instruments(all_events, subset)
                         else:
                             # no augmentation
