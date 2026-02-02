@@ -410,7 +410,7 @@ def lm_to_midi(tokens, vocab, debug=False):
     compound = events_to_compound(events, debug=debug)
     return compound_to_midi(compound, vocab, debug=debug)
 
-def lm_to_event(tokens, vocab, debug=False):
+def lm_to_event_old(tokens, vocab, debug=False): # this is actually wrong because i'm assuming that i start from triples, when I might actually start from a duration because of a continuation from a previous sequence!!
     time_res = localmidivocab["config"]["midi_quantization"]
     tick_token = localmidivocab["tick"]
     sep = localmidivocab['separator']
@@ -427,7 +427,8 @@ def lm_to_event(tokens, vocab, debug=False):
         if tok == tick_token:
             time_ticks += 1
             i += 1
-        elif tok in flags or tok == vocab['control_end'] or tok == localmidivocab["separator"]:
+        # i think i meant localmidivocab['control_end'] instead of vocab['control_end']
+        elif tok in flags or tok == localmidivocab['control_end'] or tok == localmidivocab["separator"]:
             i += 1
         else: # need [delta, dur, note]
             if i + 2 >= n:
@@ -450,3 +451,136 @@ def lm_to_event(tokens, vocab, debug=False):
     assert len(seq) % 3 == 0
 
     return seq
+
+
+def lm_to_event(tokens, vocab, debug=False): # this is actually wrong because i'm assuming that i start from triples, when I might actually start from a duration because of a continuation from a previous sequence!!
+    time_res = localmidivocab["config"]["midi_quantization"]
+    tick_token = localmidivocab["tick"]
+    sep = localmidivocab['separator']
+    flags = set(localmidivocab.get("flags", {}).values()) if "flags" in localmidivocab else set()
+
+    seq = []
+    time_ticks = 0
+    i = 0
+    n = len(tokens)
+
+    while i < n:
+        tok = tokens[i]
+
+        if tok == tick_token:
+            time_ticks += 1
+            i += 1
+        # i think i meant localmidivocab['control_end'] instead of vocab['control_end']
+        elif tok in flags or tok == localmidivocab['control_end'] or tok == localmidivocab["separator"]:
+            i += 1
+        elif 100 <= tok <= 1099: # triple starts on duration token
+            i += 1
+        elif 1100 <= tok <= 17611: # triple starts on note token
+            i += 1
+        else: # need [delta, dur, note]
+            if i + 2 >= n:
+                if debug:
+                    print(f"truncated event at idx={i}")
+                break
+
+            delta_local = tokens[i]
+            dur_local = tokens[i + 1]
+            note_local = tokens[i + 2]
+
+            if not (0 <= delta_local <= 99 and 100 <= dur_local <= 1099 and 1100 <= note_local <= 17611):
+                i += 1
+                continue
+
+            dur = dur_local - localmidivocab["duration_offset"] + tripletmidivocab["duration_offset"]
+            note = note_local - localmidivocab["note_offset"] + tripletmidivocab["note_offset"]
+
+            abs_time = (round((time_ticks - 1) * time_res) + delta_local) if time_ticks > 0 else delta_local
+
+            seq.extend([abs_time, dur, note])
+            i += 3
+
+    assert len(seq) % 3 == 0
+
+    return seq
+
+
+def lm_to_event_anticipation(tokens, vocab, debug=False):
+    from anticipation import ops
+    from anticipation.vocabs.tripletmidi import vocab as tripletmidivocab
+    from anticipation.vocabs.localmidi import vocab as localmidivocab
+    
+    time_res = localmidivocab["config"]["midi_quantization"]
+    tick_token = localmidivocab["tick"]
+    flags = set(localmidivocab.get("flags", {}).values()) if "flags" in localmidivocab else set()
+    
+    seq = []
+    time_ticks = 0
+    i = 0
+    n = len(tokens)
+    
+    while i < n:
+        tok = tokens[i]
+        
+        # Skip flags and control tokens
+        if tok in flags or tok == localmidivocab['control_end'] or tok == localmidivocab["separator"]: # TODO: add anticipation token (delta)
+            i += 1
+            continue
+        
+        if tok == tick_token:
+            time_ticks += 1
+            i += 1
+            continue
+        
+        if i + 2 >= n:
+            if debug:
+                print(f"truncated event at idx={i}")
+            break
+        
+        time_local = tokens[i]
+        dur_local = tokens[i + 1]
+        note_local = tokens[i + 2]
+        
+        tick_time = time_ticks * time_res if time_ticks > 0 else 0
+        
+        if localmidivocab['note_offset'] <= note_local < localmidivocab['anote_offset']:
+            # Regular event triplet - convert back to tripletmidi format
+            relative_time = time_local - localmidivocab['time_offset']
+            abs_time = tick_time + relative_time
+            
+            time_triplet = abs_time + tripletmidivocab['time_offset']
+            dur_triplet = dur_local - localmidivocab['duration_offset'] + tripletmidivocab['duration_offset']
+            note_triplet = note_local - localmidivocab['note_offset'] + tripletmidivocab['note_offset']
+            
+            seq.extend([time_triplet, dur_triplet, note_triplet])
+            
+        elif localmidivocab['anote_offset'] <= note_local < localmidivocab.get('separator'):
+            relative_time = time_local - localmidivocab['atime_offset']
+            abs_time = tick_time + relative_time
+            
+            time_triplet = abs_time + tripletmidivocab['atime_offset']
+            dur_triplet = dur_local - localmidivocab['aduration_offset'] + tripletmidivocab['aduration_offset']
+            note_triplet = note_local - localmidivocab['anote_offset'] + tripletmidivocab['anote_offset']
+            
+            seq.extend([time_triplet, dur_triplet, note_triplet])
+        else:
+            if debug:
+                print(f"Skipping invalid note token at idx={i}: {note_local}")
+            i += 1
+            continue
+        
+        i += 3
+    
+    assert len(seq) % 3 == 0
+    
+    # interleaved events and controls in tripletmidi need to be separated
+    events, controls = ops.split(seq)
+    
+    # Combine back into normal sequence
+    combined = ops.combine(events, controls)
+    
+    return combined
+
+def lm_anticipation_to_midi(tokens, vocab, debug=False):
+    events = lm_to_event_anticipation(tokens, vocab, debug=debug)
+    compound = events_to_compound(events, debug=debug)
+    return compound_to_midi(compound, vocab, debug=debug)

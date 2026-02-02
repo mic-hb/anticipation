@@ -3,6 +3,7 @@ from pathlib import Path
 
 from anticipation.convert import events_to_midi
 from anticipation.convert import lm_to_midi
+from anticipation.convert import lm_anticipation_to_midi
 
 if __name__ == '__main__':
     parser = ArgumentParser(description='auditory check for a tokenized dataset')
@@ -12,7 +13,10 @@ if __name__ == '__main__':
         help='the item to examine')
     parser.add_argument('range', type=int, default=1,
         help='range of items to examine')
-    parser.add_argument('vocab', type=str, default='triplet-midi', help='vocab type: triplet-midi or local-midi')
+    parser.add_argument('vocab', type=str, default='triplet-midi', 
+        help='vocab type: triplet-midi or local-midi')
+    parser.add_argument('--task', type=str, default='autoregress',
+        help='task type: autoregress or instrument/span/random (for anticipation)')
 
     args = parser.parse_args()
 
@@ -21,7 +25,7 @@ if __name__ == '__main__':
             if i < args.index:
                 continue
 
-            if i == args.index+args.range:
+            if i == args.index + args.range:
                 break
             
             tokens = [int(token) for token in line.split()]
@@ -31,10 +35,16 @@ if __name__ == '__main__':
                 print(f"sonify token length: {len(tokens)}")
                 tokens = [tok for tok in tokens if tok < vocab['special_offset']]
                 print(f"after removing special offset: {len(tokens)}")
-                assert(len(tokens) % 3 == 0)
+                assert len(tokens) % 3 == 0
                 mid = events_to_midi(tokens, vocab)
-            else: # vocab = local-midi
-                from anticipation.vocabs.localmidi import vocab
-                # tokens = [tok for tok in tokens if tok < vocab['special_offset']]
-                mid = lm_to_midi(tokens, vocab)
+            else:  # vocab = local-midi
+                from anticipation.vocabs.tripletmidi import vocab  # Use tripletmidi vocab for conversion back
+                print(f"sonify token length: {len(tokens)}")
+                
+                if args.task == 'autoregress':
+                    mid = lm_to_midi(tokens, vocab)
+                else:  # anticipation tasks (instrument, span, random)
+                    mid = lm_anticipation_to_midi(tokens, vocab)
+                    
+            print("midi created")
             mid.save(f'output/{Path(args.filename).stem}{i}.mid')

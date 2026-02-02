@@ -144,6 +144,29 @@ def pad(tokens, end_time=None, density=TIME_RESOLUTION):
 
     return new_tokens
 
+def tick(tokens, tick_token, time_res, end_time=None):
+    end_time = TIME_OFFSET + (end_time if end_time else max_time(tokens, seconds=False))
+    new_tokens = []
+
+    tick_idx = 0
+    next_tick = TIME_OFFSET + tick_idx * time_res # insert token at timestep 0
+    
+    for (time, dur, note) in zip(tokens[0::3],tokens[1::3],tokens[2::3]):
+        while next_tick <= time:
+            new_tokens.extend([next_tick, DUR_OFFSET+0, localmidivocab['tick']]) # has to stay triplet of this form in order to be processed by anticipate properly
+            tick_idx += 1
+            next_tick = TIME_OFFSET + tick_idx * time_res
+        
+        # relativize = tick_idx * time_res if tick_idx > 0 else 0
+        relativize = 0
+        new_tokens.extend([time - relativize, dur, note])
+    
+    while next_tick <= end_time: # same thing as pad, except adding tick tokens until end_time
+        new_tokens.extend([next_tick, DUR_OFFSET+0, localmidivocab['tick']])
+        tick_idx += 1
+        next_tick = TIME_OFFSET + tick_idx * time_res
+
+    return new_tokens
 
 def unpad(tokens):
     new_tokens = []

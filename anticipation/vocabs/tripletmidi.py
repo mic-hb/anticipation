@@ -74,6 +74,9 @@ vocab = {
     'time_offset' : TIME_OFFSET,
     'duration_offset' : DUR_OFFSET,
     'note_offset' : NOTE_OFFSET,
+    'atime_offset' : ATIME_OFFSET,
+    'aduration_offset' : ADUR_OFFSET,
+    'anote_offset' : ANOTE_OFFSET,
     'special_offset' : SPECIAL_OFFSET,
 }
 

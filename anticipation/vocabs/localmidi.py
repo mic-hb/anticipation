@@ -58,6 +58,9 @@ vocab = {
     'duration_offset' : DUR_OFFSET,
     'note_offset' : NOTE_OFFSET,
     'control_offset' : CONTROL_OFFSET,
+    'atime_offset' : ATIME_OFFSET,
+    'aduration_offset' : ADUR_OFFSET,
+    'anote_offset' : ANOTE_OFFSET,
     'global_control_offset' : CONTROL_OFFSET,
 
     # special tokens

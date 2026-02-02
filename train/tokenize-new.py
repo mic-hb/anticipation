@@ -11,8 +11,8 @@ import numpy as np
 from anticipation import ops
 from anticipation import tokenize
 
-def prepare_local_midi(midifile, tripletmidivocab, localmidivocab, task, transcript):
-    with open(midifile, 'r') as f:
+def prepare_local_midi_autoregress(midifile, tripletmidivocab, localmidivocab, task, transcript):
+        with open(midifile, 'r') as f:
         events, truncations, status = tokenize.maybe_tokenize([int(token) for token in f.read().split()])
         # print(f"max of events: {max(events)}")
     if status > 0:
@@ -21,8 +21,20 @@ def prepare_local_midi(midifile, tripletmidivocab, localmidivocab, task, transcr
     if task == 'autoregress':
         z = [localmidivocab['control_end']] # BOS tag, could be more in the future
         # no "if transcript"
-    else: # anticipation, implementing later
-        pass
+    else: # NOTE: not entirely sure of what the right flag is
+        z = [localmidivocab['anticipation']]
+
+        if task == 'instrument':
+            instruments = list(ops.get_instruments(events).keys())
+            if len(instruments) < 2:
+                # need at least two instruments for instrument anticipation
+                return events, 4 # status 4 == too few instruments
+
+            u = 1+np.random.randint(len(instruments)-1)
+            subset = np.random.choice(instruments, u, replace=False)
+            events, controls = tokenize.extract_instruments(events, subset)
+        else: # other options like span
+            pass
     
     time_res = localmidivocab["config"]["midi_quantization"]
     recent_tick = 0
@@ -43,6 +55,143 @@ def prepare_local_midi(midifile, tripletmidivocab, localmidivocab, task, transcr
             tokens.append(note - tripletmidivocab['note_offset'] + localmidivocab['note_offset']) 
             # print(f"note: {note}")
     
+    separator = [localmidivocab['separator']]
+    return tokens, z, separator, 0
+
+def prepare_local_midi_old(midifile, tripletmidivocab, localmidivocab, task, transcript): # only works for anticipation right now
+    with open(midifile, 'r') as f:
+        events, truncations, status = tokenize.maybe_tokenize([int(token) for token in f.read().split()])
+        # print(f"max of events: {max(events)}")
+    if status > 0:
+        return events, [], [], status
+    
+    end_time = ops.max_time(events, seconds=False) # NOTE: do we need the same thing here
+
+    if task == 'autoregress':
+        z = [localmidivocab['control_end']] # BOS tag, could be more in the future
+        # no "if transcript"
+    else: # NOTE: not entirely sure of what the right flag is
+        if task == 'instrument':
+            z = [localmidivocab['control_end']] # we want new token that is task_instr and control_end --> replace delta offset and say task_instr is global control offset + 3
+            instruments = list(ops.get_instruments(events).keys())
+            if len(instruments) < 2:
+                # need at least two instruments for instrument anticipation
+                return events, 4 # status 4 == too few instruments
+
+            u = 1+np.random.randint(len(instruments)-1)
+            subset = np.random.choice(instruments, u, replace=False)
+            events, controls = tokenize.extract_instruments(events, subset)
+        else: # other options like span
+            pass
+    
+    time_res = localmidivocab["config"]["midi_quantization"]
+    recent_tick = 0
+    tokens = []
+
+    events = ops.tick(events, end_time, time_res)
+
+    anticipated_events, controls = ops.anticipate(events, controls) # assuming controls completely consumed as well
+
+    # separators are in groups of three here, strip them out
+    # fix the note durations by subtracting offset and then adding the note offset
+    for time, dur, note in zip(anticipated_events[0::3], anticipated_events[1::3], anticipated_events[2::3]):
+        if time != tripletmidivocab['separator'] and dur != tripletmidivocab['separator'] and note != tripletmidivocab['separator']:
+            # check whether the time token falls into events or controls; also need to relativize as well in here
+            if note == localmidivocab['tick']:
+                recent_tick = time - TIME_OFFSET # same TIME_OFFSET from ops.py
+                tokens.append(localmidivocab['tick'])
+            else: # either event or control triplet
+                if NOTE_OFFSET <= note < CONTROL_OFFSET: # event, values from vocab.py --> verify if same as tripletmidi
+                    tokens.append(time - recent_tick - tripletmidivocab['time_offset'] + localmidivocab['time_offset'])
+                    tokens.append(dur - tripletmidivocab['duration_offset'] + localmidivocab['duration_offset'])
+                    tokens.append(note - tripletmidivocab['note_offset'] + localmidivocab['note_offset'])
+                elif CONTROL_OFFSET <= note < SPECIAL_OFFSET: # control, values from vocab.py --> verify if same as tripletmidi or is it anote_offset <= note < special_offset
+                    tokens.append(time - recent_tick - tripletmidivocab['atime_offset'] + localmidivocab['atime_offset'])
+                    tokens.append(dur - tripletmidivocab['aduration_offset'] + localmidivocab['aduration_offset'])
+                    tokens.append(note - tripletmidivocab['anote_offset'] + localmidivocab['anote_offset'])
+                else:
+                    pass # assert something here
+
+    separator = [localmidivocab['separator']]
+    return tokens, z, separator, 0
+
+def prepare_local_midi(midifile, tripletmidivocab, localmidivocab, task, transcript, delta_seconds=None):
+    with open(midifile, 'r') as f:
+        events, truncations, status = tokenize.maybe_tokenize([int(token) for token in f.read().split()])
+    
+    if status > 0:
+        return events, [], [], status
+    
+    end_time = ops.max_time(events, seconds=False)
+
+    # Set up control prefix
+    if task == 'autoregress':
+        z = [localmidivocab['control_end']]
+        controls = []
+    else:
+        if task == 'instrument':
+            z = [localmidivocab['control_end']]
+
+            if delta_seconds is None: # TODO: check if this is fine for controllable anticipation interval
+                z.append(localmidivocab['anticipation'])
+            else:
+                z.append(localmidivocab['anticipation'] + delta_seconds) 
+
+            
+            instruments = list(ops.get_instruments(events).keys())
+            if len(instruments) < 2:
+                return events, [], [], 4
+
+            u = 1 + np.random.randint(len(instruments)-1)
+            subset = np.random.choice(instruments, u, replace=False)
+            events, controls = tokenize.extract_instruments(events, subset)
+        else:
+            z = [localmidivocab['control_end']]
+            controls = []
+    
+    time_res = localmidivocab["config"]["midi_quantization"]
+    
+    events_with_ticks = ops.tick(events, localmidivocab['tick'], time_res, end_time)
+    
+    if delta_seconds is None:
+        anticipated_events, remaining_controls = ops.anticipate(events_with_ticks, controls)
+    else:
+        anticipated_events, remaining_controls = ops.anticipate(events_with_ticks, controls, delta=delta_seconds * time_res)
+    
+    tokens = []
+    recent_tick_idx = 0
+    
+    for time, dur, note in zip(anticipated_events[0::3], anticipated_events[1::3], anticipated_events[2::3]):
+        # Skip separators
+        if time == tripletmidivocab['separator'] or dur == tripletmidivocab['separator'] or note == tripletmidivocab['separator']:
+            continue
+            
+        # Check if this is a tick token
+        if note == localmidivocab['tick']:
+            tokens.append(localmidivocab['tick'])
+            recent_tick_idx = (time - tripletmidivocab['time_offset']) // time_res
+        else:
+            if tripletmidivocab['note_offset'] <= note < tripletmidivocab['control_offset']:  # regular event token
+                abs_time = time - tripletmidivocab['time_offset']
+                tick_time = recent_tick_idx * time_res
+                relative_time = abs_time - tick_time
+                
+                # Convert to local-midi format
+                tokens.append(relative_time + localmidivocab['time_offset'])
+                tokens.append(dur - tripletmidivocab['duration_offset'] + localmidivocab['duration_offset'])
+                tokens.append(note - tripletmidivocab['note_offset'] + localmidivocab['note_offset'])
+                
+            elif tripletmidivocab['anote_offset'] <= note < tripletmidivocab['special_offset']:  # Control
+                # Get absolute time, then relativize to most recent tick
+                abs_time = time - tripletmidivocab['atime_offset']
+                tick_time = recent_tick_idx * time_res
+                relative_time = abs_time - tick_time
+                
+                # Convert to local-midi format
+                tokens.append(relative_time + localmidivocab['atime_offset'])
+                tokens.append(dur - tripletmidivocab['aduration_offset'] + localmidivocab['aduration_offset'])
+                tokens.append(note - tripletmidivocab['anote_offset'] + localmidivocab['anote_offset'])
+
     separator = [localmidivocab['separator']]
     return tokens, z, separator, 0
 
@@ -157,7 +306,7 @@ def main(args):
         # print("triplet vocab keys:", tripletmidivocab.keys())
         # print("local vocab keys:", localmidivocab.keys())
 
-        prepare = partial(prepare_local_midi, tripletmidivocab=tripletmidivocab, localmidivocab=localmidivocab, task=args.task, transcript=args.transcript)
+        prepare = partial(prepare_local_midi, tripletmidivocab=tripletmidivocab, localmidivocab=localmidivocab, task=args.task, transcript=args.transcript, delta_seconds=args.delta)
     else:
         raise ValueError(f'Invalid vocabulary type "{args.vocab}"')
 
@@ -232,5 +381,6 @@ if __name__ == '__main__':
     parser.add_argument('-t', '--transcript', action='store_true', help='transcribed midi file')
     parser.add_argument('--workers', type=int, default=16, help='number of workers/shards')
     parser.add_argument('--debug', action='store_true', help='debugging (single shard; non-parallel)')
+    parser.add_argument('--delta', type=int, default=None, help='used for controllable anticipation interval, in case using a different anticipation interval')
 
     main(parser.parse_args())

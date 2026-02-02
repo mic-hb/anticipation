@@ -32,7 +32,7 @@ def main(args):
     model = GPT2LMHeadModel.from_pretrained(args.model).to(device)
     torch.manual_seed(args.seed)
 
-    input_ids = torch.tensor([vocab['separator'], vocab['control_end']]).to(device)
+    input_ids = torch.tensor([vocab['control_end']]).to(device)
 
     with open(args.output, 'w') as f:
         for i in range(args.sequences):
