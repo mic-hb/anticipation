@@ -14,7 +14,9 @@ from tests.conftest import (
 from util.entities import EventSpecialCode
 
 
-def test_tokenize_v2_lakh_ar_only_for_visualization(lmd_0_example_midi_path: Path) -> None:
+def test_tokenize_v2_lakh_ar_only_for_visualization(
+    lmd_0_example_midi_path: Path,
+) -> None:
     settings = AnticipationV2Settings(
         vocab=Vocab(),
         num_autoregressive_seq_per_midi_file=1,
@@ -42,7 +44,10 @@ def test_tokenize_v2_lakh_ar_only_for_visualization(lmd_0_example_midi_path: Pat
         auto_open=True,
     )
 
-def test_tokenize_v2_lakh_instrument_for_visualization(lmd_0_example_midi_path: Path) -> None:
+
+def test_tokenize_v2_lakh_instrument_for_visualization(
+    lmd_0_example_midi_path: Path,
+) -> None:
     with patch("anticipation.tokenize.np.random.choice", return_value=[128]):
         # force the call to np.random.choice to always return [128] for tokenize.py
         # This means that the instrument code 128 will always be a control. This code
@@ -56,7 +61,9 @@ def test_tokenize_v2_lakh_instrument_for_visualization(lmd_0_example_midi_path: 
             num_random_anticipation_augmentations_per_midi_file=0,
             debug=True,
         )
-        instrument_anticipation_sample = v2_tokenize([lmd_0_example_midi_path], settings)
+        instrument_anticipation_sample = v2_tokenize(
+            [lmd_0_example_midi_path], settings
+        )
 
     assert len(instrument_anticipation_sample) == 8777
     for i in range(0, len(instrument_anticipation_sample), settings.context_size):
@@ -64,7 +71,9 @@ def test_tokenize_v2_lakh_instrument_for_visualization(lmd_0_example_midi_path: 
         first_token_in_seq_chunk = instrument_anticipation_sample[i]
         assert first_token_in_seq_chunk == settings.vocab.ANTICIPATE
 
-    num_seps = len([x for x in instrument_anticipation_sample if x == settings.vocab.SEPARATOR])
+    num_seps = len(
+        [x for x in instrument_anticipation_sample if x == settings.vocab.SEPARATOR]
+    )
     assert num_seps == 1
 
     parsed_events = Event.from_token_seq(instrument_anticipation_sample, settings)
@@ -75,6 +84,7 @@ def test_tokenize_v2_lakh_instrument_for_visualization(lmd_0_example_midi_path: 
         path=(VISUALIZATIONS_PATH / f"anticipated_instr_v2.html"),
         auto_open=True,
     )
+
 
 def test_tokenize_with_ticks_for_small_sequence_ar(
     c_major_midi_path: Path,
@@ -98,7 +108,9 @@ def test_tokenize_with_ticks_for_small_sequence_ar(
     # check that the ticks are added at specified interval
     ticks = [x for x in parsed_events if x.is_tick()]
     ticks_abs_times = [x.absolute_time for x in ticks]
-    assert ticks_abs_times == list(range(0, 1500 + 1, settings.tick_token_frequency_in_midi_ticks))
+    assert ticks_abs_times == list(
+        range(0, 1500 + 1, settings.tick_token_frequency_in_midi_ticks)
+    )
     get_figure_and_open(
         events=parsed_events,
         delta=settings.delta,
@@ -107,9 +119,8 @@ def test_tokenize_with_ticks_for_small_sequence_ar(
         auto_open=True,
     )
 
-def test_tokenize_with_ticks_for_lakh_ar(
-    lmd_0_example_midi_path: Path
-) -> None:
+
+def test_tokenize_with_ticks_for_lakh_ar(lmd_0_example_midi_path: Path) -> None:
     settings = AnticipationV2Settings(
         min_track_events=1,
         vocab=Vocab(),
@@ -133,9 +144,8 @@ def test_tokenize_with_ticks_for_lakh_ar(
         auto_open=True,
     )
 
-def test_absolute_time_is_correct_with_ticks(
-    lmd_0_example_midi_path: Path
-) -> None:
+
+def test_absolute_time_is_correct_with_ticks(lmd_0_example_midi_path: Path) -> None:
     settings = AnticipationV2Settings(
         min_track_events=1,
         vocab=Vocab(),
@@ -148,13 +158,25 @@ def test_absolute_time_is_correct_with_ticks(
         debug=True,
     )
     # tokenize and parse without ticks added
-    events_without_ticks = Event.from_token_seq(v2_tokenize([lmd_0_example_midi_path], settings), settings)
-    events_without_ticks = [x for x in events_without_ticks if x.special_code == EventSpecialCode.TYPICAL_EVENT]
+    events_without_ticks = Event.from_token_seq(
+        v2_tokenize([lmd_0_example_midi_path], settings), settings
+    )
+    events_without_ticks = [
+        x
+        for x in events_without_ticks
+        if x.special_code == EventSpecialCode.TYPICAL_EVENT
+    ]
 
     # tokenize and parse WITH ticks added
     settings.do_add_ticks = True
-    events_include_ticks = Event.from_token_seq(v2_tokenize([lmd_0_example_midi_path], settings), settings)
-    events_include_ticks = [x for x in events_include_ticks if x.special_code == EventSpecialCode.TYPICAL_EVENT]
+    events_include_ticks = Event.from_token_seq(
+        v2_tokenize([lmd_0_example_midi_path], settings), settings
+    )
+    events_include_ticks = [
+        x
+        for x in events_include_ticks
+        if x.special_code == EventSpecialCode.TYPICAL_EVENT
+    ]
 
     # assert no information loss and that time de-relativization works
     for a, b in zip(events_without_ticks, events_include_ticks):
