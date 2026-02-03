@@ -14,7 +14,7 @@ from anticipation.convert import midi_to_compound
 from anticipation.v2.config import AnticipationV2Settings, Vocab
 
 from tests.conftest import (
-    get_tokens_from_midi_file,
+    get_tokens_from_midi_file_v1,
     TestConfigPatcher,
     patch_config_and_reload,
     VISUALIZATIONS_PATH,
@@ -220,8 +220,10 @@ def test_tokenization_small_sequence_ar(
     event_size = 3
     augment_factor = 1
     patch_config_and_reload(MIN_TRACK_EVENTS=0, MIN_TRACK_TIME_IN_SECONDS=0, M=m)
-    parse_info = get_tokens_from_midi_file(
-        c_major_midi_path, augment_factor=augment_factor, return_original_compound=True
+    parse_info = get_tokens_from_midi_file_v1(
+        [c_major_midi_path],
+        augment_factor=augment_factor,
+        return_original_compound=True,
     )
     compound = parse_info["compound"]
     sequences = parse_info["tokens"]
@@ -300,8 +302,8 @@ def test_tokenization_lakh_anticipation_get_cold_start(
         # This means that the instrument code 128 will always be a control. This code
         # is the drum track for this sample. This makes it much easier to see the
         # cold start issue
-        parse_info = get_tokens_from_midi_file(
-            lmd_0_example_midi_path,
+        parse_info = get_tokens_from_midi_file_v1(
+            [lmd_0_example_midi_path],
             augment_factor=10,
             include_original=False,
             do_span_augmentation=False,
@@ -332,8 +334,8 @@ def test_tokenization_lakh_boundary_special_tokens(
     lmd_0_example_midi_path: Path,
 ) -> None:
     np.random.seed(1)
-    parse_info = get_tokens_from_midi_file(
-        lmd_0_example_midi_path,
+    parse_info = get_tokens_from_midi_file_v1(
+        [lmd_0_example_midi_path],
         augment_factor=10,
         include_original=True,
         do_span_augmentation=True,

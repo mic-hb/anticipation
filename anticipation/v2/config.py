@@ -1,9 +1,14 @@
-from dataclasses import dataclass
+from typing import Any
+from pathlib import Path
+from dataclasses import dataclass, asdict
+from json import dumps, loads
+from functools import cache
 
 import anticipation.vocab as v1_vocab
+from anticipation.v2.util import get_md5_of_string
 
 
-@dataclass
+@dataclass(frozen=True)
 class Vocab:
     SEPARATOR: int = v1_vocab.SEPARATOR
     CONTROL_OFFSET: int = v1_vocab.CONTROL_OFFSET
@@ -38,7 +43,7 @@ class Vocab:
     PAD: int = _last_token_in_v1 + 2
 
 
-@dataclass
+@dataclass(frozen=True)
 class AnticipationV2Settings:
     """
     Object for holding 'global'-like settings. If a property is frequently referenced
@@ -69,7 +74,60 @@ class AnticipationV2Settings:
     num_instrument_anticipation_augmentations_per_midi_file: int = 4
     num_random_anticipation_augmentations_per_midi_file: int = 4
     span_anticipation_lambda: float = 0.05
+
+    # set to 3 to keep parity with v1
+    num_sep_tokens: int = 1
+
+    # if this is 0, will not add anything
     tick_token_frequency_in_midi_ticks: int = 100
 
     # anticipation interval
     delta: int = 5
+
+    # compatibility settings
+    # v1 codebase did this - when iterating through multiple samples the
+    # flag of (AUTOREGRESS/ANTICIPATE) is added only on the first file
+    # but then subsequently is omitted and only the separators remain.
+    # Unclear if this is intentional, but we expose this behavior for
+    # compatibility / parity with v1. Set to true if we want equivalent
+    # behavior with v1.
+    omit_flag_token_after_first_sample: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)  # noqa
+
+    def _get_as_file(self) -> tuple[str, str]:
+        """
+        Return serialized string of settings and the md5 hash of its string representation.
+        """
+        s = dumps(self.to_dict(), indent=4, sort_keys=True)
+        md5 = get_md5_of_string(s)
+        return s, md5
+
+    @cache
+    def md5_hash(self) -> str:
+        _, md5 = self._get_as_file()
+        return md5
+
+    def save_to_disk(self, enclosing_folder: Path) -> Path:
+        assert isinstance(enclosing_folder, Path)
+        assert enclosing_folder.exists()
+        assert enclosing_folder.is_dir()
+        s, md5 = self._get_as_file()
+        save_to = enclosing_folder / (md5 + ".json")
+        save_to.write_text(s)
+        return save_to
+
+    @classmethod
+    def load_from_disk(cls, load_from_file: Path) -> "AnticipationV2Settings":
+        assert isinstance(load_from_file, Path)
+        assert load_from_file.exists()
+        assert load_from_file.is_file()
+        assert load_from_file.suffix == ".json"
+        md5 = load_from_file.stem
+        settings_str = load_from_file.read_text()
+        assert md5 == get_md5_of_string(settings_str), "file integrity compromised."
+
+        settings_parsed = loads(settings_str)
+        v_str = settings_parsed.pop("vocab")
+        return AnticipationV2Settings(vocab=Vocab(**v_str), **settings_parsed)

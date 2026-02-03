@@ -1,7 +1,8 @@
 from collections import defaultdict
+from lib2to3.btm_utils import tokens
 
 from pathlib import Path
-from typing import Optional, Iterable
+from typing import Optional, Iterable, Union, Iterator
 import warnings
 
 import numpy as np
@@ -15,6 +16,8 @@ from anticipation.tokenize import (
 
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import MIDIFileIgnoredReason, Token, MIDIProgramCode
+
+TokenStream = Union[Iterable[tuple[Token, ...]], Iterator[tuple[Token, ...]]]
 
 
 def compound_to_events(
@@ -129,13 +132,103 @@ def tokenize_midi_file(
     )
 
 
+class SequencePacker:
+    """Buffer-like coordinator that flushes tokens to a file or just accumulates them to a list.
+
+    This adds punctuation-like semantic tokens to its outputs as they are streamed out.
+
+    NB: list given in ctor is pass by reference, will mutate in place.
+    """
+
+    def __init__(
+        self, target: Union[list, Path], settings: AnticipationV2Settings
+    ) -> None:
+        self._lazy_iter = None
+        if isinstance(target, list):
+            self._buf = target
+            self._file_sink = None
+        elif isinstance(target, Path):
+            self._buf = []
+            # target may not exist yet, but the folder that
+            # contains it should
+            assert target.parent.exists()
+            assert target.parent.is_dir()
+            self._file_sink = open(target, "w")
+        else:
+            raise TypeError("Must have path or list as target.")
+
+        self._settings = settings
+
+    def extend(self, new_tokens: list[Token]) -> None:
+        self._buf += new_tokens
+
+    def flush(self) -> None:
+        if self._file_sink is None:
+            # is a noop if no sink provided
+            return
+
+        e = self._settings.event_size
+        m = self._settings.m
+        # +1 because the original code set m to have room for
+        # the autoregress/anticipate token
+        buf_len = (e * m) + 1
+        while len(self._buf) >= buf_len:
+            seq = self._buf[:buf_len]
+            self._buf = self._buf[buf_len:]
+
+            if self._settings.tick_token_frequency_in_midi_ticks == 0:
+                # this is not great design since there are some tokenization
+                # semantics / logic in this buffer thing - which I do not think should
+                # be here... but this is for compatibility with v1.
+
+                # this relativize assumes no flag token
+                seq = [seq[0]] + v2_ops.relativize_token_seq_time(
+                    seq[1:], self._settings
+                )
+
+            assert len(seq) == self._settings.context_size
+
+            to_write = " ".join([str(tok) for tok in seq]) + "\n"
+            self._file_sink.write(to_write)
+
+    def close(self) -> None:
+        if self._file_sink is not None:
+            print(f"Token buffer had remaining: {len(self._buf)}")
+            self._file_sink.close()
+
+    def __len__(self) -> int:
+        return len(self._buf)
+
+
 def tokenize(
     midi_files: Iterable[Path],
+    output: Union[list, Path],
     settings: AnticipationV2Settings,
-) -> list[Token]:
+) -> dict[MIDIFileIgnoredReason, int]:
+    """Tokenizes MIDI for v2 Anticipatory Training
+
+    Args:
+      midi_files: An iterable collection of MIDI files. These are the
+        source data that we will turn into tokens.
+      output: This can be either a list or a Path object to a file. In
+        the v1 tokenize function, this argument would be a string to
+        a file location on disk. To keep parity with that pattern, we
+        can pass a file here or a list. If given a file, the v1 behavior
+        is performed. If given a list, the tokens are just appended to
+        the list and nothing is written to disk. The list is mutated in
+        place - so keep a reference to it. In python all lists are pass
+        by reference.
+      settings: The Anticipation v2 settings object. Settings in here
+        will affect how MIDI events are tokenized.
+
+    Returns:
+      A dictionary of (reason ignored, number of times it happened) for
+      the given files. This will be empty if no files were ignored.
+    """
+
     stats = defaultdict(int)
-    buf = []
-    for midi_file in midi_files:
+    buf = SequencePacker(target=output, settings=settings)
+    for file_idx, midi_file in enumerate(midi_files):
         (
             tokenized_midi,
             num_note_truncations,
@@ -153,47 +246,67 @@ def tokenize(
 
         # 1. pure autoregressive sequence
         for _ in range(settings.num_autoregressive_seq_per_midi_file):
-            buf += _get_augmentation_autoregressive(tokenized_midi, settings)
+            buf.extend(_get_augmentation_autoregressive(tokenized_midi, settings))
 
         # 2. instrument anticipation
         for _ in range(
             settings.num_instrument_anticipation_augmentations_per_midi_file
         ):
-            buf += _get_augmentation_instrument(
-                tokenized_midi,
-                all_midi_program_codes,
-                settings,
+            buf.extend(
+                _get_augmentation_instrument(
+                    tokenized_midi,
+                    all_midi_program_codes,
+                    settings,
+                )
             )
 
         # 3. span anticipation
         for _ in range(settings.num_span_anticipation_augmentations_per_midi_file):
+            # TODO: not done w this yet
             span_anticipation_seq = _get_span_augmentation(
                 tokenized_midi, end_time_in_ticks, settings
             )
             buf.extend(span_anticipation_seq)
 
-        # 4. random anticipation augmentations (?)
-    return buf
+        # write all the sequences to a target
+        buf.flush()
+
+    # close files if necessary
+    buf.close()
+
+    # return any stats, cast to regular dictionary for safety
+    return dict(stats)
 
 
 def _get_augmentation_autoregressive(
     tokens: list[Token], settings: AnticipationV2Settings
-) -> list[Token]:
+) -> TokenStream:
     assert len(tokens) % 3 == 0, "bad length"
-    if settings.debug:
-        _check_no_punctuation_tokens(tokens, settings)
 
-    # step through events and ticks
-    stream = v2_ops.streaming_relativize_to_tick(
-        v2_ops.streaming_add_ticks(tokens, settings), settings
-    )
+    if settings.tick_token_frequency_in_midi_ticks > 0:
+        # step through events and ticks
+        stream = v2_ops.streaming_relativize_to_tick(
+            v2_ops.streaming_add_ticks(tokens, settings), settings
+        )
+    else:
+        # when events drop below a certain density, pad them with rests
+        # in the style that uses tick tokens, we do not need these
+        tokens_with_rests = v2_ops.add_rests(tokens, settings)
+        stream = (tokens_with_rests[i:i+3] for i in range(0, len(tokens), 3))
 
-    return v2_ops.pack(
+    output = v2_ops.pack(
         stream, seq_header=(settings.vocab.AUTOREGRESS,), settings=settings
     )
 
+    return output
+
+
 
 def _sample_instrument_subset(all_midi_program_codes: list[int]) -> list[int]:
+    if len(all_midi_program_codes) <= 1:
+        # not really well-defined for this case...
+        return []
+
     # instrument augmentation: at least one, but not all instruments
     # each time this is called it is like a random subset draw!
     u = 1 + np.random.randint(len(all_midi_program_codes) - 1)
@@ -205,7 +318,7 @@ def _get_augmentation_instrument(
     tokens: list[Token],
     all_midi_program_codes: list[int],
     settings: AnticipationV2Settings,
-) -> list[Token]:
+) -> TokenStream:
     assert len(tokens) % 3 == 0, "bad length"
     if settings.debug:
         _check_no_punctuation_tokens(tokens, settings)
@@ -224,9 +337,10 @@ def _get_augmentation_instrument(
     stream = v2_ops.streaming_relativize_to_tick(
         v2_ops.streaming_anticipate(event_stream, control_stream, settings), settings
     )
-    return v2_ops.pack(
+    output = v2_ops.pack(
         stream, seq_header=(settings.vocab.ANTICIPATE,), settings=settings
     )
+    return output
 
 
 def _get_span_augmentation(
@@ -265,6 +379,10 @@ def _get_span_augmentation(
 def _check_no_punctuation_tokens(
     tokens: list[Token], settings: AnticipationV2Settings
 ) -> None:
+    # TODO: wait you can't reliably determine if there's punctuation this way
+    # TODO: because the time (for long songs) could collide...
+    # TODO: hmmmm....
+    # this is kind of slow, so we only call it if in a debug context
     punctuations = v2_ops.get_punctuation_tokens_idx(tokens, settings)
     assert not punctuations, (
         f"token sequence should not have separator, rest, anticipate, etc. tokens at "

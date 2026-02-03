@@ -12,21 +12,23 @@ from anticipation.v2.types import Token
 
 def get_punctuation_tokens_idx(
     tokens: list[Token], settings: AnticipationV2Settings
-) -> dict[Token, int]:
+) -> dict[str, int]:
     # new to v2
     v = settings.vocab
-    investigate = {
-        v.SEPARATOR: 0,
-        v.REST: 0,
-        v.ANTICIPATE: 0,
-        v.AUTOREGRESS: 0,
-        v.TICK: 0,
-    }
+    _inspect = ["SEPARATOR", "REST", "ANTICIPATE", "AUTOREGRESS", "TICK"]
+    investigate = {getattr(v, k): 0 for k in _inspect}
     for i, e in enumerate(tokens):
         if e in investigate:
             investigate[e] += 1
 
-    return {k: v for k, v in investigate.items() if v > 0}
+    human_readable = {}
+    i = 0
+    for k, v in investigate.items():
+        if v > 0:
+            human_readable[f"{_inspect[i]} ({k})"] = v
+        i += 1
+
+    return human_readable
 
 
 def min_time(
@@ -310,10 +312,12 @@ def streaming_add_ticks(
     # original logic: https://github.com/jthickstun/anticipation/blob/6927699c5243fd91d1d252211c29885377d9dda5/train/tokenize-new.py#L33
     for i in range(0, len(events), 3):
         time, duration, note = events[i : i + 3]
-        while time >= round(recent_tick * add_every):
-            # tick - a tick is only a single token!
-            yield (settings.vocab.TICK,)
-            recent_tick += 1
+
+        if add_every > 0:
+            while time >= round(recent_tick * add_every):
+                # tick - a tick is only a single token!
+                yield (settings.vocab.TICK,)
+                recent_tick += 1
 
         yield (
             time,
@@ -356,9 +360,17 @@ def pack(
     stream: Iterable[tuple[Token, ...]],
     seq_header: tuple[Token, ...],
     settings: AnticipationV2Settings,
+    file_idx: int = 0,
 ) -> list[Token]:
     chunks = []
-    buf = [*seq_header, settings.vocab.SEPARATOR]
+
+    # if False and (settings.omit_flag_token_after_first_sample and file_idx > 0):
+    #     # compatibility with v1 behavior
+    #     buf = []
+    # else:
+    buf = [*seq_header]
+    buf += ([settings.vocab.SEPARATOR] * settings.num_sep_tokens)
+
     for next_element in stream:
         if len(buf) + len(next_element) > settings.context_size:
             # 1 flag token, (ctx - 1) events/controls
