@@ -78,6 +78,7 @@ vocab = {
     'aduration_offset' : ADUR_OFFSET,
     'anote_offset' : ANOTE_OFFSET,
     'special_offset' : SPECIAL_OFFSET,
+    'control_offset': CONTROL_OFFSET,
 }
 
 if __name__ == '__main__':

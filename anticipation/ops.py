@@ -144,6 +144,9 @@ def pad(tokens, end_time=None, density=TIME_RESOLUTION):
 
     return new_tokens
 
+
+from anticipation.vocabs.localmidi import vocab as localmidivocab
+
 def tick(tokens, tick_token, time_res, end_time=None):
     end_time = TIME_OFFSET + (end_time if end_time else max_time(tokens, seconds=False))
     new_tokens = []
