@@ -209,7 +209,7 @@ class GPT2LightningModule(pl.LightningModule):
         num_devices = max(1, self.trainer.num_devices)
         per_device_batch_size = self.hparams.train_batch_size // num_devices
 
-        dataset = PretokenizedDataset(os.path.join(self.data_dir, "test_consolidated.txt"))
+        dataset = PretokenizedDataset(os.path.join(self.data_dir, "valid_consolidated.txt"))
 
         return DataLoader(
             dataset,

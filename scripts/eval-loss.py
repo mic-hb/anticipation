@@ -29,6 +29,9 @@ def log_loss_trip(model, datafile, subsample):
     res['onset_ppl'] = np.round(np.exp(ce[0::3].mean().item()), 3)
     res['dur_ppl'] = np.round(np.exp(ce[1::3].mean().item()), 3)
     res['note_ppl'] = np.round(np.exp((ce[2::3]).mean().item()), 3)
+    # WARNING: hard-coded lakh dataset test split number of hours
+    # test split is f
+    res['bps'] = subsample*ce.mean().item()*np.log2(np.e)*(len(ce) / (560.98*3600))
 
     return res
 
@@ -64,26 +67,30 @@ def main(args):
     results = os.path.join(args.model, args.output)
     print(f'Storing results at {results}')
 
-    checkpoints = [os.path.join(f.path, 'hf') for f in os.scandir(args.model) if
-            f.is_dir() and os.path.basename(f).startswith('step-')]
-
-    if args.all:
-        print('Calculating log-loss for checkpoints:')
-        for ckpt in checkpoints:
-            print('  ', ckpt)
-    else:
-        steps = [int(ckpt.split(os.sep)[-2][5:]) for ckpt in checkpoints]
-        checkpoints = [os.path.join(args.model, f'step-{max(steps)}', 'hf')]
-        print('Calculating log-loss for final checkpoint:')
-        print('  ', checkpoints[0])
+    #checkpoints = [os.path.join(f.path, 'hf') for f in os.scandir(args.model) if
+            #f.is_dir() and os.path.basename(f).startswith('step-')]
+#
+    #if args.all:
+        #print('Calculating log-loss for checkpoints:')
+        #for ckpt in checkpoints:
+            #print('  ', ckpt)
+    #else:
+        #steps = [int(ckpt.split(os.sep)[-2][5:]) for ckpt in checkpoints]
+        #checkpoints = [os.path.join(args.model, f'step-{max(steps)}', 'hf')]
+        #print('Calculating log-loss for final checkpoint:')
+        #print('  ', checkpoints[0])
+    
+    from pathlib import Path
+    checkpoint_path = Path(args.model)
+    checkpoints = [str(checkpoint_path.absolute())]
 
     print('Calculating log-loss on dataset:')
     print('  ', args.filename)
     with open(results, 'w', newline='') as f:
         fields = ['step', 'loss']
-        
+
         if args.type == 'trip':
-           fields.extend(['event_ppl', 'onset_ppl', 'dur_ppl', 'note_ppl'])
+           fields.extend(['event_ppl', 'onset_ppl', 'dur_ppl', 'note_ppl', 'bps'])
            log_loss = log_loss_trip
         elif args.type == 'quad':
            fields.extend(['event_ppl', 'onset_ppl', 'instr_ppl', 'pitch_ppl', 'note_ppl', 'dur_ppl'])
@@ -94,7 +101,10 @@ def main(args):
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for ckpt in checkpoints:
-            step = int(ckpt.split(os.sep)[-2][5:])
+            #print(ckpt)
+            #step = int(ckpt.split(os.sep)[-2][5:])
+            step = int(ckpt.split(os.sep)[-1][5:])
+
             print(f'Loading checkpoint (step {step}):')
             print('  ', ckpt)
             t0 = time.time()

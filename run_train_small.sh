@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH -p genai-thickstun-highpri --gres=gpu:4
+#SBATCH -p thickstun --gres=gpu:4
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=36GB
 #SBATCH -t 48:00:00
-#SBATCH -J train_ar_local_midi
+#SBATCH -J train_ar_local_midi_small
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 
@@ -25,6 +25,5 @@ fi
 
 set -e
 
-#PYTHONPATH=. python train/midi-preprocess.py /home/mf867/anticipation/data/lmd_full --vocab local-midi
 export PYTHONPATH=.
-PYTHONPATH=. torchrun --standalone --nproc_per_node=4 train_script.py --data_dir /home/mf867/anticipation/data/tokenized_new_2_4_26 --output_dir /home/mf867/anticipation/output/checkpoints --gpus_per_node=4
+PYTHONPATH=. torchrun --standalone --nproc_per_node=4 train_script.py --data_dir /home/mf867/anticipation/data/tokenized_new_2_4_26 --output_dir /home/mf867/anticipation/output/checkpoints --gpus_per_node=4 --train_batch_size=64 --eval_batch_size=16
