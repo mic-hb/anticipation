@@ -227,7 +227,7 @@ def compound_to_midi(tokens, vocab, debug=False):
                 try:
                     track, previous_time, idx = track_idx[instrument]
                 except KeyError:
-                    idx = num_tracks
+                    idx = num_tracks % 16
                     previous_time = 0
                     track = mido.MidiTrack()
                     mid.tracks.append(track)
@@ -245,7 +245,7 @@ def compound_to_midi(tokens, vocab, debug=False):
                 track.append(mido.Message(
                     'note_on', note=note, channel=idx, velocity=velocity,
                     time=time_in_ticks-previous_time))
-                track_idx[instrument] = (track, time_in_ticks, idx)
+                track_idx[instrument] = (track, time_in_ticks, idx % 16)
             else: # offset
                 try:
                     track, previous_time, idx = track_idx[instrument]
@@ -312,6 +312,10 @@ def events_to_compound(tokens, debug=False):
     offset = 0 # add max time from previous track for synthesis
     track_max = 0 # keep track of max time in track
     for j, (time,dur,note) in enumerate(zip(tokens[0::3],tokens[1::3],tokens[2::3])):
+        if not (time >= 0 and dur >= 0 and note >= 0):
+            import pdb
+            pdb.set_trace()
+
         if note == SEPARATOR:
             offset += track_max
             track_max = 0
@@ -453,7 +457,8 @@ def lm_to_event_old(tokens, vocab, debug=False): # this is actually wrong becaus
     return seq
 
 
-def lm_to_event(tokens, vocab, debug=False): # this is actually wrong because i'm assuming that i start from triples, when I might actually start from a duration because of a continuation from a previous sequence!!
+def lm_to_event(tokens, vocab, debug=True): # this is actually wrong because i'm assuming that i start from triples, when I might actually start from a duration because of a continuation from a previous sequence!!
+    assert len(tokens) > 0
     time_res = localmidivocab["config"]["midi_quantization"]
     tick_token = localmidivocab["tick"]
     sep = localmidivocab['separator']
@@ -464,41 +469,102 @@ def lm_to_event(tokens, vocab, debug=False): # this is actually wrong because i'
     i = 0
     n = len(tokens)
 
+    #import pdb
+    #pdb.set_trace()
     while i < n:
-        tok = tokens[i]
-
-        if tok == tick_token:
+        curr_token = tokens[i]
+        if curr_token == tick_token:
             time_ticks += 1
             i += 1
-        # i think i meant localmidivocab['control_end'] instead of vocab['control_end']
-        elif tok in flags or tok == localmidivocab['control_end'] or tok == localmidivocab["separator"]:
+            continue
+        if curr_token in flags:
             i += 1
-        elif 100 <= tok <= 1099: # triple starts on duration token
+            continue
+        if curr_token in (localmidivocab['control_end'], localmidivocab['separator']):
             i += 1
-        elif 1100 <= tok <= 17611: # triple starts on note token
-            i += 1
-        else: # need [delta, dur, note]
-            if i + 2 >= n:
-                if debug:
-                    print(f"truncated event at idx={i}")
-                break
+            continue
 
-            delta_local = tokens[i]
-            dur_local = tokens[i + 1]
-            note_local = tokens[i + 2]
+        e = tokens[i:i+3]
+        t_local_time, t_dur, t_note_inst = e
+        delta_local = t_local_time
+        dur = t_dur - (localmidivocab["duration_offset"] + tripletmidivocab["duration_offset"])
+        note = t_note_inst - (localmidivocab["note_offset"] + tripletmidivocab["note_offset"])
 
-            if not (0 <= delta_local <= 99 and 100 <= dur_local <= 1099 and 1100 <= note_local <= 17611):
-                i += 1
-                continue
+        # this happens sometimes for 112m model
+        note = max(note, 0)
+        dur = max(dur, 1)
 
-            dur = dur_local - localmidivocab["duration_offset"] + tripletmidivocab["duration_offset"]
-            note = note_local - localmidivocab["note_offset"] + tripletmidivocab["note_offset"]
+        _instr = note//(2**7)
+        _pitch = note - ((2**7) * _instr)
 
-            abs_time = (round((time_ticks - 1) * time_res) + delta_local) if time_ticks > 0 else delta_local
 
-            seq.extend([abs_time, dur, note])
-            i += 3
+        abs_time = (round((time_ticks - 1) * time_res) + delta_local) if time_ticks > 0 else delta_local
 
+        #print(delta_local, dur, note, _instr, _pitch)
+        assert 0 <= _instr < 128
+        assert 0 <= _pitch < 128
+        assert 0 < dur < MAX_DUR
+        assert 0 <= abs_time < MAX_TIME
+
+        #print(abs_time)
+        #pdb.set_trace()
+
+        seq.extend([abs_time, dur, note])
+        i += 3
+
+    for i in range(0, len(seq), 3):
+        seq[i] += TIME_OFFSET
+        seq[i+1] += DUR_OFFSET
+        seq[i+2] += NOTE_OFFSET
+
+
+    #while i < n:
+        #tok = tokens[i]
+#
+        #if tok == tick_token:
+            #time_ticks += 1
+            #i += 1
+        ## i think i meant localmidivocab['control_end'] instead of vocab['control_end']
+        #elif tok in flags or tok == localmidivocab['control_end'] or tok == localmidivocab["separator"]:
+            #i += 1
+        #elif 100 <= tok <= 1099: # triple starts on duration token
+            #i += 1
+        #elif 1100 <= tok <= 17611: # triple starts on note token
+            #i += 1
+        #else: # need [delta, dur, note]
+            #if i + 2 >= n:
+                #if debug:
+                    #print(f"truncated event at idx={i}")
+                #break
+#
+            #delta_local = tokens[i]
+            #dur_local = tokens[i + 1]
+            #note_local = tokens[i + 2]
+#
+            ## something is messed up here... way too often finds things OOB
+            ##if not (0 <= delta_local <= 99 and 100 <= dur_local <= 1099 and 1100 <= note_local <= 17611):
+                ##print(f"out of bounds: ", i, delta_local, dur_local, note_local)
+                ##i += 1
+                ##pdb.set_trace()
+                ###assert 1 == 2
+                ##continue
+#
+            #dur = dur_local - localmidivocab["duration_offset"] + tripletmidivocab["duration_offset"]
+            #note = note_local - localmidivocab["note_offset"] + tripletmidivocab["note_offset"]
+#
+            #_instr = note//(2**7)
+            #_pitch = note - (2**7) * _instr
+#
+            #abs_time = (round((time_ticks - 1) * time_res) + delta_local) if time_ticks > 0 else delta_local
+#
+            #print(delta_local, dur, _instr, _pitch)
+            #print(abs_time)
+            #pdb.set_trace()
+#
+            #seq.extend([abs_time, dur, note])
+            #i += 3
+
+    assert len(seq) > 0
     assert len(seq) % 3 == 0
 
     return seq

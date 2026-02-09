@@ -10,7 +10,8 @@ from tqdm import tqdm
 
 from anticipation import ops
 from anticipation.config import *
-from anticipation.vocab import *
+#from anticipation.vocab import *
+from anticipation.vocabs.tripletmidi import *
 
 
 def safe_logits(logits, idx):
@@ -229,7 +230,10 @@ def generate_ar(model, start_time, end_time, inputs=None, controls=None, top_p=1
         print('Future')
         ops.print_tokens(controls)
 
-    z = [AUTOREGRESS]
+    from anticipation.vocabs.localmidi import vocab as lmv
+
+    #z = [AUTOREGRESS]
+    z = [lmv['control_end']]
     if debug:
         print('AR Mode')
 
@@ -249,7 +253,8 @@ def generate_ar(model, start_time, end_time, inputs=None, controls=None, top_p=1
 
         while True:
             new_token = add_token(model, z, tokens, top_p, temperature, max(start_time,current_time), masked_instrs)
-            new_time = new_token[0] - TIME_OFFSET
+            #new_time = new_token[0] - TIME_OFFSET
+            new_time = new_token[0] - lmv['time_offset']
             if new_time >= end_time:
                 break
 
@@ -268,16 +273,17 @@ def generate_ar(model, start_time, end_time, inputs=None, controls=None, top_p=1
                 if len(anticipated_tokens) > 0:
                     atime, adur, anote = anticipated_tokens[0:3]
                     anticipated_tokens = anticipated_tokens[3:]
-                    anticipated_time = atime - TIME_OFFSET
+                    #anticipated_time = atime - TIME_OFFSET
+                    anticipated_time = atime - lmv['time_offset']
                 else:
                     # nothing more to anticipate
                     anticipated_time = math.inf
 
             if debug:
-                new_note = new_token[2] - NOTE_OFFSET
+                new_note = new_token[2] - lmv['note_offset']
                 new_instr = new_note//2**7
                 new_pitch = new_note - (2**7)*new_instr
-                print('C', new_time, new_token[1] - DUR_OFFSET, new_instr, new_pitch)
+                print('C', new_time, new_token[1] - lmv['duration_offset'], new_instr, new_pitch)
 
             tokens.extend(new_token)
             progress.update(dt)
