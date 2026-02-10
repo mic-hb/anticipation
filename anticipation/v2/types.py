@@ -6,6 +6,9 @@ MIDITick = int
 MIDINote = int
 MIDIProgramCode = int
 
+Triplet = tuple[Token, Token, Token]
+TickToken = tuple[Token]
+
 
 class MIDIFileIgnoredReason(Enum):
     TOO_FEW_EVENTS = 0

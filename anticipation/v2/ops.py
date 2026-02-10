@@ -356,39 +356,33 @@ def streaming_relativize_to_tick(
         yield to_add
 
 
-def pack(
-    stream: Iterable[tuple[Token, ...]],
-    seq_header: tuple[Token, ...],
-    settings: AnticipationV2Settings,
-    file_idx: int = 0,
-) -> list[Token]:
-    chunks = []
-
-    # if False and (settings.omit_flag_token_after_first_sample and file_idx > 0):
-    #     # compatibility with v1 behavior
-    #     buf = []
-    # else:
-    buf = [*seq_header]
-    buf += ([settings.vocab.SEPARATOR] * settings.num_sep_tokens)
-
-    for next_element in stream:
-        if len(buf) + len(next_element) > settings.context_size:
-            # 1 flag token, (ctx - 1) events/controls
-            buf += [settings.vocab.PAD] * (settings.context_size - len(buf))
-            chunks.extend(buf)
-
-            # buffer starts with its preamble/header
-            buf = [*seq_header]
-
-        buf += list(next_element)
-
-    # handle trailing suffix, but only if it has things in it
-    # that are not header info
-    if len(buf) > len(seq_header):
-        # don't pad the end though because we can just start another
-        # sample
-        # Q: what if it is just a tick though?
-        # A: I think that should be fine, as long as the next seq is separated
-        chunks.extend(buf)
-
-    return chunks
+# def pack(
+#     stream: Iterable[tuple[Token, ...]],
+#     seq_header: tuple[Token, ...],
+#     settings: AnticipationV2Settings,
+# ) -> list[Token]:
+#     chunks = []
+#     buf = [*seq_header]
+#     for next_element in stream:
+#         if len(buf) + len(next_element) > settings.context_size:
+#             # 1 flag token, (ctx - 1) events/controls
+#             # this is so the sequence does not split a triple between two
+#             # samples
+#             buf += [settings.vocab.PAD] * (settings.context_size - len(buf))
+#             chunks.extend(buf)
+#
+#             # buffer starts with its preamble/header
+#             buf = [*seq_header]
+#
+#         buf += list(next_element)
+#
+#     # handle trailing suffix, but only if it has things in it
+#     # that are not header info
+#     if len(buf) > len(seq_header) + 1:
+#         # don't pad the end though because we can just start another
+#         # sample
+#         # Q: what if it is just a tick though?
+#         # A: add + 1 for just a tick
+#         chunks.extend(buf)
+#
+#     return chunks

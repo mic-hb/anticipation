@@ -29,15 +29,23 @@ def test_tokenize_v2_lakh_ar_only_for_visualization(
     any_ignored = v2_tokenize([lmd_0_example_midi_path], tokens, settings)
     assert not any_ignored
 
-    for i in range(0, len(tokens), settings.context_size):
-        first_token_in_seq_chunk = tokens[i]
-        assert first_token_in_seq_chunk == settings.vocab.AUTOREGRESS
+    assert len(tokens) == 8
+    num_total_separators = 0
+    for i, packed_seq in enumerate(tokens):
+        assert len(packed_seq) == settings.context_size
+        if i == 0:
+            # first sequence should have sample sep
+            assert packed_seq[0] == settings.vocab.SEPARATOR
+            assert packed_seq[1] == settings.vocab.AUTOREGRESS
+        else:
+            # all others should start with anticipation sample
+            assert packed_seq[0] == settings.vocab.AUTOREGRESS
 
-    assert len(tokens) == 8776
-    num_seps = len([x for x in tokens if x == settings.vocab.SEPARATOR])
-    assert num_seps == 1
-
-    parsed_events = Event.from_token_seq(tokens, settings)
+        num_total_separators += len(
+            [x for x in packed_seq if x == settings.vocab.SEPARATOR]
+        )
+    assert num_total_separators == 1
+    parsed_events = Event.from_token_seq([x for b in tokens for x in b], settings)
     get_figure_and_open(
         events=parsed_events,
         delta=settings.delta,
@@ -69,24 +77,31 @@ def test_tokenize_v2_lakh_instrument_for_visualization(
         )
         assert not any_ignored
 
-    assert len(instrument_anticipation_sample) == 8777
-    for i in range(0, len(instrument_anticipation_sample), settings.context_size):
-        # sequence must always start with a flag token
-        first_token_in_seq_chunk = instrument_anticipation_sample[i]
-        assert first_token_in_seq_chunk == settings.vocab.ANTICIPATE
+    assert len(instrument_anticipation_sample) == 8
+    num_total_separators = 0
+    for i, packed_seq in enumerate(instrument_anticipation_sample):
+        assert len(packed_seq) == settings.context_size
+        if i == 0:
+            # first sequence should have sample sep
+            assert packed_seq[0] == settings.vocab.SEPARATOR
+            assert packed_seq[1] == settings.vocab.ANTICIPATE
+        else:
+            # all others should start with anticipation sample
+            assert packed_seq[0] == settings.vocab.ANTICIPATE
 
-    num_seps = len(
-        [x for x in instrument_anticipation_sample if x == settings.vocab.SEPARATOR]
+        num_total_separators += len(
+            [x for x in packed_seq if x == settings.vocab.SEPARATOR]
+        )
+    assert num_total_separators == 1
+    parsed_events = Event.from_token_seq(
+        [x for b in instrument_anticipation_sample for x in b], settings
     )
-    assert num_seps == 1
-
-    parsed_events = Event.from_token_seq(instrument_anticipation_sample, settings)
     get_figure_and_open(
         events=parsed_events,
         delta=settings.delta,
         time_resolution=settings.time_resolution,
         path=(VISUALIZATIONS_PATH / f"anticipated_instr_v2.html"),
-        auto_open=True,
+        auto_open=False,
     )
 
 
@@ -101,15 +116,33 @@ def test_tokenize_with_ticks_for_small_sequence_ar(
         num_instrument_anticipation_augmentations_per_midi_file=0,
         num_span_anticipation_augmentations_per_midi_file=0,
         num_random_anticipation_augmentations_per_midi_file=0,
+        # force small context for this specific test, otherwise tokens are left in the
+        # buffer
+        context_size=104,
         debug=True,
     )
     tokenized_seq = []
     any_ignored = v2_tokenize([c_major_midi_path], tokenized_seq, settings)
     assert not any_ignored
-    num_seps = len([x for x in tokenized_seq if x == settings.vocab.SEPARATOR])
-    assert num_seps == 1
 
-    parsed_events = Event.from_token_seq(tokenized_seq, settings)
+    assert len(tokenized_seq) == 1
+    num_total_separators = 0
+    for i, packed_seq in enumerate(tokenized_seq):
+        assert len(packed_seq) == settings.context_size
+        if i == 0:
+            # first sequence should have sample sep
+            assert packed_seq[0] == settings.vocab.SEPARATOR
+            assert packed_seq[1] == settings.vocab.AUTOREGRESS
+        else:
+            # all others should start with anticipation sample
+            assert packed_seq[0] == settings.vocab.AUTOREGRESS
+
+        num_total_separators += len(
+            [x for x in packed_seq if x == settings.vocab.SEPARATOR]
+        )
+    parsed_events = Event.from_token_seq(
+        [x for b in tokenized_seq for x in b], settings
+    )
 
     # check that the ticks are added at specified interval
     ticks = [x for x in parsed_events if x.is_tick()]
@@ -140,16 +173,32 @@ def test_tokenize_with_ticks_for_lakh_ar(lmd_0_example_midi_path: Path) -> None:
     tokenized_seq = []
     any_ignored = v2_tokenize([lmd_0_example_midi_path], tokenized_seq, settings)
     assert not any_ignored
-    num_seps = len([x for x in tokenized_seq if x == settings.vocab.SEPARATOR])
-    assert num_seps == 1
+    assert len(tokenized_seq) == 8
+    num_total_separators = 0
+    for i, packed_seq in enumerate(tokenized_seq):
+        assert len(packed_seq) == settings.context_size
+        if i == 0:
+            # first sequence should have sample sep
+            assert packed_seq[0] == settings.vocab.SEPARATOR
+            assert packed_seq[1] == settings.vocab.AUTOREGRESS
+        else:
+            # all others should start with anticipation sample
+            assert packed_seq[0] == settings.vocab.AUTOREGRESS
 
-    parsed_events = Event.from_token_seq(tokenized_seq, settings)
+        num_total_separators += len(
+            [x for x in packed_seq if x == settings.vocab.SEPARATOR]
+        )
+
+    assert num_total_separators == 1
+    parsed_events = Event.from_token_seq(
+        [x for b in tokenized_seq for x in b], settings
+    )
     get_figure_and_open(
         events=parsed_events,
         delta=settings.delta,
         time_resolution=settings.time_resolution,
         path=(VISUALIZATIONS_PATH / f"ar_with_ticks_lakh_0.html"),
-        auto_open=True,
+        auto_open=False,
     )
 
 
@@ -168,7 +217,9 @@ def test_absolute_time_is_correct_with_ticks(lmd_0_example_midi_path: Path) -> N
     events_without_ticks = []
     any_ignored = v2_tokenize([lmd_0_example_midi_path], events_without_ticks, settings)
     assert not any_ignored
-    events_without_ticks = Event.from_token_seq(events_without_ticks, settings)
+    events_without_ticks = Event.from_token_seq(
+        [x for b in events_without_ticks for x in b], settings
+    )
     events_without_ticks = [
         x
         for x in events_without_ticks
@@ -179,7 +230,9 @@ def test_absolute_time_is_correct_with_ticks(lmd_0_example_midi_path: Path) -> N
     events_include_ticks = []
     any_ignored = v2_tokenize([lmd_0_example_midi_path], events_include_ticks, settings)
     assert not any_ignored
-    events_include_ticks = Event.from_token_seq(events_include_ticks, settings)
+    events_include_ticks = Event.from_token_seq(
+        [x for b in events_include_ticks for x in b], settings
+    )
     events_include_ticks = [
         x
         for x in events_include_ticks
@@ -195,61 +248,3 @@ def test_absolute_time_is_correct_with_ticks(lmd_0_example_midi_path: Path) -> N
         assert a.midi_note() == b.midi_note()
         assert a.midi_duration() == b.midi_duration()
         assert a.midi_instrument() == b.midi_instrument()
-
-
-def test_tokenize_write_to_disk_compatible_with_v1_ar_only(
-    lmd_0_example_midi_path: Path,
-    lmd_1_example_midi_path: Path,
-) -> None:
-    """
-    We've made some changes from v1 to v2 that alter the way instrument augmentation happens, so
-    the outputs will not be exactly the same. We should, however, be able to recover the exact
-    tokenization implemented by v1 by settings some settings (for autoregressive settings).
-    """
-    midi_files_to_process = [lmd_0_example_midi_path, lmd_1_example_midi_path]
-    settings = AnticipationV2Settings(
-        min_track_events=1,
-        vocab=Vocab(),
-        num_autoregressive_seq_per_midi_file=1,
-        num_instrument_anticipation_augmentations_per_midi_file=0,
-        num_span_anticipation_augmentations_per_midi_file=0,
-        num_random_anticipation_augmentations_per_midi_file=0,
-        tick_token_frequency_in_midi_ticks=0,
-        num_sep_tokens=3,
-        omit_flag_token_after_first_sample=True,
-        debug=True,
-    )
-    # tokenize and parse without ticks added
-    with tempfile.TemporaryDirectory() as td:
-        v2_sink = Path(td) / "v2_tokens.txt"
-        any_ignored = v2_tokenize(midi_files_to_process, v2_sink, settings)
-        assert not any_ignored
-        parse_info = get_tokens_from_midi_file_v1(
-            midi_files_to_process,
-            augment_factor=10,
-            include_original=True,
-            do_instrument_augmentation=False,
-            do_span_augmentation=False,
-            do_random_augmentation=False,
-        )
-
-        v1_tokens = parse_info["tokens"]
-        v2_tokens = get_tokens_from_text_file(v2_sink)
-
-        v1 = v1_tokens[8]
-        v2 = v2_tokens[8]
-        print(v1)
-        print(v2)
-        print("----")
-
-        # v1 = v1_tokens[9]
-        # v2 = v2_tokens[9]
-        # print(len(v1), len(v2))
-        # print(v1)
-        # print(v2)
-
-        assert 1 == 2
-        # assert len(v1_tokens) == len(v2_tokens)
-        for k in range(len(v1_tokens)):
-            assert len(v1_tokens[k]) == len(v2_tokens[k])
-            assert v1_tokens[k] == v2_tokens[k], f"Error with index = {k}"

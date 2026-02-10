@@ -1,5 +1,4 @@
 from collections import defaultdict
-from lib2to3.btm_utils import tokens
 
 from pathlib import Path
 from typing import Optional, Iterable, Union, Iterator
@@ -16,8 +15,6 @@ from anticipation.tokenize import (
 
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import MIDIFileIgnoredReason, Token, MIDIProgramCode
-
-TokenStream = Union[Iterable[tuple[Token, ...]], Iterator[tuple[Token, ...]]]
 
 
 def compound_to_events(
@@ -143,58 +140,81 @@ class SequencePacker:
     def __init__(
         self, target: Union[list, Path], settings: AnticipationV2Settings
     ) -> None:
-        self._lazy_iter = None
+        self._iterator_queue = []
+        self._buf = []
         if isinstance(target, list):
-            self._buf = target
-            self._file_sink = None
+            # self._buf = target
+            self._target = target
         elif isinstance(target, Path):
-            self._buf = []
+            # self._buf = []
             # target may not exist yet, but the folder that
             # contains it should
             assert target.parent.exists()
             assert target.parent.is_dir()
-            self._file_sink = open(target, "w")
+            self._target = open(target, "w")
         else:
             raise TypeError("Must have path or list as target.")
 
         self._settings = settings
 
-    def extend(self, new_tokens: list[Token]) -> None:
-        self._buf += new_tokens
+    def add_tokenized_file(
+        self,
+        control_prefix: tuple[Token, ...],
+        tokenized_file: Iterator[tuple[Token, ...]],
+    ) -> None:
+        # assumption: this is called once per file augmentation
+        # tokenized_file is not split in the middle and does not continue some previous
+        # sequence
+        self._iterator_queue.append((control_prefix, tokenized_file))
 
     def flush(self) -> None:
-        if self._file_sink is None:
-            # is a noop if no sink provided
-            return
+        for control_prefix, iter_curr_tokens in self._iterator_queue:
+            to_add = [self._settings.vocab.SEPARATOR, *control_prefix]
 
-        e = self._settings.event_size
-        m = self._settings.m
-        # +1 because the original code set m to have room for
-        # the autoregress/anticipate token
-        buf_len = (e * m) + 1
-        while len(self._buf) >= buf_len:
-            seq = self._buf[:buf_len]
-            self._buf = self._buf[buf_len:]
-
-            if self._settings.tick_token_frequency_in_midi_ticks == 0:
-                # this is not great design since there are some tokenization
-                # semantics / logic in this buffer thing - which I do not think should
-                # be here... but this is for compatibility with v1.
-
-                # this relativize assumes no flag token
-                seq = [seq[0]] + v2_ops.relativize_token_seq_time(
-                    seq[1:], self._settings
+            if len(self._buf) + len(to_add) == self._settings.context_size:
+                # prevent the scenario where the control prefix is written in
+                # a different sequence as the tokens it describes
+                self._buf += [self._settings.vocab.PAD] * (
+                    self._settings.context_size - len(self._buf)
                 )
+                self._write_seq(self._buf)
+                self._buf = []
 
-            assert len(seq) == self._settings.context_size
+            self._buf += to_add
+            for next_elem in iter_curr_tokens:
+                if len(self._buf) + len(next_elem) > self._settings.context_size:
+                    # prevent splitting a triple between sequences
+                    self._buf += [self._settings.vocab.PAD] * (
+                        self._settings.context_size - len(self._buf)
+                    )
 
-            to_write = " ".join([str(tok) for tok in seq]) + "\n"
-            self._file_sink.write(to_write)
+                if len(self._buf) == self._settings.context_size:
+                    # write sequence
+                    self._write_seq(self._buf)
+
+                    # reset the buffer to be just the prefix
+                    self._buf = [*control_prefix]
+
+                self._buf += list(next_elem)
+
+        # clear everything out
+        self._iterator_queue = []
+
+    def _write_seq(self, buf: list[Token]):
+        if isinstance(self._target, list):
+            # copy and move
+            self._target.append(list(buf))
+        else:
+            # file
+            to_write = " ".join([str(tok) for tok in self._buf]) + "\n"
+            self._target.write(to_write)
 
     def close(self) -> None:
-        if self._file_sink is not None:
-            print(f"Token buffer had remaining: {len(self._buf)}")
-            self._file_sink.close()
+        if isinstance(self._target, list):
+            return
+
+        print(f"Token buffer had remaining: {len(self._buf)}")
+        self._target.close()
 
     def __len__(self) -> int:
         return len(self._buf)
@@ -246,27 +266,28 @@ def tokenize(
 
         # 1. pure autoregressive sequence
         for _ in range(settings.num_autoregressive_seq_per_midi_file):
-            buf.extend(_get_augmentation_autoregressive(tokenized_midi, settings))
+            control_prefix, token_iterator = _get_augmentation_autoregressive(
+                tokenized_midi, settings
+            )
+            buf.add_tokenized_file(control_prefix, token_iterator)
 
         # 2. instrument anticipation
         for _ in range(
             settings.num_instrument_anticipation_augmentations_per_midi_file
         ):
-            buf.extend(
-                _get_augmentation_instrument(
-                    tokenized_midi,
-                    all_midi_program_codes,
-                    settings,
-                )
+            control_prefix, token_iterator = _get_augmentation_instrument(
+                tokenized_midi,
+                all_midi_program_codes,
+                settings,
             )
+            buf.add_tokenized_file(control_prefix, token_iterator)
 
         # 3. span anticipation
         for _ in range(settings.num_span_anticipation_augmentations_per_midi_file):
             # TODO: not done w this yet
-            span_anticipation_seq = _get_span_augmentation(
-                tokenized_midi, end_time_in_ticks, settings
+            buf.add_tokenized_file(
+                _get_span_augmentation(tokenized_midi, end_time_in_ticks, settings)
             )
-            buf.extend(span_anticipation_seq)
 
         # write all the sequences to a target
         buf.flush()
@@ -280,7 +301,7 @@ def tokenize(
 
 def _get_augmentation_autoregressive(
     tokens: list[Token], settings: AnticipationV2Settings
-) -> TokenStream:
+) -> tuple[tuple[Token, ...], Iterator[tuple[Token, ...]]]:
     assert len(tokens) % 3 == 0, "bad length"
 
     if settings.tick_token_frequency_in_midi_ticks > 0:
@@ -292,14 +313,9 @@ def _get_augmentation_autoregressive(
         # when events drop below a certain density, pad them with rests
         # in the style that uses tick tokens, we do not need these
         tokens_with_rests = v2_ops.add_rests(tokens, settings)
-        stream = (tokens_with_rests[i:i+3] for i in range(0, len(tokens), 3))
+        stream = (tokens_with_rests[i : i + 3] for i in range(0, len(tokens), 3))
 
-    output = v2_ops.pack(
-        stream, seq_header=(settings.vocab.AUTOREGRESS,), settings=settings
-    )
-
-    return output
-
+    return ((settings.vocab.AUTOREGRESS,), stream)
 
 
 def _sample_instrument_subset(all_midi_program_codes: list[int]) -> list[int]:
@@ -318,10 +334,10 @@ def _get_augmentation_instrument(
     tokens: list[Token],
     all_midi_program_codes: list[int],
     settings: AnticipationV2Settings,
-) -> TokenStream:
+) -> tuple[tuple[Token, ...], Iterator[tuple[Token, ...]]]:
     assert len(tokens) % 3 == 0, "bad length"
-    if settings.debug:
-        _check_no_punctuation_tokens(tokens, settings)
+    # if settings.debug:
+    #     _check_no_punctuation_tokens(tokens, settings)
 
     # in v1, REST tokens are not present in token sequence before calling
     # instrument extraction...
@@ -337,10 +353,7 @@ def _get_augmentation_instrument(
     stream = v2_ops.streaming_relativize_to_tick(
         v2_ops.streaming_anticipate(event_stream, control_stream, settings), settings
     )
-    output = v2_ops.pack(
-        stream, seq_header=(settings.vocab.ANTICIPATE,), settings=settings
-    )
-    return output
+    return ((settings.vocab.ANTICIPATE,), stream)
 
 
 def _get_span_augmentation(

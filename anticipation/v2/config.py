@@ -84,15 +84,6 @@ class AnticipationV2Settings:
     # anticipation interval
     delta: int = 5
 
-    # compatibility settings
-    # v1 codebase did this - when iterating through multiple samples the
-    # flag of (AUTOREGRESS/ANTICIPATE) is added only on the first file
-    # but then subsequently is omitted and only the separators remain.
-    # Unclear if this is intentional, but we expose this behavior for
-    # compatibility / parity with v1. Set to true if we want equivalent
-    # behavior with v1.
-    omit_flag_token_after_first_sample: bool = False
-
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)  # noqa
 
