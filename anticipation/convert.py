@@ -167,7 +167,7 @@ def midi_to_compound(midifile, debug=False, time_resolution: int = TIME_RESOLUTI
             else: # offset
                 try:
                     open_idx, onset_time = open_notes[(instr,message.note,message.channel)].pop(0)
-                except IndexError:
+                except IndexError as e:
                     if debug:
                         print('v1 WARNING: ignoring bad offset')
                 else:

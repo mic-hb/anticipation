@@ -40,6 +40,10 @@ def lmd_0_example_2_midi_path() -> Path:
     # nothing is playing
     return TEST_DATA_PATH / "08c8b965fd94c13611e26ba787e26d7f.mid"
 
+@pytest.fixture
+def lmd_1_example_midi_path() -> Path:
+    return TEST_DATA_PATH / "0283c50694655978acc97928705e3075.mid"
+
 
 @pytest.fixture(scope="function")
 def patch_config_and_reload(monkeypatch: pytest.MonkeyPatch) -> TestConfigPatcher:
@@ -83,8 +87,8 @@ def _parse_midi_tokenized_text(midi_token_string: str) -> list[list[int]]:
     return [list(map(int, x.split(" "))) for x in sequences]
 
 
-def get_tokens_from_midi_file(
-    midi_file_path: Path,
+def get_tokens_from_midi_file_v1(
+    midi_file_paths: list[Path],
     augment_factor: int = 10,
     return_original_compound: bool = False,
     include_original: bool = True,
@@ -92,23 +96,29 @@ def get_tokens_from_midi_file(
     do_random_augmentation: bool = True,
     do_instrument_augmentation: bool = True,
 ) -> dict[str, Any]:
-    assert midi_file_path.exists()
-    assert midi_file_path.is_file()
-
-    # MIDI -> Text
-    midi_preprocess_token_list: list[int] = midi_to_compound(
-        str(midi_file_path.absolute())
-    )
-    midi_preprocess_text = " ".join(str(tok) for tok in midi_preprocess_token_list)
-
     # Text -> Token
     with tempfile.TemporaryDirectory() as td:
         td_enclosing = Path(td)
         split = "0"
-        midi_preprocess_text_fname = td_enclosing / (
-            midi_file_path.stem + ".mid.compound.txt"
-        )
-        midi_preprocess_text_fname.write_text(midi_preprocess_text)
+
+        to_iter = []
+        for midi_file_path in midi_file_paths:
+            assert midi_file_path.exists()
+            assert midi_file_path.is_file()
+
+            # MIDI -> Text
+            midi_preprocess_token_list: list[int] = midi_to_compound(
+                str(midi_file_path.absolute())
+            )
+            midi_preprocess_text = " ".join(
+                str(tok) for tok in midi_preprocess_token_list
+            )
+            midi_preprocess_text_fname = td_enclosing / (
+                midi_file_path.stem + ".mid.compound.txt"
+            )
+            midi_preprocess_text_fname.write_text(midi_preprocess_text)
+            to_iter.append(midi_preprocess_text_fname)
+
         output_fname = td_enclosing / f"tokenized-events-{split}.txt"
 
         # seqcount: number of total tokens in the sequences
@@ -124,7 +134,7 @@ def get_tokens_from_midi_file(
             num_inexpressible,
             all_truncations,
         ) = anticipation_tokenize(
-            [midi_preprocess_text_fname],
+            to_iter,
             output_fname,
             # 1 = standard AR training
             # 10 = lowest acceptable anticipation augment factor
@@ -135,6 +145,9 @@ def get_tokens_from_midi_file(
             do_instrument_augmentation=do_instrument_augmentation,
         )
         tokens: str = Path(output_fname).read_text()
+        if not tokens:
+            raise ValueError("Nothing was written.")
+
         parsed_tokens = _parse_midi_tokenized_text(tokens)
         parse_info = {
             "tokens": parsed_tokens,
@@ -151,3 +164,8 @@ def get_tokens_from_midi_file(
             parse_info["compound"] = midi_preprocess_token_list
 
         return parse_info
+
+
+def get_tokens_from_text_file(tokens_file: Path) -> list[list[int]]:
+    tokens: str = Path(tokens_file).read_text()
+    return _parse_midi_tokenized_text(tokens)
