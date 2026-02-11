@@ -1,5 +1,5 @@
 from pathlib import Path
-
+from operator import itemgetter
 
 from symusic import Score, TimeUnit
 
@@ -22,7 +22,9 @@ def midi_to_compound(midifile: Path, settings: AnticipationV2Settings) -> list[i
             # absolute time in ticks, and then sorting by that absolute value
             compounds.append(
                 (
+                    # need to sort by unquantized time for parity with v1
                     note.time,
+                    # --- these are properties we keep for tokenization ---
                     on_set_time_in_ticks,
                     duration_time_in_ticks,
                     pitch,
@@ -32,7 +34,8 @@ def midi_to_compound(midifile: Path, settings: AnticipationV2Settings) -> list[i
             )
 
     # mimic mido's sort behavior
-    compounds.sort(key=lambda x: (x[0]))
+    # get the 0th element from the compound, could be faster than a lambda?
+    compounds.sort(key=itemgetter(0))
 
     # remove the absolute time, just return the quantized one
     tokens = [x for b in compounds for x in b[1:]]
