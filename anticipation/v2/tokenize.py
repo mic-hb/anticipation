@@ -7,60 +7,14 @@ import warnings
 import numpy as np
 
 from anticipation.v2 import ops as v2_ops
-from anticipation.convert import midi_to_compound
 from anticipation.tokenize import (
     extract_instruments as v1_extract_instruments,
     extract_spans as v1_extract_spans,
 )
 
-from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import MIDIFileIgnoredReason, Token, MIDIProgramCode
-
-
-def compound_to_events(
-    compound: list[int], settings: AnticipationV2Settings
-) -> tuple[list[Token], int]:
-    assert len(compound) % 5 == 0
-    tokens = compound.copy()
-
-    # remove velocities
-    del tokens[4::5]
-
-    # combine (note, instrument)
-    # in v1, a note value of -1 was used as a sentinel
-    # and in this `compound_to_events` function, if -1 appeared, then it
-    # was set to SEPARATOR.
-    # in v2, we now enforce that this -1 never appear in the note or instrument.
-    # ideally this function does not add any punctuation-like tokens (PAD, SEP,
-    # AUTOREGRESS, etc.)
-    assert all(0 <= tok < 2**7 for tok in tokens[2::4])
-    assert all(0 <= tok < 129 for tok in tokens[3::4])
-    tokens[2::4] = [
-        settings.max_midi_pitch * instr + note
-        for note, instr in zip(tokens[2::4], tokens[3::4])
-    ]
-    tokens[2::4] = [settings.vocab.NOTE_OFFSET + tok for tok in tokens[2::4]]
-    del tokens[3::4]
-
-    # max duration cutoff
-    max_duration = settings.time_resolution * settings.max_note_duration_in_seconds
-    num_note_truncations = sum([1 for tok in tokens[1::3] if tok >= max_duration])
-
-    # set unknown durations to 250ms
-    tokens[1::3] = [
-        settings.time_resolution // 4 if tok == -1 else min(tok, max_duration - 1)
-        for tok in tokens[1::3]
-    ]
-
-    tokens[1::3] = [settings.vocab.DUR_OFFSET + tok for tok in tokens[1::3]]
-
-    assert min(tokens[0::3]) >= 0
-    tokens[0::3] = [settings.vocab.TIME_OFFSET + tok for tok in tokens[0::3]]
-
-    assert len(tokens) % 3 == 0
-
-    # tokens are: (time, duration, note x instrument)
-    return tokens, num_note_truncations
+from anticipation.v2.config import AnticipationV2Settings
+from anticipation.v2.convert import midi_to_compound, compound_to_events
 
 
 def maybe_tokenize(
@@ -101,9 +55,8 @@ def tokenize_midi_file(
 
     # midi_to_compound does not depend on vocab choices
     midi_compound: list[int] = midi_to_compound(
-        str(my_midi_file.absolute()),
-        debug=settings.debug,
-        time_resolution=settings.time_resolution,
+        my_midi_file,
+        settings=settings,
     )
 
     # now we are tokenizing the MIDI, using several tokens from our settings
@@ -315,7 +268,7 @@ def _get_augmentation_autoregressive(
         tokens_with_rests = v2_ops.add_rests(tokens, settings)
         stream = (tokens_with_rests[i : i + 3] for i in range(0, len(tokens), 3))
 
-    return ((settings.vocab.AUTOREGRESS,), stream)
+    return (settings.vocab.AUTOREGRESS,), stream
 
 
 def _sample_instrument_subset(all_midi_program_codes: list[int]) -> list[int]:
@@ -353,7 +306,7 @@ def _get_augmentation_instrument(
     stream = v2_ops.streaming_relativize_to_tick(
         v2_ops.streaming_anticipate(event_stream, control_stream, settings), settings
     )
-    return ((settings.vocab.ANTICIPATE,), stream)
+    return (settings.vocab.ANTICIPATE,), stream
 
 
 def _get_span_augmentation(

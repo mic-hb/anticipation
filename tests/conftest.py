@@ -25,7 +25,7 @@ def c_major_midi_path() -> Path:
 
 
 @pytest.fixture
-def lmd_0_example_midi_path() -> Path:
+def lmd_0_example_1_midi_path() -> Path:
     # from The Lakh MIDI Dataset v0.1 (https://colinraffel.com/projects/lmd/)
     # from split 0, first file in name order
     return TEST_DATA_PATH / "0a0a2b0e4d3b7bf4c5383ba025c4683e.mid"
@@ -42,7 +42,14 @@ def lmd_0_example_2_midi_path() -> Path:
 
 
 @pytest.fixture
-def lmd_1_example_midi_path() -> Path:
+def lmd_0_example_3_midi_path() -> Path:
+    # from The Lakh MIDI Dataset v0.1 (https://colinraffel.com/projects/lmd/)
+    return TEST_DATA_PATH / "0c6b53ce52783ec7414b1fc7ce5c0286.mid"
+
+
+@pytest.fixture
+def lmd_0_example_4_midi_path() -> Path:
+    # from The Lakh MIDI Dataset v0.1 (https://colinraffel.com/projects/lmd/)
     return TEST_DATA_PATH / "0283c50694655978acc97928705e3075.mid"
 
 

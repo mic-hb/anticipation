@@ -294,7 +294,7 @@ def test_tokenization_small_sequence_ar(
 
 
 def test_tokenization_lakh_anticipation_get_cold_start(
-    lmd_0_example_midi_path: Path,
+    lmd_0_example_1_midi_path: Path,
     v1_default_settings: AnticipationV2Settings,
 ) -> None:
     with patch("anticipation.tokenize.np.random.choice", return_value=[128]):
@@ -303,7 +303,7 @@ def test_tokenization_lakh_anticipation_get_cold_start(
         # is the drum track for this sample. This makes it much easier to see the
         # cold start issue
         parse_info = get_tokens_from_midi_file_v1(
-            [lmd_0_example_midi_path],
+            [lmd_0_example_1_midi_path],
             augment_factor=10,
             include_original=False,
             do_span_augmentation=False,
@@ -331,11 +331,11 @@ def test_tokenization_lakh_anticipation_get_cold_start(
 
 
 def test_tokenization_lakh_boundary_special_tokens(
-    lmd_0_example_midi_path: Path,
+    lmd_0_example_1_midi_path: Path,
 ) -> None:
     np.random.seed(1)
     parse_info = get_tokens_from_midi_file_v1(
-        [lmd_0_example_midi_path],
+        [lmd_0_example_1_midi_path],
         augment_factor=10,
         include_original=True,
         do_span_augmentation=True,
@@ -424,11 +424,11 @@ def mark_spans_without_separating(all_events, rate):
 
 
 def test_tokenization_lakh_no_packing(
-    lmd_0_example_midi_path: Path, v1_default_settings: AnticipationV2Settings
+    lmd_0_example_1_midi_path: Path, v1_default_settings: AnticipationV2Settings
 ) -> None:
     # tokenize the midi directly
     midi_preprocess_token_list: list[int] = midi_to_compound(
-        str(lmd_0_example_midi_path.absolute())
+        str(lmd_0_example_1_midi_path.absolute())
     )
     all_tokens, truncations, status = maybe_tokenize(midi_preprocess_token_list)
     end_time = ops.max_time(all_tokens, seconds=False)

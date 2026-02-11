@@ -15,7 +15,7 @@ from tests.conftest import (
 
 
 def test_tokenize_v2_lakh_ar_only_for_visualization(
-    lmd_0_example_midi_path: Path,
+    lmd_0_example_1_midi_path: Path,
 ) -> None:
     settings = AnticipationV2Settings(
         vocab=Vocab(),
@@ -26,7 +26,7 @@ def test_tokenize_v2_lakh_ar_only_for_visualization(
         debug=True,
     )
     tokens = []
-    any_ignored = v2_tokenize([lmd_0_example_midi_path], tokens, settings)
+    any_ignored = v2_tokenize([lmd_0_example_1_midi_path], tokens, settings)
     assert not any_ignored
 
     assert len(tokens) == 8
@@ -56,7 +56,7 @@ def test_tokenize_v2_lakh_ar_only_for_visualization(
 
 
 def test_tokenize_v2_lakh_instrument_for_visualization(
-    lmd_0_example_midi_path: Path,
+    lmd_0_example_1_midi_path: Path,
 ) -> None:
     instrument_anticipation_sample = []
     with patch("anticipation.tokenize.np.random.choice", return_value=[128]):
@@ -73,7 +73,7 @@ def test_tokenize_v2_lakh_instrument_for_visualization(
             debug=True,
         )
         any_ignored = v2_tokenize(
-            [lmd_0_example_midi_path], instrument_anticipation_sample, settings
+            [lmd_0_example_1_midi_path], instrument_anticipation_sample, settings
         )
         assert not any_ignored
 
@@ -159,7 +159,7 @@ def test_tokenize_with_ticks_for_small_sequence_ar(
     )
 
 
-def test_tokenize_with_ticks_for_lakh_ar(lmd_0_example_midi_path: Path) -> None:
+def test_tokenize_with_ticks_for_lakh_ar(lmd_0_example_1_midi_path: Path) -> None:
     settings = AnticipationV2Settings(
         min_track_events=1,
         vocab=Vocab(),
@@ -171,7 +171,7 @@ def test_tokenize_with_ticks_for_lakh_ar(lmd_0_example_midi_path: Path) -> None:
         debug=True,
     )
     tokenized_seq = []
-    any_ignored = v2_tokenize([lmd_0_example_midi_path], tokenized_seq, settings)
+    any_ignored = v2_tokenize([lmd_0_example_1_midi_path], tokenized_seq, settings)
     assert not any_ignored
     assert len(tokenized_seq) == 8
     num_total_separators = 0
@@ -202,7 +202,7 @@ def test_tokenize_with_ticks_for_lakh_ar(lmd_0_example_midi_path: Path) -> None:
     )
 
 
-def test_absolute_time_is_correct_with_ticks(lmd_0_example_midi_path: Path) -> None:
+def test_absolute_time_is_correct_with_ticks(lmd_0_example_1_midi_path: Path) -> None:
     settings = AnticipationV2Settings(
         min_track_events=1,
         vocab=Vocab(),
@@ -215,7 +215,9 @@ def test_absolute_time_is_correct_with_ticks(lmd_0_example_midi_path: Path) -> N
     )
     # tokenize and parse without ticks added
     events_without_ticks = []
-    any_ignored = v2_tokenize([lmd_0_example_midi_path], events_without_ticks, settings)
+    any_ignored = v2_tokenize(
+        [lmd_0_example_1_midi_path], events_without_ticks, settings
+    )
     assert not any_ignored
     events_without_ticks = Event.from_token_seq(
         [x for b in events_without_ticks for x in b], settings
@@ -228,7 +230,9 @@ def test_absolute_time_is_correct_with_ticks(lmd_0_example_midi_path: Path) -> N
 
     # tokenize and parse WITH ticks added
     events_include_ticks = []
-    any_ignored = v2_tokenize([lmd_0_example_midi_path], events_include_ticks, settings)
+    any_ignored = v2_tokenize(
+        [lmd_0_example_1_midi_path], events_include_ticks, settings
+    )
     assert not any_ignored
     events_include_ticks = Event.from_token_seq(
         [x for b in events_include_ticks for x in b], settings

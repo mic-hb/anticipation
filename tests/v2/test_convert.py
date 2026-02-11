@@ -16,8 +16,6 @@ from tests.util.synth import (
 )
 from tests.util.midi import get_trimmed_midi
 
-from tests.conftest import TEST_DATA_PATH
-
 
 @pytest.fixture()
 def default_v2_settings() -> AnticipationV2Settings:
@@ -124,14 +122,14 @@ def test_v2_midi_to_compound_simple(
 
 
 def test_v2_midi_to_compound_lakh_0(
-    lmd_0_example_midi_path: Path,
+    lmd_0_example_1_midi_path: Path,
     default_v2_settings: AnticipationV2Settings,
 ) -> None:
     v2_compound = v2_convert.midi_to_compound(
-        lmd_0_example_midi_path, default_v2_settings
+        lmd_0_example_1_midi_path, default_v2_settings
     )
     v1_compound = v1_convert.midi_to_compound(
-        str(lmd_0_example_midi_path.absolute()),
+        str(lmd_0_example_1_midi_path.absolute()),
         debug=default_v2_settings.debug,
         time_resolution=v1_config.TIME_RESOLUTION,
     )
@@ -143,13 +141,13 @@ def test_v2_midi_to_compound_lakh_0(
 
 def test_v2_midi_to_compound_lakh_1(
     default_v2_settings: AnticipationV2Settings,
+    lmd_0_example_3_midi_path: Path,
 ) -> None:
-    lmd_1_example_midi_path = TEST_DATA_PATH / "0c6b53ce52783ec7414b1fc7ce5c0286.mid"
     v2_compound = v2_convert.midi_to_compound(
-        lmd_1_example_midi_path, default_v2_settings
+        lmd_0_example_3_midi_path, default_v2_settings
     )
     v1_compound = v1_convert.midi_to_compound(
-        str(lmd_1_example_midi_path.absolute()),
+        str(lmd_0_example_3_midi_path.absolute()),
         debug=default_v2_settings.debug,
         time_resolution=v1_config.TIME_RESOLUTION,
     )
@@ -162,15 +160,19 @@ def test_v2_midi_to_compound_lakh_2_snippet(
 ) -> None:
     # I manually identified this snippet to be problematic, and then used this test to
     # debug the problems - is now fixed
-    trimmed_midi_path = Path("./lmd_0_example_2_trimmed.mid")
-    get_trimmed_midi(lmd_0_example_2_midi_path, trimmed_midi_path, 120.425, 154.0)
+    with tempfile.TemporaryDirectory() as td:
+        trimmed_midi_path = Path(td) / "lmd_0_example_2_trimmed.mid"
+        get_trimmed_midi(lmd_0_example_2_midi_path, trimmed_midi_path, 120.425, 154.0)
 
-    v2_compound = v2_convert.midi_to_compound(trimmed_midi_path, default_v2_settings)
-    v1_compound = v1_convert.midi_to_compound(
-        str(trimmed_midi_path.absolute()),
-        debug=default_v2_settings.debug,
-        time_resolution=v1_config.TIME_RESOLUTION,
-    )
+        v2_compound = v2_convert.midi_to_compound(
+            trimmed_midi_path, default_v2_settings
+        )
+        v1_compound = v1_convert.midi_to_compound(
+            str(trimmed_midi_path.absolute()),
+            debug=default_v2_settings.debug,
+            time_resolution=v1_config.TIME_RESOLUTION,
+        )
+
     assert is_compound_musically_equivalent(
         v1_compound, v2_compound, timing_tolerance_in_ticks=1
     )

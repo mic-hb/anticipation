@@ -4,6 +4,53 @@ from operator import itemgetter
 from symusic import Score, TimeUnit
 
 from anticipation.v2.config import AnticipationV2Settings
+from anticipation.v2.types import Token
+
+
+def compound_to_events(
+    compound: list[int], settings: AnticipationV2Settings
+) -> tuple[list[Token], int]:
+    assert len(compound) % 5 == 0
+    tokens = compound.copy()
+
+    # remove velocities
+    del tokens[4::5]
+
+    # combine (note, instrument)
+    # in v1, a note value of -1 was used as a sentinel
+    # and in this `compound_to_events` function, if -1 appeared, then it
+    # was set to SEPARATOR.
+    # in v2, we now enforce that this -1 never appear in the note or instrument.
+    # ideally this function does not add any punctuation-like tokens (PAD, SEP,
+    # AUTOREGRESS, etc.)
+    assert all(0 <= tok < 2**7 for tok in tokens[2::4])
+    assert all(0 <= tok < 129 for tok in tokens[3::4])
+    tokens[2::4] = [
+        settings.max_midi_pitch * instr + note
+        for note, instr in zip(tokens[2::4], tokens[3::4])
+    ]
+    tokens[2::4] = [settings.vocab.NOTE_OFFSET + tok for tok in tokens[2::4]]
+    del tokens[3::4]
+
+    # max duration cutoff
+    max_duration = settings.time_resolution * settings.max_note_duration_in_seconds
+    num_note_truncations = sum([1 for tok in tokens[1::3] if tok >= max_duration])
+
+    # set unknown durations to 250ms
+    tokens[1::3] = [
+        settings.time_resolution // 4 if tok == -1 else min(tok, max_duration - 1)
+        for tok in tokens[1::3]
+    ]
+
+    tokens[1::3] = [settings.vocab.DUR_OFFSET + tok for tok in tokens[1::3]]
+
+    assert min(tokens[0::3]) >= 0
+    tokens[0::3] = [settings.vocab.TIME_OFFSET + tok for tok in tokens[0::3]]
+
+    assert len(tokens) % 3 == 0
+
+    # tokens are: (time, duration, note x instrument)
+    return tokens, num_note_truncations
 
 
 def midi_to_compound(midifile: Path, settings: AnticipationV2Settings) -> list[int]:
