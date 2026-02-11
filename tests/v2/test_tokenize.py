@@ -1,4 +1,3 @@
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,7 +6,6 @@ from anticipation.v2.tokenize import tokenize as v2_tokenize
 
 from tests.util.entities import Event, EventSpecialCode
 from tests.util.visualize_sequence import get_figure_and_open
-from tests.conftest import get_tokens_from_midi_file_v1, get_tokens_from_text_file
 
 from tests.conftest import (
     VISUALIZATIONS_PATH,
@@ -24,15 +22,19 @@ def test_tokenize_v2_lakh_ar_only_for_visualization(
         num_span_anticipation_augmentations_per_midi_file=0,
         num_random_anticipation_augmentations_per_midi_file=0,
         debug=True,
+        debug_flush_remaining_token_buffer=True,
     )
     tokens = []
     any_ignored = v2_tokenize([lmd_0_example_1_midi_path], tokens, settings)
     assert not any_ignored
 
-    assert len(tokens) == 8
+    assert len(tokens) == 9
     num_total_separators = 0
     for i, packed_seq in enumerate(tokens):
-        assert len(packed_seq) == settings.context_size
+        if i < len(tokens) - 1:
+            # all but the last seq have full context
+            assert len(packed_seq) == settings.context_size
+
         if i == 0:
             # first sequence should have sample sep
             assert packed_seq[0] == settings.vocab.SEPARATOR
@@ -44,14 +46,16 @@ def test_tokenize_v2_lakh_ar_only_for_visualization(
         num_total_separators += len(
             [x for x in packed_seq if x == settings.vocab.SEPARATOR]
         )
+
     assert num_total_separators == 1
     parsed_events = Event.from_token_seq([x for b in tokens for x in b], settings)
+    assert len(parsed_events) == 3053
     get_figure_and_open(
         events=parsed_events,
         delta=settings.delta,
         time_resolution=settings.time_resolution,
         path=(VISUALIZATIONS_PATH / f"autoregressive_v2.html"),
-        auto_open=False,
+        auto_open=True,
     )
 
 
@@ -101,7 +105,7 @@ def test_tokenize_v2_lakh_instrument_for_visualization(
         delta=settings.delta,
         time_resolution=settings.time_resolution,
         path=(VISUALIZATIONS_PATH / f"anticipated_instr_v2.html"),
-        auto_open=False,
+        auto_open=True,
     )
 
 

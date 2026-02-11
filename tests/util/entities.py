@@ -176,14 +176,14 @@ class Event:
         events = []
 
         # the function ops.min_time expects sequence to not contain any flag tokens
-        prev_t = ops.min_time(
-            [
-                x
-                for x in raw_event_token_seq[i:]
-                if x not in (v.ANTICIPATE, v.AUTOREGRESS, v.PAD, v.SEPARATOR)
-            ],
-            seconds=False,
-        )
+        # prev_t = ops.min_time(
+        #     [
+        #         x
+        #         for x in raw_event_token_seq[i:]
+        #         if x not in (v.ANTICIPATE, v.AUTOREGRESS, v.SEPARATOR)
+        #     ],
+        #     seconds=False,
+        # )
 
         ticks_seen = 0
         prev_tick_abs_time = 0
@@ -223,9 +223,6 @@ class Event:
                 )
                 i += 1
                 continue
-            elif raw_event_token_seq[i] == settings.vocab.PAD:
-                i += 1
-                continue
             elif raw_event_token_seq[i] == settings.vocab.TICK:
                 # tick token
                 tick_abs_time = ticks_seen * settings.tick_token_frequency_in_midi_ticks
@@ -247,7 +244,30 @@ class Event:
             else:
                 # typical event
                 e = raw_event_token_seq[i : i + 3]
+
+                # ---- check that the event was split off the end ----
+                if len(e) < 3:
+                    # this can happen if the final event in the sequence was truncated, but
+                    # the setting `debug_flush_remaining_token_buffer` is False, meaning that
+                    # the subsequence of the sample remaining was less than the context length.
+                    # in that case, that subsequence is dropped. In a production setting, the
+                    # sequence that remains in the buffer would start the sequence as the next
+                    # file comes in, unless it is the very last file in the dataset (in which
+                    # case it is actually discarded).
+                    i += 3
+                    continue
                 t, d, n = e
+
+                if d in (settings.vocab.ANTICIPATE, settings.vocab.AUTOREGRESS):
+                    # this token was cut off, it is repeated in the next few tokens
+                    i += 1
+                    continue
+                if n in (settings.vocab.ANTICIPATE, settings.vocab.AUTOREGRESS):
+                    # this token was cut off, it is repeated in the next few tokens
+                    i += 2
+                    continue
+                # ----------------------------------------------------
+
                 new_event = Event(
                     time=t,
                     duration=d,

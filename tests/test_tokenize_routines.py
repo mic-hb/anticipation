@@ -1,9 +1,7 @@
 from pathlib import Path
-
-import numpy as np
-
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 from anticipation import config

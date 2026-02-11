@@ -13,6 +13,7 @@ def test_serialize_anticipation_v2_settings() -> None:
         "compound_size": 5,
         "context_size": 1024,
         "debug": False,
+        "debug_flush_remaining_token_buffer": False,
         "delta": 5,
         "event_size": 3,
         "m": 341,
@@ -38,7 +39,6 @@ def test_serialize_anticipation_v2_settings() -> None:
             "CONTROL_OFFSET": 27513,
             "DUR_OFFSET": 10000,
             "NOTE_OFFSET": 11000,
-            "PAD": 55030,
             "REST": 27512,
             "SEPARATOR": 55025,
             "SPECIAL_OFFSET": 55025,
@@ -49,7 +49,7 @@ def test_serialize_anticipation_v2_settings() -> None:
         },
     }
     s, _ = settings._get_as_file()
-    assert settings.md5_hash() == "ff64b83bb992e30c60dc84869a6bf575"
+    assert settings.md5_hash() == "5fffc28d38353bf03eaf07ab38369c08"
     reloaded_settings = loads(s)
     assert settings.to_dict() == reloaded_settings
 

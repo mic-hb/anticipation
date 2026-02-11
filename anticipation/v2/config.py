@@ -40,7 +40,6 @@ class Vocab:
     # https://github.com/jthickstun/anticipation/blob/6927699c5243fd91d1d252211c29885377d9dda5/anticipation/vocabs/localmidi.py#L65
     # aka 'tick'
     TICK: int = _last_token_in_v1 + 1
-    PAD: int = _last_token_in_v1 + 2
 
 
 @dataclass(frozen=True)
@@ -54,6 +53,7 @@ class AnticipationV2Settings:
     compound_size: int = 5
     time_resolution: int = 100
     debug: bool = False
+    debug_flush_remaining_token_buffer: bool = False
     min_track_events: int = 100
     min_track_time_in_seconds: int = 10
     max_track_time_in_seconds: int = 3600

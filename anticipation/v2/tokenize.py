@@ -124,29 +124,27 @@ class SequencePacker:
         for control_prefix, iter_curr_tokens in self._iterator_queue:
             to_add = [self._settings.vocab.SEPARATOR, *control_prefix]
 
-            if len(self._buf) + len(to_add) == self._settings.context_size:
-                # prevent the scenario where the control prefix is written in
-                # a different sequence as the tokens it describes
-                self._buf += [self._settings.vocab.PAD] * (
-                    self._settings.context_size - len(self._buf)
-                )
-                self._write_seq(self._buf)
-                self._buf = []
-
             self._buf += to_add
+            split_token = []
             for next_elem in iter_curr_tokens:
                 if len(self._buf) + len(next_elem) > self._settings.context_size:
-                    # prevent splitting a triple between sequences
-                    self._buf += [self._settings.vocab.PAD] * (
-                        self._settings.context_size - len(self._buf)
-                    )
+                    # adding the next element would split a note down the
+                    # middle between sequences...
+                    self._buf += next_elem
+
+                    # truncate it... but
+                    self._buf = self._buf[: self._settings.context_size]
+                    # repeat it at the start of the next sequence
+                    split_token += list(next_elem)
 
                 if len(self._buf) == self._settings.context_size:
                     # write sequence
                     self._write_seq(self._buf)
 
-                    # reset the buffer to be just the prefix
-                    self._buf = [*control_prefix]
+                    # reset the buffer to contain controls and any tokens
+                    # that got split
+                    self._buf = [*control_prefix, *split_token]
+                    split_token = []
 
                 self._buf += list(next_elem)
 
@@ -163,10 +161,15 @@ class SequencePacker:
             self._target.write(to_write)
 
     def close(self) -> None:
+        if self._settings.debug_flush_remaining_token_buffer:
+            self._write_seq(self._buf)
+            self._buf = []
+
+        print(f"Token buffer had remaining: {len(self._buf)}")
+
         if isinstance(self._target, list):
             return
 
-        print(f"Token buffer had remaining: {len(self._buf)}")
         self._target.close()
 
     def __len__(self) -> int:
