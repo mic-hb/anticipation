@@ -31,6 +31,16 @@ def lmd_0_example_midi_path() -> Path:
     return TEST_DATA_PATH / "0a0a2b0e4d3b7bf4c5383ba025c4683e.mid"
 
 
+@pytest.fixture
+def lmd_0_example_2_midi_path() -> Path:
+    # from The Lakh MIDI Dataset v0.1 (https://colinraffel.com/projects/lmd/)
+    # from split 0
+    # this file is over 25 minutes long (??? !!!)
+    # there are ~8 distinct movements in this file... several places where
+    # nothing is playing
+    return TEST_DATA_PATH / "08c8b965fd94c13611e26ba787e26d7f.mid"
+
+
 @pytest.fixture(scope="function")
 def patch_config_and_reload(monkeypatch: pytest.MonkeyPatch) -> TestConfigPatcher:
     """

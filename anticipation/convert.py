@@ -115,7 +115,7 @@ def interarrival_to_midi(tokens, debug=False):
             except KeyError:
                 # shouldn't happen because we should have a corresponding onset
                 if debug:
-                    print('IGNORING bad offset')
+                    print('v1 IGNORING bad offset')
 
                 continue
 
@@ -169,7 +169,7 @@ def midi_to_compound(midifile, debug=False, time_resolution: int = TIME_RESOLUTI
                     open_idx, onset_time = open_notes[(instr,message.note,message.channel)].pop(0)
                 except IndexError:
                     if debug:
-                        print('WARNING: ignoring bad offset')
+                        print('v1 WARNING: ignoring bad offset')
                 else:
                     duration_ticks = round(time_resolution*(time-onset_time))
                     tokens[5*open_idx + 1] = duration_ticks
@@ -192,14 +192,14 @@ def midi_to_compound(midifile, debug=False, time_resolution: int = TIME_RESOLUTI
             pass # I have no idea what this is
         else:
             if debug:
-                print('UNHANDLED MESSAGE', message.type, message)
+                print('v1 UNHANDLED MESSAGE', message.type, message)
 
     unclosed_count = 0
     for _,v in open_notes.items():
         unclosed_count += len(v)
 
     if debug and unclosed_count > 0:
-        print(f'WARNING: {unclosed_count} unclosed notes')
+        print(f'v1 WARNING: {unclosed_count} unclosed notes')
         print('  ', midifile)
 
     return tokens

@@ -35,8 +35,8 @@ if __name__ == "__main__":
         
     Recent results:
     
-        old: Mean +- std dev: 1.51 sec +- 0.02 sec
-        new: Mean +- std dev: 35.9 ms +- 0.4 ms
+        old: Mean +- std dev: 1.53 sec +- 0.02 sec
+        new: Mean +- std dev: 22.5 ms +- 0.7 ms
     """
     runner = pyperf.Runner()
     runner.metadata["midi_files"] = len(MIDI_PATHS)
