@@ -7,6 +7,10 @@ from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import Token
 
 
+class SymusicRuntimeError(Exception):
+    pass
+
+
 def compound_to_events(
     compound: list[int], settings: AnticipationV2Settings
 ) -> tuple[list[Token], int]:
@@ -55,7 +59,16 @@ def compound_to_events(
 
 def midi_to_compound(midifile: Path, settings: AnticipationV2Settings) -> list[int]:
     time_resolution = settings.time_resolution
-    score = Score(midifile, ttype=TimeUnit.second)
+    try:
+        # always have sanitize_data equal to true. Without it, symusic may segfault or crash
+        # some MIDI files in Lakh, without any modification, can sometimes trigger reading
+        # out of bounds.
+        score = Score.from_midi(
+            midifile.read_bytes(), ttype=TimeUnit.second, sanitize_data=True
+        )
+    except RuntimeError as e:
+        raise SymusicRuntimeError(str(e))
+
     compounds = []
     for track_idx, track in enumerate(score.tracks):
         instr = 128 if track.is_drum else track.program

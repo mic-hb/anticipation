@@ -8,7 +8,6 @@ from typing import Union
 import re
 
 import anticipation.vocab as v
-import anticipation.ops as ops
 
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import Token, MIDITick, MIDIProgramCode, MIDINote

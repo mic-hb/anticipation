@@ -1,7 +1,6 @@
-from collections import defaultdict
-
-from pathlib import Path
 from typing import Optional, Iterable, Union, Iterator
+from collections import defaultdict
+from pathlib import Path
 import warnings
 
 import numpy as np
@@ -14,17 +13,50 @@ from anticipation.tokenize import (
 
 from anticipation.v2.types import MIDIFileIgnoredReason, Token, MIDIProgramCode
 from anticipation.v2.config import AnticipationV2Settings
-from anticipation.v2.convert import midi_to_compound, compound_to_events
+from anticipation.v2.convert import (
+    midi_to_compound,
+    compound_to_events,
+    SymusicRuntimeError,
+)
+from anticipation.v2.io import TokenSequenceBinaryFile
 
 
 def maybe_tokenize(
-    compound_tokens: list[int], settings: AnticipationV2Settings
+    my_midi_file: Path, settings: AnticipationV2Settings
 ) -> tuple[list[Token], int, Optional[MIDIFileIgnoredReason]]:
+    try:
+        # try to convert this file to compound 5-tuple representation
+        compound_tokens: list[int] = midi_to_compound(
+            my_midi_file,
+            settings=settings,
+        )
+    except SymusicRuntimeError as e:
+        if "File header is not MThd" in str(e):
+            return [], 0, MIDIFileIgnoredReason.INVALID_FILE_HEADER
+        elif "Unexpected EOF" in str(e):
+            return [], 0, MIDIFileIgnoredReason.UNEXPECTED_EOF_ERROR
+        elif "Unexpected running status" in str(e):
+            return [], 0, MIDIFileIgnoredReason.BAD_STATUS
+        elif "Division type is not ticks per quarter" in str(e):
+            return [], 0, MIDIFileIgnoredReason.INVALID_TICK_TYPE
+        elif "Invaild midi format" in str(e):
+            # NB: the misspelling of 'invalid' is required
+            return [], 0, MIDIFileIgnoredReason.INVALID_MIDI_FORMAT_IN_HEADER
+        elif "Invaild midi file!" in str(e):
+            # NB: the misspelling of 'invalid' is required
+            return [], 0, MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE
+        else:
+            raise e
+
     if len(compound_tokens) < settings.compound_size * settings.min_track_events:
         # skip sequences with very few events
         return [], 0, MIDIFileIgnoredReason.TOO_FEW_EVENTS
 
-    events, num_note_truncations = compound_to_events(compound_tokens, settings)
+    try:
+        events, num_note_truncations = compound_to_events(compound_tokens, settings)
+    except AssertionError:
+        return [], 0, MIDIFileIgnoredReason.VALUES_WERE_OUT_OF_RANGE
+
     end_time = v2_ops.max_time(events, settings, seconds=False)
 
     # don't want to deal with extremely short tracks
@@ -53,15 +85,9 @@ def tokenize_midi_file(
 ]:
     assert isinstance(my_midi_file, Path)
 
-    # midi_to_compound does not depend on vocab choices
-    midi_compound: list[int] = midi_to_compound(
-        my_midi_file,
-        settings=settings,
-    )
-
     # now we are tokenizing the MIDI, using several tokens from our settings
     all_events, num_note_truncations, reason_ignored = maybe_tokenize(
-        midi_compound, settings
+        my_midi_file, settings
     )
 
     all_midi_program_codes = []
@@ -91,12 +117,14 @@ class SequencePacker:
     """
 
     def __init__(
-        self, target: Union[list, Path], settings: AnticipationV2Settings
+        self,
+        target: Union[list, Path],
+        settings: AnticipationV2Settings,
     ) -> None:
+        self._settings = settings
         self._iterator_queue = []
         self._buf = []
         if isinstance(target, list):
-            # self._buf = target
             self._target = target
         elif isinstance(target, Path):
             # self._buf = []
@@ -104,11 +132,15 @@ class SequencePacker:
             # contains it should
             assert target.parent.exists()
             assert target.parent.is_dir()
-            self._target = open(target, "w")
+            self._target = TokenSequenceBinaryFile(
+                target,
+                seq_len=settings.context_size,
+                vocab_size=settings.vocab.VOCAB_SIZE,
+            )
         else:
             raise TypeError("Must have path or list as target.")
 
-        self._settings = settings
+        self._target: Union[list, TokenSequenceBinaryFile]
 
     def add_tokenized_file(
         self,
@@ -120,7 +152,7 @@ class SequencePacker:
         # sequence
         self._iterator_queue.append((control_prefix, tokenized_file))
 
-    def flush(self) -> None:
+    def write_sequences(self) -> None:
         for control_prefix, iter_curr_tokens in self._iterator_queue:
             to_add = [self._settings.vocab.SEPARATOR, *control_prefix]
 
@@ -152,13 +184,7 @@ class SequencePacker:
         self._iterator_queue = []
 
     def _write_seq(self, buf: list[Token]):
-        if isinstance(self._target, list):
-            # copy and move
-            self._target.append(list(buf))
-        else:
-            # file
-            to_write = " ".join([str(tok) for tok in self._buf]) + "\n"
-            self._target.write(to_write)
+        self._target.append(list(buf))
 
     def close(self) -> None:
         if self._settings.debug_flush_remaining_token_buffer:
@@ -166,20 +192,17 @@ class SequencePacker:
             self._buf = []
 
         print(f"Token buffer had remaining: {len(self._buf)}")
-
         if isinstance(self._target, list):
             return
 
         self._target.close()
-
-    def __len__(self) -> int:
-        return len(self._buf)
 
 
 def tokenize(
     midi_files: Iterable[Path],
     output: Union[list, Path],
     settings: AnticipationV2Settings,
+    total_files: int = 0,
 ) -> dict[MIDIFileIgnoredReason, int]:
     """Tokenizes MIDI for v2 Anticipatory Training
 
@@ -201,10 +224,13 @@ def tokenize(
       A dictionary of (reason ignored, number of times it happened) for
       the given files. This will be empty if no files were ignored.
     """
+    from tqdm import tqdm
 
     stats = defaultdict(int)
     buf = SequencePacker(target=output, settings=settings)
-    for file_idx, midi_file in enumerate(midi_files):
+    _pbar = tqdm(midi_files, total=total_files)
+    for file_idx, midi_file in enumerate(_pbar):
+        # print(midi_file)
         (
             tokenized_midi,
             num_note_truncations,
@@ -213,10 +239,13 @@ def tokenize(
             end_time_in_ticks,
         ) = tokenize_midi_file(midi_file, settings)
         if reason_ignored is not None:
-            warnings.warn(
-                f"Sequence in file {midi_file} was ignored for reason: {reason_ignored}",
-                UserWarning,
-            )
+            if settings.debug:
+                # suppress writing to stderr/stdout unless we are debuggin
+                warnings.warn(
+                    f"Sequence in file {midi_file} was ignored for reason: {reason_ignored}",
+                    UserWarning,
+                )
+
             stats[reason_ignored] += 1
             continue
 
@@ -246,7 +275,7 @@ def tokenize(
             )
 
         # write all the sequences to a target
-        buf.flush()
+        buf.write_sequences()
 
     # close files if necessary
     buf.close()
