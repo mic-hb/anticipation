@@ -84,7 +84,7 @@ def test_tokenize_v2_lakh_ar_only_for_visualization(
         delta=settings.delta,
         time_resolution=settings.time_resolution,
         path=(VISUALIZATIONS_PATH / f"autoregressive_v2.html"),
-        auto_open=True,
+        auto_open=False,
     )
 
 
@@ -134,7 +134,7 @@ def test_tokenize_v2_lakh_instrument_for_visualization(
         delta=settings.delta,
         time_resolution=settings.time_resolution,
         path=(VISUALIZATIONS_PATH / f"anticipated_instr_v2.html"),
-        auto_open=True,
+        auto_open=False,
     )
 
 
