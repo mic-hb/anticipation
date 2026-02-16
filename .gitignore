@@ -1,4 +1,6 @@
 .idea
+env/
+symusic/
 data/
 tests/visualizations
 __pycache__
