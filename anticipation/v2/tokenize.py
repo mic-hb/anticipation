@@ -45,6 +45,8 @@ def maybe_tokenize(
         elif "Invaild midi file!" in str(e):
             # NB: the misspelling of 'invalid' is required
             return [], 0, MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE
+        elif "Invalid chunk length" in str(e):
+            return [], 0, MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE
         else:
             raise e
 
@@ -191,7 +193,9 @@ class SequencePacker:
             self._write_seq(self._buf)
             self._buf = []
 
-        print(f"Token buffer had remaining: {len(self._buf)}")
+        if self._settings.debug:
+            print(f"Token buffer had remaining: {len(self._buf)}")
+
         if isinstance(self._target, list):
             return
 
@@ -202,7 +206,6 @@ def tokenize(
     midi_files: Iterable[Path],
     output: Union[list, Path],
     settings: AnticipationV2Settings,
-    total_files: int = 0,
 ) -> dict[MIDIFileIgnoredReason, int]:
     """Tokenizes MIDI for v2 Anticipatory Training
 
@@ -228,9 +231,7 @@ def tokenize(
 
     stats = defaultdict(int)
     buf = SequencePacker(target=output, settings=settings)
-    _pbar = tqdm(midi_files, total=total_files)
-    for file_idx, midi_file in enumerate(_pbar):
-        # print(midi_file)
+    for file_idx, midi_file in enumerate(tqdm(midi_files)):
         (
             tokenized_midi,
             num_note_truncations,
@@ -240,7 +241,7 @@ def tokenize(
         ) = tokenize_midi_file(midi_file, settings)
         if reason_ignored is not None:
             if settings.debug:
-                # suppress writing to stderr/stdout unless we are debuggin
+                # suppress writing to stderr/stdout unless we are debugging
                 warnings.warn(
                     f"Sequence in file {midi_file} was ignored for reason: {reason_ignored}",
                     UserWarning,

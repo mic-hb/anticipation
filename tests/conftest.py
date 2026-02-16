@@ -53,6 +53,15 @@ def lmd_0_example_4_midi_path() -> Path:
     return TEST_DATA_PATH / "0283c50694655978acc97928705e3075.mid"
 
 
+@pytest.fixture
+def lmd_1_example_0_midi_path() -> Path:
+    # from The Lakh MIDI Dataset v0.1 (https://colinraffel.com/projects/lmd/)
+    # from split 1
+    # this file is special because it can cause a segfault on MiniMidi/symusic.
+    # we use it to test our patch that fixes that
+    return TEST_DATA_PATH / "1a59d7118a473e7e093624f446bf3dbd.mid"
+
+
 @pytest.fixture(scope="function")
 def patch_config_and_reload(monkeypatch: pytest.MonkeyPatch) -> TestConfigPatcher:
     """

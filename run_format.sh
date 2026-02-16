@@ -9,6 +9,6 @@ cd "$(dirname -- "$0")"
 PYTHONPATH=. ruff format ./tests/util
 PYTHONPATH=. ruff format ./tests/conftest.py
 PYTHONPATH=. ruff format ./tests/test_tokenize_routines.py
+PYTHONPATH=. ruff format ./train/v2
 PYTHONPATH=. ruff format ./tests/v2
 PYTHONPATH=. ruff format ./anticipation/v2
-PYTHONPATH=. ruff format ./train/tokenize-lakh.py

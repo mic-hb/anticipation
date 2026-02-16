@@ -1,8 +1,15 @@
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+import pytest
+
+from anticipation.v2.types import Token
 from anticipation.v2.config import AnticipationV2Settings, Vocab
 from anticipation.v2.tokenize import tokenize as v2_tokenize
+from anticipation.v2.tokenize import MIDIFileIgnoredReason
+from anticipation.v2.io import TokenSequenceBinaryFile
 
 from tests.util.entities import Event, EventSpecialCode
 from tests.util.visualize_sequence import get_figure_and_open
@@ -12,11 +19,14 @@ from tests.conftest import (
 )
 
 
-def test_tokenize_v2_lakh_ar_only_for_visualization(
+@pytest.fixture
+def lmd_0_example_1_tokens_and_parsed_events(
     lmd_0_example_1_midi_path: Path,
-) -> None:
+) -> tuple[list[list[Token]], list[Event], AnticipationV2Settings]:
     settings = AnticipationV2Settings(
+        min_track_events=1,
         vocab=Vocab(),
+        # AR only
         num_autoregressive_seq_per_midi_file=1,
         num_instrument_anticipation_augmentations_per_midi_file=0,
         num_span_anticipation_augmentations_per_midi_file=0,
@@ -24,17 +34,25 @@ def test_tokenize_v2_lakh_ar_only_for_visualization(
         debug=True,
         debug_flush_remaining_token_buffer=True,
     )
-    tokens = []
-    any_ignored = v2_tokenize([lmd_0_example_1_midi_path], tokens, settings)
-    assert not any_ignored
+    midi_files = [lmd_0_example_1_midi_path]
+    in_memory_tokens = []
+    any_ignored_in_memory = v2_tokenize(midi_files, in_memory_tokens, settings)
+    assert not any_ignored_in_memory
 
-    assert len(tokens) == 9
+    # tokenizing this in full is 9 sequences
+    assert len(in_memory_tokens) == 9
+    # all but the last one has full context, we've set a debug setting to push the
+    # tokens in the buffer that would typically be ignored in a production context
+    assert all((len(x) == settings.context_size for x in in_memory_tokens[:-1]))
+
+    # there are 606 remaining that do not fit exactly into a context window
+    assert len(in_memory_tokens[8]) == 606
+
+    all_tokens_flattened = [x for b in in_memory_tokens for x in b]
+    assert len(all_tokens_flattened) == 606 + (1024 * 8)
+
     num_total_separators = 0
-    for i, packed_seq in enumerate(tokens):
-        if i < len(tokens) - 1:
-            # all but the last seq have full context
-            assert len(packed_seq) == settings.context_size
-
+    for i, packed_seq in enumerate(in_memory_tokens):
         if i == 0:
             # first sequence should have sample sep
             assert packed_seq[0] == settings.vocab.SEPARATOR
@@ -48,8 +66,19 @@ def test_tokenize_v2_lakh_ar_only_for_visualization(
         )
 
     assert num_total_separators == 1
-    parsed_events = Event.from_token_seq([x for b in tokens for x in b], settings)
+    parsed_events = Event.from_token_seq(
+        [x for b in in_memory_tokens for x in b], settings
+    )
     assert len(parsed_events) == 3053
+    return in_memory_tokens, parsed_events, settings
+
+
+def test_tokenize_v2_lakh_ar_only_for_visualization(
+    lmd_0_example_1_tokens_and_parsed_events: tuple[
+        list[list[Token]], list[Event], AnticipationV2Settings
+    ],
+) -> None:
+    _, parsed_events, settings = lmd_0_example_1_tokens_and_parsed_events
     get_figure_and_open(
         events=parsed_events,
         delta=settings.delta,
@@ -222,6 +251,7 @@ def test_absolute_time_is_correct_with_ticks(lmd_0_example_1_midi_path: Path) ->
     any_ignored = v2_tokenize(
         [lmd_0_example_1_midi_path], events_without_ticks, settings
     )
+    assert len(events_without_ticks) == 8
     assert not any_ignored
     events_without_ticks = Event.from_token_seq(
         [x for b in events_without_ticks for x in b], settings
@@ -256,3 +286,87 @@ def test_absolute_time_is_correct_with_ticks(lmd_0_example_1_midi_path: Path) ->
         assert a.midi_note() == b.midi_note()
         assert a.midi_duration() == b.midi_duration()
         assert a.midi_instrument() == b.midi_instrument()
+
+
+def test_sequence_packing_file_correctness(
+    lmd_0_example_1_midi_path: Path,
+    lmd_0_example_2_midi_path: Path,
+    lmd_0_example_1_tokens_and_parsed_events,
+) -> None:
+    settings = AnticipationV2Settings(
+        min_track_events=1,
+        vocab=Vocab(),
+        # AR only
+        num_autoregressive_seq_per_midi_file=1,
+        num_instrument_anticipation_augmentations_per_midi_file=0,
+        num_span_anticipation_augmentations_per_midi_file=0,
+        num_random_anticipation_augmentations_per_midi_file=0,
+        debug=True,
+        debug_flush_remaining_token_buffer=False,
+    )
+    midi_files = [lmd_0_example_1_midi_path, lmd_0_example_2_midi_path]
+
+    in_memory_tokens = []
+    any_ignored_in_memory = v2_tokenize(midi_files, in_memory_tokens, settings)
+    assert not any_ignored_in_memory
+
+    # 97 complete sequences
+    assert len(in_memory_tokens) == 97
+    # should all be context length
+    assert all((len(x) == settings.context_size for x in in_memory_tokens))
+
+    # test that we can fully recover the first file that is packed, even
+    # when flushing the remaining buffer is OFF. We expect that a context window
+    # contains the end of the first file and start of the second
+    seq_border_frame = in_memory_tokens[8]
+    sep_idx = seq_border_frame.index(settings.vocab.SEPARATOR)
+    assert sep_idx == 606
+    lmd_0_example_1_actual_tokens = in_memory_tokens[:8] + [
+        in_memory_tokens[8][:sep_idx]
+    ]
+    lmd_0_example_1_actual_events = Event.from_token_seq(
+        [x for b in lmd_0_example_1_actual_tokens for x in b], settings
+    )
+    (
+        lmd_0_example_1_expected_tokens,
+        lmd_0_example_1_expected_events,
+        expected_settings,
+    ) = lmd_0_example_1_tokens_and_parsed_events
+    assert lmd_0_example_1_actual_tokens == lmd_0_example_1_expected_tokens
+    assert lmd_0_example_1_actual_events == lmd_0_example_1_expected_events
+    assert settings.context_size == expected_settings.context_size
+    assert settings.vocab == expected_settings.vocab
+
+    # test saving data to disk is exactly same as in-memory
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        dataset_path = td_path / "dataset.bin"
+        any_ignored = v2_tokenize(midi_files, dataset_path, settings)
+        assert not any_ignored
+        tokenized_samples = TokenSequenceBinaryFile.load_from_disk_to_numpy(
+            dataset_path,
+            seq_len=settings.context_size,
+            vocab_size=settings.vocab.VOCAB_SIZE,
+        )
+        # reading from disk should yield same result as just writing to
+        # in memory buffer, this tests the correctness of file io
+        in_memory_tokenized = np.array(in_memory_tokens, dtype=np.uint16)
+        assert np.array_equal(in_memory_tokenized, tokenized_samples)
+
+
+def test_no_segfault(lmd_1_example_0_midi_path: Path) -> None:
+    settings = AnticipationV2Settings(
+        vocab=Vocab(),
+        debug=False,
+        # AR only
+        num_autoregressive_seq_per_midi_file=1,
+        num_instrument_anticipation_augmentations_per_midi_file=0,
+        num_span_anticipation_augmentations_per_midi_file=0,
+        num_random_anticipation_augmentations_per_midi_file=0,
+        debug_flush_remaining_token_buffer=False,
+    )
+    tokens_to = []
+    ignored_files = v2_tokenize(
+        [lmd_1_example_0_midi_path], output=tokens_to, settings=settings
+    )
+    assert ignored_files[MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE] == 1

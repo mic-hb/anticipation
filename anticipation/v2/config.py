@@ -7,6 +7,12 @@ from functools import cache
 import anticipation.vocab as v1_vocab
 from anticipation.v2.util import get_md5_of_string
 
+# anticipation/anticipation/v2/config.py is here
+_here = Path(__file__).parent
+
+REPO_ROOT = _here.parent.parent
+DATASET_ROOT = REPO_ROOT / "data"
+
 
 @dataclass(frozen=True)
 class Vocab:
@@ -74,6 +80,8 @@ class AnticipationV2Settings:
     num_instrument_anticipation_augmentations_per_midi_file: int = 4
     num_random_anticipation_augmentations_per_midi_file: int = 4
     span_anticipation_lambda: float = 0.05
+    train_data_split_shuffle_random_seed: int = 42
+    num_workers_in_dataset_construction: int = 1
 
     # set to 3 to keep parity with v1
     num_sep_tokens: int = 1
@@ -105,7 +113,7 @@ class AnticipationV2Settings:
         assert enclosing_folder.exists()
         assert enclosing_folder.is_dir()
         s, md5 = self._get_as_file()
-        save_to = enclosing_folder / (md5 + ".json")
+        save_to = enclosing_folder / ("settings_" + md5 + ".json")
         save_to.write_text(s)
         return save_to
 
@@ -115,7 +123,7 @@ class AnticipationV2Settings:
         assert load_from_file.exists()
         assert load_from_file.is_file()
         assert load_from_file.suffix == ".json"
-        md5 = load_from_file.stem
+        md5 = load_from_file.stem.split("settings_")[1]
         settings_str = load_from_file.read_text()
         assert md5 == get_md5_of_string(settings_str), "file integrity compromised."
 

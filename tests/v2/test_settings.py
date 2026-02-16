@@ -26,6 +26,8 @@ def test_serialize_anticipation_v2_settings() -> None:
         "num_autoregressive_seq_per_midi_file": 1,
         "num_instrument_anticipation_augmentations_per_midi_file": 4,
         "num_random_anticipation_augmentations_per_midi_file": 4,
+        "train_data_split_shuffle_random_seed": 42,
+        "num_workers_in_dataset_construction": 1,
         "num_sep_tokens": 1,
         "num_span_anticipation_augmentations_per_midi_file": 1,
         "span_anticipation_lambda": 0.05,
@@ -49,7 +51,7 @@ def test_serialize_anticipation_v2_settings() -> None:
         },
     }
     s, _ = settings._get_as_file()
-    assert settings.md5_hash() == "5fffc28d38353bf03eaf07ab38369c08"
+    assert settings.md5_hash() == "e58abd403796aeb4c639bf1e61d52f22"
     reloaded_settings = loads(s)
     assert settings.to_dict() == reloaded_settings
 
