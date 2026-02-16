@@ -109,7 +109,9 @@ def _get_dataset_file_from_paths(
     consolidate_bins(
         list(shards_dir.rglob("*.bin")),
         out_path=bin_out_path,
-        dtype=TokenSequenceBinaryFile.get_dtype_for_tokens(settings.vocab.total_tokens()),
+        dtype=TokenSequenceBinaryFile.get_dtype_for_tokens(
+            settings.vocab.total_tokens()
+        ),
         seq_len=settings.context_size,
     )
     loaded_arr = TokenSequenceBinaryFile.load_from_disk_to_numpy(

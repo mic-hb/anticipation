@@ -107,9 +107,6 @@ class AnticipationV2Settings:
     train_data_split_shuffle_random_seed: int = 42
     num_workers_in_dataset_construction: int = 1
 
-    # set to 3 to keep parity with v1
-    num_sep_tokens: int = 1
-
     # if this is 0, will not add anything
     tick_token_frequency_in_midi_ticks: int = 0
 

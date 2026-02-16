@@ -4,12 +4,10 @@ These are utilities for testing / developing with the codebase.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Union
 import re
+from typing import Union
 
-import anticipation.vocab as v
-
-from anticipation.v2.config import AnticipationV2Settings, Vocab
+from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import Token, MIDITick, MIDIProgramCode, MIDINote
 
 from tests.util.constants import MIDI_PROGRAM_NAMES
@@ -94,7 +92,7 @@ class Note:
 def get_note_instrument_token(
     instrument_midi_code: MIDIProgramCode,
     note_midi_code: MIDINote,
-    config: Union[None, AnticipationV2Settings] = None,
+    settings: AnticipationV2Settings,
     check_range: bool = True,
 ) -> Token:
     # NB: both instrument midi code and note midi code are 0-indexed
@@ -109,12 +107,9 @@ def get_note_instrument_token(
             f"Programs 0-127 as defined in the MIDI spec, then 128 for drums. Got code: {instrument_midi_code}"
         )
 
-    if config is None:
-        return v.NOTE_OFFSET + (v.MAX_PITCH * instrument_midi_code + note_midi_code)
-    else:
-        return config.vocab.NOTE_OFFSET + (
-            config.max_midi_pitch * instrument_midi_code + note_midi_code
-        )
+    return settings.vocab.NOTE_OFFSET + (
+        settings.max_midi_pitch * instrument_midi_code + note_midi_code
+    )
 
 
 def get_midi_instrument_name_from_midi_instrument_code(
@@ -138,6 +133,7 @@ class Event:
     time: Token
     duration: Token
     note_instr: Token
+    settings: AnticipationV2Settings
 
     # these are all 'derived', meaning they are not
     # direct properties of a token sequence
@@ -146,6 +142,12 @@ class Event:
     special_code: EventSpecialCode = EventSpecialCode.TYPICAL_EVENT
     absolute_time: MIDITick = 0
 
+    def __post_init__(self):
+        assert self.time >= 0
+        assert self.duration >= 0
+        assert self.note_instr >= 0
+        assert self.absolute_time >= 0
+
     @classmethod
     def from_midi_values(
         cls,
@@ -153,23 +155,27 @@ class Event:
         midi_duration: MIDITick,
         midi_instrument: MIDIProgramCode,
         midi_note: Union[MIDINote, str],
+        settings: AnticipationV2Settings,
         is_control: bool = False,
         special_code: EventSpecialCode = EventSpecialCode.TYPICAL_EVENT,
         original_idx_in_token_seq: int = 0,
     ) -> "Event":
+        v = settings.vocab
         note_offset = v.CONTROL_OFFSET if is_control else 0
         time_offset = v.ATIME_OFFSET if is_control else v.TIME_OFFSET
         dur_offset = v.ADUR_OFFSET if is_control else v.DUR_OFFSET
 
-        if midi_note == "REST" or midi_note == v.REST:
+        if midi_note == "REST" or midi_note == v.TICK:
             # TODO: consider, should REST be special code?
-            note_instr = v.REST
+            note_instr = v.TICK
             note_offset = 0
             assert is_control is False
         else:
             parsed_note = Note.make(midi_note)
             note_instr = get_note_instrument_token(
-                midi_instrument, parsed_note.midi_note_int
+                midi_instrument,
+                parsed_note.midi_note_int,
+                settings,
             )
 
         absolute_midi_time = midi_time + time_offset
@@ -181,6 +187,7 @@ class Event:
             special_code=special_code,
             original_idx_in_token_seq=original_idx_in_token_seq,
             absolute_time=absolute_midi_time,
+            settings=settings,
         )
 
     @classmethod
@@ -190,7 +197,6 @@ class Event:
         if not raw_event_token_seq:
             return []
 
-        v = settings.vocab
         i = 0
         events = []
 
@@ -207,9 +213,12 @@ class Event:
         ticks_seen = 0
         prev_tick_abs_time = 0
         while i < len(raw_event_token_seq):
-            if raw_event_token_seq[i] in (v.AUTOREGRESS, v.ANTICIPATE):
+            if raw_event_token_seq[i] in (
+                settings.vocab.AUTOREGRESS,
+                settings.vocab.ANTICIPATE,
+            ):
                 # handle flag
-                ar = raw_event_token_seq[i] == v.AUTOREGRESS
+                ar = raw_event_token_seq[i] == settings.vocab.AUTOREGRESS
                 special_code = (
                     EventSpecialCode.AUTOREGRESSIVE_TOKEN
                     if ar
@@ -217,27 +226,29 @@ class Event:
                 )
                 events.append(
                     Event(
-                        time=v.TIME_OFFSET,
-                        duration=v.DUR_OFFSET,
-                        note_instr=get_note_instrument_token(0, 0),
+                        time=settings.vocab.TIME_OFFSET,
+                        duration=settings.vocab.DUR_OFFSET,
+                        note_instr=get_note_instrument_token(0, 0, settings),
                         is_control=False,
                         original_idx_in_token_seq=i,
                         special_code=special_code,
+                        settings=settings,
                     )
                 )
                 i += 1
                 continue
-            elif raw_event_token_seq[i] == v.SEPARATOR:
+            elif raw_event_token_seq[i] == settings.vocab.SEPARATOR:
                 # handle sep
                 events.append(
                     Event(
-                        time=v.TIME_OFFSET + 1,
-                        duration=v.DUR_OFFSET,
-                        note_instr=get_note_instrument_token(0, 0),
+                        time=settings.vocab.TIME_OFFSET + 1,
+                        duration=settings.vocab.DUR_OFFSET,
+                        note_instr=get_note_instrument_token(0, 0, settings),
                         is_control=False,
                         special_code=EventSpecialCode.SEQ_SEPARATION_TOKENS,
                         original_idx_in_token_seq=i,
-                        absolute_time=v.TIME_OFFSET + 1,
+                        absolute_time=settings.vocab.TIME_OFFSET + 1,
+                        settings=settings,
                     )
                 )
                 i += 1
@@ -249,11 +260,14 @@ class Event:
                     Event(
                         time=settings.vocab.TIME_OFFSET,
                         duration=settings.vocab.DUR_OFFSET,
-                        note_instr=get_note_instrument_token(130, 0, check_range=False),
+                        note_instr=get_note_instrument_token(
+                            130, 0, settings, check_range=False
+                        ),
                         is_control=False,
                         special_code=EventSpecialCode.TICK,
                         original_idx_in_token_seq=i,
                         absolute_time=tick_abs_time,
+                        settings=settings,
                     )
                 )
                 prev_tick_abs_time = tick_abs_time
@@ -291,15 +305,16 @@ class Event:
                     time=t,
                     duration=d,
                     note_instr=n,
-                    is_control=(t >= v.ATIME_OFFSET),
+                    is_control=(t >= settings.vocab.ATIME_OFFSET),
                     original_idx_in_token_seq=i,
                     absolute_time=0,
+                    settings=settings,
                 )
                 new_event.absolute_time = prev_tick_abs_time + new_event.midi_time()
                 events.append(new_event)
 
                 if events[-1].is_control:
-                    prev_t = t - v.ATIME_OFFSET
+                    prev_t = t - settings.vocab.ATIME_OFFSET
                 else:
                     prev_t = t
                 i += 3
@@ -307,19 +322,19 @@ class Event:
         return events
 
     def midi_time(self) -> MIDITick:
-        if self.time < v.TIME_OFFSET:
+        if self.time < self.settings.vocab.TIME_OFFSET:
             return self.time
         else:
             if self.is_control:
-                return self.time - v.ATIME_OFFSET
+                return self.time - self.settings.vocab.ATIME_OFFSET
             else:
-                return self.time - v.TIME_OFFSET
+                return self.time - self.settings.vocab.TIME_OFFSET
 
     def midi_duration(self) -> MIDITick:
         if self.is_control:
-            return self.duration - v.ADUR_OFFSET
+            return self.duration - self.settings.vocab.ADUR_OFFSET
         else:
-            return self.duration - v.DUR_OFFSET
+            return self.duration - self.settings.vocab.DUR_OFFSET
 
     def midi_note(self) -> MIDINote:
         note, _ = self._separate_note_instr()
@@ -336,8 +351,8 @@ class Event:
         )
 
     def _separate_note_instr(self) -> tuple[MIDINote, MIDIProgramCode]:
-        t = v.CONTROL_OFFSET if self.is_control else 0
-        b = self.note_instr - v.NOTE_OFFSET - t
+        t = self.settings.vocab.CONTROL_OFFSET if self.is_control else 0
+        b = self.note_instr - self.settings.vocab.NOTE_OFFSET - t
         note = b - (2**7) * (b // 2**7)
         instr = b // 2**7
         # these are midi values, not tokens
@@ -348,19 +363,43 @@ class Event:
 
     def as_tokens(self) -> tuple[Token, ...]:
         if self.special_code == 1:
-            return (v.AUTOREGRESS,)
+            return (self.settings.vocab.AUTOREGRESS,)
         elif self.special_code == 2:
-            return (v.ANTICIPATE,)
+            return (self.settings.vocab.ANTICIPATE,)
         elif self.special_code == 3:
-            return v.SEPARATOR, v.SEPARATOR, v.SEPARATOR
+            return (self.settings.vocab.SEPARATOR,)
         else:
             return self.time, self.duration, self.note_instr
 
-    def is_rest(self, settings: AnticipationV2Settings) -> bool:
-        return self.note_instr == settings.vocab.REST
+    def is_rest(self) -> bool:
+        if self.settings.tick_token_frequency_in_midi_ticks == 0:
+            return self.note_instr == self.settings.vocab.TICK
+        else:
+            return False
 
     def is_tick(self) -> bool:
         return self.special_code == EventSpecialCode.TICK
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, Event):
+            return False
+
+        return (
+            # settings properties
+            # all settings need not be equal but the ones that can
+            # affect tokenization should be equal
+            self.settings.vocab == other.settings.vocab
+            and self.settings.time_resolution == other.settings.time_resolution
+            and self.settings.max_note_duration_in_seconds
+            == other.settings.max_note_duration_in_seconds
+            and self.settings.tick_token_frequency_in_midi_ticks
+            == other.settings.tick_token_frequency_in_midi_ticks
+            and
+            # note properties
+            self.time == other.time
+            and self.duration == other.duration
+            and self.note_instr == other.note_instr
+        )
 
     def __repr__(self) -> str:
         return "Event(midi_time={0}, midi_duration={1}, midi_note={2} ({6}), midi_instrument={3}, is_control={4}, special_code={5}, absolute_midi_time={7})".format(

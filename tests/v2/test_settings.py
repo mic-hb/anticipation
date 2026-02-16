@@ -31,7 +31,6 @@ def test_serialize_anticipation_v2_settings() -> None:
         "num_random_anticipation_augmentations_per_midi_file": 4,
         "train_data_split_shuffle_random_seed": 42,
         "num_workers_in_dataset_construction": 1,
-        "num_sep_tokens": 1,
         "num_span_anticipation_augmentations_per_midi_file": 1,
         "span_anticipation_lambda": 0.05,
         "tick_token_frequency_in_midi_ticks": 0,
@@ -53,7 +52,7 @@ def test_serialize_anticipation_v2_settings() -> None:
         },
     }
     s, _ = settings._get_as_file()
-    assert settings.md5_hash() == "8263fbfce422e6e91e3f32a0c42a6352"
+    assert settings.md5_hash() == "3eefbbb7d44ba2624ea4f0817fadcb62"
     reloaded_settings = loads(s)
     assert settings.to_dict() == reloaded_settings
 

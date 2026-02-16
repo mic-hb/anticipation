@@ -236,7 +236,12 @@ def local_midi_vocab() -> Vocab:
 
 
 @pytest.fixture
-def local_midi_settings(local_midi_vocab: Vocab) -> AnticipationV2Settings:
+def local_midi_settings_ar_only(local_midi_vocab: Vocab) -> AnticipationV2Settings:
     return AnticipationV2Settings(
-        vocab=local_midi_vocab, tick_token_frequency_in_midi_ticks=100
+        num_autoregressive_seq_per_midi_file=1,
+        num_span_anticipation_augmentations_per_midi_file=0,
+        num_instrument_anticipation_augmentations_per_midi_file=0,
+        num_random_anticipation_augmentations_per_midi_file=0,
+        vocab=local_midi_vocab,
+        tick_token_frequency_in_midi_ticks=100,
     )

@@ -89,6 +89,26 @@ def test_tokenize_v2_lakh_ar_only_for_visualization(
     )
 
 
+def test_tokenize_v2_lakh_ar_local_midi_vocab(
+    lmd_0_example_1_midi_path: Path, local_midi_settings_ar_only: AnticipationV2Settings
+) -> None:
+    in_memory_tokens = []
+    any_ignored_in_memory = v2_tokenize(
+        [lmd_0_example_1_midi_path], in_memory_tokens, local_midi_settings_ar_only
+    )
+    assert not any_ignored_in_memory
+    parsed_events = Event.from_token_seq(
+        [x for b in in_memory_tokens for x in b], local_midi_settings_ar_only
+    )
+    get_figure_and_open(
+        events=parsed_events,
+        delta=local_midi_settings_ar_only.delta,
+        time_resolution=local_midi_settings_ar_only.time_resolution,
+        path=(VISUALIZATIONS_PATH / f"autoregressive_v2_local_midi.html"),
+        auto_open=True,
+    )
+
+
 def test_tokenize_v2_lakh_instrument_for_visualization(
     lmd_0_example_1_midi_path: Path,
 ) -> None:
@@ -337,6 +357,7 @@ def test_sequence_packing_file_correctness(
         expected_settings,
     ) = lmd_0_example_1_tokens_and_parsed_events
     assert lmd_0_example_1_actual_tokens == lmd_0_example_1_expected_tokens
+    assert lmd_0_example_1_actual_events[0] == lmd_0_example_1_expected_events[0]
     assert lmd_0_example_1_actual_events == lmd_0_example_1_expected_events
     assert settings.context_size == expected_settings.context_size
     assert settings.vocab == expected_settings.vocab

@@ -207,7 +207,7 @@ def tokenize(
     midi_files: Iterable[Path],
     output: Union[list, Path],
     settings: AnticipationV2Settings,
-    shard_id: int = 0,
+    shard_id: int = -1,
 ) -> dict[MIDIFileIgnoredReason, list[Path]]:
     """Tokenizes MIDI for v2 Anticipatory Training
 
