@@ -1,4 +1,4 @@
-from typing import Iterator
+from typing import Iterator, Any
 
 import os
 import hashlib
@@ -6,6 +6,14 @@ import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+def get_book_keeping_info() -> dict[str, Any]:
+    return {
+        "uuid": get_uuid_string(),
+        "git_info": get_git_info(),
+        "started_time": get_time_info(),
+    }
 
 
 def get_uuid_string() -> str:
@@ -37,14 +45,10 @@ def get_git_info(path: Path = None) -> dict[str, str]:
         run(["git", "rev-parse", "--is-inside-work-tree"])
         commit = run(["git", "rev-parse", "HEAD"])
         branch = run(["git", "branch", "--show-current"])
-        if branch == "":
-            branch = None
-
         return {
             "branch": branch,
             "commit": commit,
         }
-
     except subprocess.CalledProcessError:
         return {
             "branch": "",

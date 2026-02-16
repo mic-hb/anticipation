@@ -369,4 +369,6 @@ def test_no_segfault(lmd_1_example_0_midi_path: Path) -> None:
     ignored_files = v2_tokenize(
         [lmd_1_example_0_midi_path], output=tokens_to, settings=settings
     )
-    assert ignored_files[MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE] == 1
+    assert ignored_files[MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE] == [
+        lmd_1_example_0_midi_path
+    ]

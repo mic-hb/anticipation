@@ -1,3 +1,4 @@
+from tqdm import tqdm
 from typing import Optional, Iterable, Union, Iterator
 from collections import defaultdict
 from pathlib import Path
@@ -21,7 +22,7 @@ from anticipation.v2.convert import (
 from anticipation.v2.io import TokenSequenceBinaryFile
 
 
-def maybe_tokenize(
+def _maybe_tokenize(
     my_midi_file: Path, settings: AnticipationV2Settings
 ) -> tuple[list[Token], int, Optional[MIDIFileIgnoredReason]]:
     try:
@@ -80,7 +81,7 @@ def maybe_tokenize(
     return events, num_note_truncations, None
 
 
-def tokenize_midi_file(
+def _tokenize_midi_file(
     my_midi_file: Path, settings: AnticipationV2Settings
 ) -> tuple[
     list[Token], int, Optional[MIDIFileIgnoredReason], list[MIDIProgramCode], int
@@ -88,7 +89,7 @@ def tokenize_midi_file(
     assert isinstance(my_midi_file, Path)
 
     # now we are tokenizing the MIDI, using several tokens from our settings
-    all_events, num_note_truncations, reason_ignored = maybe_tokenize(
+    all_events, num_note_truncations, reason_ignored = _maybe_tokenize(
         my_midi_file, settings
     )
 
@@ -206,7 +207,8 @@ def tokenize(
     midi_files: Iterable[Path],
     output: Union[list, Path],
     settings: AnticipationV2Settings,
-) -> dict[MIDIFileIgnoredReason, int]:
+    shard_id: int = 0,
+) -> dict[MIDIFileIgnoredReason, list[Path]]:
     """Tokenizes MIDI for v2 Anticipatory Training
 
     Args:
@@ -227,18 +229,23 @@ def tokenize(
       A dictionary of (reason ignored, number of times it happened) for
       the given files. This will be empty if no files were ignored.
     """
-    from tqdm import tqdm
+    if shard_id == 0:
+        # only print progress of 1 of the shards to prevent clutter,
+        # they take approximately the same amount of time
+        iter_obj = tqdm(midi_files, mininterval=1.0, desc="Tokenizing MIDI Files")
+    else:
+        iter_obj = midi_files
 
-    stats = defaultdict(int)
+    stats: dict[MIDIFileIgnoredReason, list[Path]] = defaultdict(list)
     buf = SequencePacker(target=output, settings=settings)
-    for file_idx, midi_file in enumerate(tqdm(midi_files)):
+    for file_idx, midi_file in enumerate(iter_obj):
         (
             tokenized_midi,
             num_note_truncations,
             reason_ignored,
             all_midi_program_codes,
             end_time_in_ticks,
-        ) = tokenize_midi_file(midi_file, settings)
+        ) = _tokenize_midi_file(midi_file, settings)
         if reason_ignored is not None:
             if settings.debug:
                 # suppress writing to stderr/stdout unless we are debugging
@@ -247,7 +254,7 @@ def tokenize(
                     UserWarning,
                 )
 
-            stats[reason_ignored] += 1
+            stats[reason_ignored].append(midi_file)
             continue
 
         # 1. pure autoregressive sequence
