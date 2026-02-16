@@ -103,3 +103,7 @@ def test_get_vocab_size(local_midi_vocab: Vocab) -> None:
     assert local_midi_vocab.AUTOREGRESS == 35226
     assert local_midi_vocab.ANTICIPATE == 35227
     assert local_midi_vocab.total_tokens() == 35228
+
+
+# def test_write_settings_file(local_midi_settings_ar_only):
+#     local_midi_settings_ar_only.save_to_disk(Path(__file__).parent)

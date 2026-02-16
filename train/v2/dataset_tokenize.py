@@ -12,7 +12,7 @@ from tqdm.contrib.concurrent import process_map
 
 from anticipation.v2.config import (
     AnticipationV2Settings,
-    Vocab,
+    CONFIG_ROOT,
     DATASET_ROOT,
 )
 from anticipation.v2.tokenize import tokenize, MIDIFileIgnoredReason
@@ -223,7 +223,8 @@ def _tokenize_dataset_in_parallel(
 
 
 def _write_book_keeping_info_and_get_dataset_enclosing_path(
-    settings: AnticipationV2Settings, save_tokenized_dataset_to: Path
+    settings: AnticipationV2Settings,
+    save_tokenized_dataset_to: Path,
 ) -> Path:
     """
     This function writes some bookkeeping information to an enclosing directory.
@@ -276,7 +277,7 @@ def _write_book_keeping_info_and_get_dataset_enclosing_path(
     return work_dir
 
 
-def main(put_shards_in_tmp: bool = True) -> None:
+def main(settings_path: Path, put_shards_in_tmp: bool) -> None:
     # job settings
     dataset_path = DATASET_ROOT
 
@@ -287,16 +288,7 @@ def main(put_shards_in_tmp: bool = True) -> None:
     put_tokenized_datasets_in_dir = dataset_path / "tokenized_data"
     put_tokenized_datasets_in_dir.mkdir(exist_ok=True)
 
-    settings = AnticipationV2Settings(
-        vocab=Vocab(),
-        num_autoregressive_seq_per_midi_file=1,
-        num_span_anticipation_augmentations_per_midi_file=0,
-        num_instrument_anticipation_augmentations_per_midi_file=0,
-        num_random_anticipation_augmentations_per_midi_file=0,
-        debug=False,
-        num_workers_in_dataset_construction=10,
-        train_data_split_shuffle_random_seed=42,
-    )
+    settings = AnticipationV2Settings.load_from_disk(settings_path)
 
     # do the work now, no more config past this point
     _tokenize_dataset_in_parallel(
@@ -312,4 +304,10 @@ def main(put_shards_in_tmp: bool = True) -> None:
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
-    main()
+
+    # TODO: do argparse thing
+    ar_only_settings = (
+        CONFIG_ROOT
+        / "ar_only_local_midi_settings_b1f4b64911a603018ed67a154db6fb16.json"
+    )
+    main(settings_path=ar_only_settings, put_shards_in_tmp=True)

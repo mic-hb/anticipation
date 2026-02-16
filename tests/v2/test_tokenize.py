@@ -105,7 +105,7 @@ def test_tokenize_v2_lakh_ar_local_midi_vocab(
         delta=local_midi_settings_ar_only.delta,
         time_resolution=local_midi_settings_ar_only.time_resolution,
         path=(VISUALIZATIONS_PATH / f"autoregressive_v2_local_midi.html"),
-        auto_open=True,
+        auto_open=False,
     )
 
 

@@ -12,6 +12,7 @@ _here = Path(__file__).parent
 
 REPO_ROOT = _here.parent.parent
 DATASET_ROOT = REPO_ROOT / "data"
+CONFIG_ROOT = REPO_ROOT / "config"
 
 
 @dataclass(frozen=True)
@@ -144,7 +145,9 @@ class AnticipationV2Settings:
         assert load_from_file.exists()
         assert load_from_file.is_file()
         assert load_from_file.suffix == ".json"
-        md5 = load_from_file.stem.split("settings_")[1]
+
+        # can prefix with anything as long as it is separated by _
+        md5 = load_from_file.stem.split("_")[-1]
         settings_str = load_from_file.read_text()
         assert md5 == get_md5_of_string(settings_str), "file integrity compromised."
 
