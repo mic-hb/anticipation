@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
 # cd to the location of this file on disk
 cd "$(dirname -- "$0")"

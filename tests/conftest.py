@@ -18,6 +18,9 @@ TESTS_ROOT = Path(__file__).parent
 TEST_DATA_PATH = TESTS_ROOT / "test_data"
 VISUALIZATIONS_PATH = TESTS_ROOT / "visualizations"
 
+# make this visualizations dir
+VISUALIZATIONS_PATH.mkdir(exist_ok=True)
+
 
 @pytest.fixture
 def c_major_midi_path() -> Path:
