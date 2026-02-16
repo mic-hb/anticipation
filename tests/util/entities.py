@@ -9,7 +9,7 @@ import re
 
 import anticipation.vocab as v
 
-from anticipation.v2.config import AnticipationV2Settings
+from anticipation.v2.config import AnticipationV2Settings, Vocab
 from anticipation.v2.types import Token, MIDITick, MIDIProgramCode, MIDINote
 
 from tests.util.constants import MIDI_PROGRAM_NAMES
@@ -92,9 +92,29 @@ class Note:
 
 
 def get_note_instrument_token(
-    instrument_midi_code: MIDIProgramCode, note_midi_code: MIDINote
+    instrument_midi_code: MIDIProgramCode,
+    note_midi_code: MIDINote,
+    config: Union[None, AnticipationV2Settings] = None,
+    check_range: bool = True,
 ) -> Token:
-    return v.NOTE_OFFSET + (v.MAX_PITCH * instrument_midi_code + note_midi_code)
+    # NB: both instrument midi code and note midi code are 0-indexed
+    if check_range and not (0 <= note_midi_code < 128):
+        raise ValueError("MIDI note values must be within [0, 127].")
+
+    if check_range and not (0 <= instrument_midi_code < 129):
+        # I used out of range MIDI instruments for purposes of visualization...
+        # sorry, turn check range off to allow this
+        raise ValueError(
+            "MIDI instrument values must be within [0, 128]. "
+            f"Programs 0-127 as defined in the MIDI spec, then 128 for drums. Got code: {instrument_midi_code}"
+        )
+
+    if config is None:
+        return v.NOTE_OFFSET + (v.MAX_PITCH * instrument_midi_code + note_midi_code)
+    else:
+        return config.vocab.NOTE_OFFSET + (
+            config.max_midi_pitch * instrument_midi_code + note_midi_code
+        )
 
 
 def get_midi_instrument_name_from_midi_instrument_code(
@@ -229,7 +249,7 @@ class Event:
                     Event(
                         time=settings.vocab.TIME_OFFSET,
                         duration=settings.vocab.DUR_OFFSET,
-                        note_instr=get_note_instrument_token(130, 0),
+                        note_instr=get_note_instrument_token(130, 0, check_range=False),
                         is_control=False,
                         special_code=EventSpecialCode.TICK,
                         original_idx_in_token_seq=i,

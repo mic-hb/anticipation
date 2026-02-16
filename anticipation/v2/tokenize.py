@@ -138,7 +138,7 @@ class SequencePacker:
             self._target = TokenSequenceBinaryFile(
                 target,
                 seq_len=settings.context_size,
-                vocab_size=settings.vocab.VOCAB_SIZE,
+                vocab_size=settings.vocab.total_tokens(),
             )
         else:
             raise TypeError("Must have path or list as target.")

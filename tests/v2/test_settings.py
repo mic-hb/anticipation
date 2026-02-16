@@ -2,6 +2,8 @@ import tempfile
 from pathlib import Path
 from json import loads
 
+import pytest
+
 from anticipation.v2.config import AnticipationV2Settings, Vocab
 
 
@@ -17,6 +19,7 @@ def test_serialize_anticipation_v2_settings() -> None:
         "delta": 5,
         "event_size": 3,
         "m": 341,
+        "max_midi_instrument": 129,
         "max_midi_pitch": 128,
         "max_note_duration_in_seconds": 10,
         "max_track_instruments": 16,
@@ -31,27 +34,26 @@ def test_serialize_anticipation_v2_settings() -> None:
         "num_sep_tokens": 1,
         "num_span_anticipation_augmentations_per_midi_file": 1,
         "span_anticipation_lambda": 0.05,
-        "tick_token_frequency_in_midi_ticks": 100,
+        "tick_token_frequency_in_midi_ticks": 0,
         "time_resolution": 100,
         "vocab": {
+            "ADUR_OFFSET": 37513,
             "ANOTE_OFFSET": 38513,
             "ANTICIPATE": 55027,
             "ATIME_OFFSET": 27513,
             "AUTOREGRESS": 55026,
             "CONTROL_OFFSET": 27513,
             "DUR_OFFSET": 10000,
+            "EVENT_OFFSET": 0,
             "NOTE_OFFSET": 11000,
-            "REST": 27512,
+            "TICK": 27512,
             "SEPARATOR": 55025,
             "SPECIAL_OFFSET": 55025,
-            "TICK": 55029,
             "TIME_OFFSET": 0,
-            "VOCAB_SIZE": 55030,
-            "_last_token_in_v1": 55028,
         },
     }
     s, _ = settings._get_as_file()
-    assert settings.md5_hash() == "e58abd403796aeb4c639bf1e61d52f22"
+    assert settings.md5_hash() == "8263fbfce422e6e91e3f32a0c42a6352"
     reloaded_settings = loads(s)
     assert settings.to_dict() == reloaded_settings
 
@@ -67,3 +69,38 @@ def test_save_load_settings() -> None:
 
         reloaded_settings = AnticipationV2Settings.load_from_disk(saved_to)
         assert settings == reloaded_settings
+
+
+def test_create_invalid_vocab() -> None:
+    with pytest.raises(AssertionError):
+        AnticipationV2Settings(
+            vocab=Vocab(
+                EVENT_OFFSET=0,
+                TIME_OFFSET=0,
+                DUR_OFFSET=100,
+                NOTE_OFFSET=1100,
+                # there's a bad overlap between events and controls
+                CONTROL_OFFSET=17612 - 1,
+                ATIME_OFFSET=17612,
+                ADUR_OFFSET=17712,
+                ANOTE_OFFSET=18712,
+            ),
+        )
+
+
+def test_get_vocab_size(local_midi_vocab: Vocab) -> None:
+    assert local_midi_vocab.EVENT_OFFSET == 0
+    assert local_midi_vocab.TIME_OFFSET == 0
+    assert local_midi_vocab.DUR_OFFSET == 100
+    assert local_midi_vocab.NOTE_OFFSET == 1100
+    assert local_midi_vocab.TICK == 1100 + (129 * 128)
+    assert local_midi_vocab.CONTROL_OFFSET == local_midi_vocab.TICK + 1
+    assert local_midi_vocab.ATIME_OFFSET == 17613
+    assert local_midi_vocab.ADUR_OFFSET == 17613 + 100
+    assert local_midi_vocab.ANOTE_OFFSET == 18713
+    assert local_midi_vocab.SPECIAL_OFFSET == 18713 + (129 * 128)
+    assert local_midi_vocab.SPECIAL_OFFSET == 35225
+    assert local_midi_vocab.SEPARATOR == 35225
+    assert local_midi_vocab.AUTOREGRESS == 35226
+    assert local_midi_vocab.ANTICIPATE == 35227
+    assert local_midi_vocab.total_tokens() == 35228

@@ -109,11 +109,11 @@ def _get_dataset_file_from_paths(
     consolidate_bins(
         list(shards_dir.rglob("*.bin")),
         out_path=bin_out_path,
-        dtype=TokenSequenceBinaryFile.get_dtype_for_tokens(settings.vocab.VOCAB_SIZE),
+        dtype=TokenSequenceBinaryFile.get_dtype_for_tokens(settings.vocab.total_tokens()),
         seq_len=settings.context_size,
     )
     loaded_arr = TokenSequenceBinaryFile.load_from_disk_to_numpy(
-        bin_out_path, settings.context_size, settings.vocab.VOCAB_SIZE
+        bin_out_path, settings.context_size, settings.vocab.total_tokens()
     )
     if do_shuffle:
         # NB: this won't work for huge datasets that don't fit in ram, might need

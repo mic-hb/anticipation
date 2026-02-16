@@ -4,7 +4,7 @@ Their functionality is the same as v1 ops unless stated otherwise.
 """
 
 from collections import defaultdict
-from typing import Optional, Union, Iterator, Iterable
+from typing import Optional, Union, Iterator
 
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import Token
@@ -210,7 +210,7 @@ def add_rests(
                 [
                     previous_time + density,
                     settings.vocab.DUR_OFFSET,
-                    settings.vocab.REST,
+                    settings.vocab.TICK,
                 ]
             )
             previous_time += density
@@ -223,7 +223,7 @@ def add_rests(
             [
                 previous_time + density,
                 settings.vocab.DUR_OFFSET,
-                settings.vocab.REST,
+                settings.vocab.TICK,
             ]
         )
         previous_time += density
@@ -354,35 +354,3 @@ def streaming_relativize_to_tick(
             )
 
         yield to_add
-
-
-# def pack(
-#     stream: Iterable[tuple[Token, ...]],
-#     seq_header: tuple[Token, ...],
-#     settings: AnticipationV2Settings,
-# ) -> list[Token]:
-#     chunks = []
-#     buf = [*seq_header]
-#     for next_element in stream:
-#         if len(buf) + len(next_element) > settings.context_size:
-#             # 1 flag token, (ctx - 1) events/controls
-#             # this is so the sequence does not split a triple between two
-#             # samples
-#             buf += [settings.vocab.PAD] * (settings.context_size - len(buf))
-#             chunks.extend(buf)
-#
-#             # buffer starts with its preamble/header
-#             buf = [*seq_header]
-#
-#         buf += list(next_element)
-#
-#     # handle trailing suffix, but only if it has things in it
-#     # that are not header info
-#     if len(buf) > len(seq_header) + 1:
-#         # don't pad the end though because we can just start another
-#         # sample
-#         # Q: what if it is just a tick though?
-#         # A: add + 1 for just a tick
-#         chunks.extend(buf)
-#
-#     return chunks

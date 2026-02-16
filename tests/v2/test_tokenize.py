@@ -31,6 +31,7 @@ def lmd_0_example_1_tokens_and_parsed_events(
         num_instrument_anticipation_augmentations_per_midi_file=0,
         num_span_anticipation_augmentations_per_midi_file=0,
         num_random_anticipation_augmentations_per_midi_file=0,
+        tick_token_frequency_in_midi_ticks=100,
         debug=True,
         debug_flush_remaining_token_buffer=True,
     )
@@ -153,6 +154,8 @@ def test_tokenize_with_ticks_for_small_sequence_ar(
         # buffer
         context_size=104,
         debug=True,
+        debug_flush_remaining_token_buffer=False,
+        tick_token_frequency_in_midi_ticks=100,
     )
     tokenized_seq = []
     any_ignored = v2_tokenize([c_major_midi_path], tokenized_seq, settings)
@@ -303,6 +306,7 @@ def test_sequence_packing_file_correctness(
         num_random_anticipation_augmentations_per_midi_file=0,
         debug=True,
         debug_flush_remaining_token_buffer=False,
+        tick_token_frequency_in_midi_ticks=100,
     )
     midi_files = [lmd_0_example_1_midi_path, lmd_0_example_2_midi_path]
 
@@ -346,7 +350,7 @@ def test_sequence_packing_file_correctness(
         tokenized_samples = TokenSequenceBinaryFile.load_from_disk_to_numpy(
             dataset_path,
             seq_len=settings.context_size,
-            vocab_size=settings.vocab.VOCAB_SIZE,
+            vocab_size=settings.vocab.total_tokens(),
         )
         # reading from disk should yield same result as just writing to
         # in memory buffer, this tests the correctness of file io

@@ -11,6 +11,7 @@ from anticipation.convert import midi_to_compound
 
 # python itself has a top-level module named `tokenize`
 from anticipation.tokenize import tokenize as anticipation_tokenize
+from anticipation.v2.config import AnticipationV2Settings, Vocab
 
 TestConfigPatcher = Callable[..., None]
 
@@ -189,3 +190,53 @@ def get_tokens_from_midi_file_v1(
 def get_tokens_from_text_file(tokens_file: Path) -> list[list[int]]:
     tokens: str = Path(tokens_file).read_text()
     return _parse_midi_tokenized_text(tokens)
+
+
+@pytest.fixture
+def local_midi_vocab() -> Vocab:
+    return Vocab(
+        # events
+        # (time, duration, note x instrument)
+        EVENT_OFFSET=0,
+        # (time: 0-100, at most 1 tick apart)
+        TIME_OFFSET=0,
+        # (duration: 100-1100, at most 1000 ticks, longest note)
+        DUR_OFFSET=100,
+        NOTE_OFFSET=1100,
+        # there are 128 notes, 129 program codes, so
+        # the total number of tokens for this (note x instrument) combo
+        # is 128 * 129 = 16,512
+        # so the space of notes spans from:
+        #  1,100: instrument 0, note 0
+        #  1,101: instrument 0, note 1
+        #  1,227: instrument 0, note 127
+        #  1,228: instrument 1, note 0
+        #  ...
+        #  1,355: instrument 1, note 127
+        #  ...
+        # 17,484: instrument 128, note 0
+        # 17,611: instrument 128, note 127
+        # ^ (the largest possible instr x note token)
+        # ...
+        #
+        TICK=17612,
+        # controls, start directly after event space ends
+        CONTROL_OFFSET=17613,
+        # (time, dur, notes) same thing as events but with
+        # an offset
+        ATIME_OFFSET=17613,
+        ADUR_OFFSET=17713,
+        ANOTE_OFFSET=18713,
+        # ...
+        SPECIAL_OFFSET=35225,
+        SEPARATOR=35225,
+        AUTOREGRESS=35226,
+        ANTICIPATE=35227,
+    )
+
+
+@pytest.fixture
+def local_midi_settings(local_midi_vocab: Vocab) -> AnticipationV2Settings:
+    return AnticipationV2Settings(
+        vocab=local_midi_vocab, tick_token_frequency_in_midi_ticks=100
+    )
