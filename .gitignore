@@ -1,6 +1,8 @@
 .idea
 env/
 symusic/
+output/
+lightning_logs/
 data/
 tests/visualizations
 __pycache__
