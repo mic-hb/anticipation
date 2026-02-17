@@ -104,7 +104,12 @@ class GPT2LightningModule(pl.LightningModule):
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log(
-            "val_loss", loss.detach(), on_epoch=True, prog_bar=True, logger=True, sync_dist=True
+            "val_loss",
+            loss.detach(),
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
         )
         return loss
 

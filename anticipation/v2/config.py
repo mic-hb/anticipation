@@ -14,6 +14,11 @@ REPO_ROOT = _here.parent.parent
 DATASET_ROOT = REPO_ROOT / "data"
 CONFIG_ROOT = REPO_ROOT / "config"
 
+# expect lakh midi to be here:
+# <REPO_ROOT>/data/lmd_full/...
+LAKH_MIDI_FULL_PATH = DATASET_ROOT / "lmd_full"
+TOKENIZED_DATASETS_SAVE_TO_PATH = DATASET_ROOT / "tokenized_datasets"
+
 
 @dataclass(frozen=True)
 class Vocab:

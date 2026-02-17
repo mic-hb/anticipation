@@ -57,6 +57,9 @@ def get_git_info(path: Path = None) -> dict[str, str]:
 
 
 def iter_files(root: Path, file_extensions: tuple[str, ...]) -> Iterator[Path]:
+    """
+    This ordering is NOT deterministic!
+    """
     extensions_to_get = {
         e.lower() if e.startswith(".") else f".{e.lower()}" for e in file_extensions
     }

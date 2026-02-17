@@ -8,7 +8,7 @@ import pytest
 from anticipation.v2.types import Token
 from anticipation.v2.config import AnticipationV2Settings, Vocab
 from anticipation.v2.tokenize import tokenize as v2_tokenize
-from anticipation.v2.tokenize import MIDIFileIgnoredReason
+from anticipation.v2.tokenize import MIDIFileIgnoredReason, TokenizationStatSummary
 from anticipation.v2.io import TokenSequenceBinaryFile
 
 from tests.util.entities import Event, EventSpecialCode
@@ -37,8 +37,8 @@ def lmd_0_example_1_tokens_and_parsed_events(
     )
     midi_files = [lmd_0_example_1_midi_path]
     in_memory_tokens = []
-    any_ignored_in_memory = v2_tokenize(midi_files, in_memory_tokens, settings)
-    assert not any_ignored_in_memory
+    stats = v2_tokenize(midi_files, in_memory_tokens, settings)
+    assert not stats.ignored_files
 
     # tokenizing this in full is 9 sequences
     assert len(in_memory_tokens) == 9
@@ -93,10 +93,10 @@ def test_tokenize_v2_lakh_ar_local_midi_vocab(
     lmd_0_example_1_midi_path: Path, local_midi_settings_ar_only: AnticipationV2Settings
 ) -> None:
     in_memory_tokens = []
-    any_ignored_in_memory = v2_tokenize(
+    stats = v2_tokenize(
         [lmd_0_example_1_midi_path], in_memory_tokens, local_midi_settings_ar_only
     )
-    assert not any_ignored_in_memory
+    assert not stats.ignored_files
     parsed_events = Event.from_token_seq(
         [x for b in in_memory_tokens for x in b], local_midi_settings_ar_only
     )
@@ -126,10 +126,10 @@ def test_tokenize_v2_lakh_instrument_for_visualization(
             num_random_anticipation_augmentations_per_midi_file=0,
             debug=True,
         )
-        any_ignored = v2_tokenize(
+        stats = v2_tokenize(
             [lmd_0_example_1_midi_path], instrument_anticipation_sample, settings
         )
-        assert not any_ignored
+        assert not stats.ignored_files
 
     assert len(instrument_anticipation_sample) == 8
     num_total_separators = 0
@@ -178,8 +178,8 @@ def test_tokenize_with_ticks_for_small_sequence_ar(
         tick_token_frequency_in_midi_ticks=100,
     )
     tokenized_seq = []
-    any_ignored = v2_tokenize([c_major_midi_path], tokenized_seq, settings)
-    assert not any_ignored
+    stats = v2_tokenize([c_major_midi_path], tokenized_seq, settings)
+    assert not stats.ignored_files
 
     assert len(tokenized_seq) == 1
     num_total_separators = 0
@@ -227,8 +227,8 @@ def test_tokenize_with_ticks_for_lakh_ar(lmd_0_example_1_midi_path: Path) -> Non
         debug=True,
     )
     tokenized_seq = []
-    any_ignored = v2_tokenize([lmd_0_example_1_midi_path], tokenized_seq, settings)
-    assert not any_ignored
+    stats = v2_tokenize([lmd_0_example_1_midi_path], tokenized_seq, settings)
+    assert not stats.ignored_files
     assert len(tokenized_seq) == 8
     num_total_separators = 0
     for i, packed_seq in enumerate(tokenized_seq):
@@ -271,11 +271,9 @@ def test_absolute_time_is_correct_with_ticks(lmd_0_example_1_midi_path: Path) ->
     )
     # tokenize and parse without ticks added
     events_without_ticks = []
-    any_ignored = v2_tokenize(
-        [lmd_0_example_1_midi_path], events_without_ticks, settings
-    )
+    stats = v2_tokenize([lmd_0_example_1_midi_path], events_without_ticks, settings)
     assert len(events_without_ticks) == 8
-    assert not any_ignored
+    assert not stats.ignored_files
     events_without_ticks = Event.from_token_seq(
         [x for b in events_without_ticks for x in b], settings
     )
@@ -287,10 +285,8 @@ def test_absolute_time_is_correct_with_ticks(lmd_0_example_1_midi_path: Path) ->
 
     # tokenize and parse WITH ticks added
     events_include_ticks = []
-    any_ignored = v2_tokenize(
-        [lmd_0_example_1_midi_path], events_include_ticks, settings
-    )
-    assert not any_ignored
+    stats = v2_tokenize([lmd_0_example_1_midi_path], events_include_ticks, settings)
+    assert not stats.ignored_files
     events_include_ticks = Event.from_token_seq(
         [x for b in events_include_ticks for x in b], settings
     )
@@ -331,8 +327,8 @@ def test_sequence_packing_file_correctness(
     midi_files = [lmd_0_example_1_midi_path, lmd_0_example_2_midi_path]
 
     in_memory_tokens = []
-    any_ignored_in_memory = v2_tokenize(midi_files, in_memory_tokens, settings)
-    assert not any_ignored_in_memory
+    stats = v2_tokenize(midi_files, in_memory_tokens, settings)
+    assert not stats.ignored_files
 
     # 97 complete sequences
     assert len(in_memory_tokens) == 97
@@ -366,8 +362,8 @@ def test_sequence_packing_file_correctness(
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         dataset_path = td_path / "dataset.bin"
-        any_ignored = v2_tokenize(midi_files, dataset_path, settings)
-        assert not any_ignored
+        stats = v2_tokenize(midi_files, dataset_path, settings)
+        assert not stats.ignored_files
         tokenized_samples = TokenSequenceBinaryFile.load_from_disk_to_numpy(
             dataset_path,
             seq_len=settings.context_size,
@@ -391,9 +387,9 @@ def test_no_segfault(lmd_1_example_0_midi_path: Path) -> None:
         debug_flush_remaining_token_buffer=False,
     )
     tokens_to = []
-    ignored_files = v2_tokenize(
+    stats: TokenizationStatSummary = v2_tokenize(
         [lmd_1_example_0_midi_path], output=tokens_to, settings=settings
     )
-    assert ignored_files[MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE] == [
+    assert stats.ignored_files[MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE] == [
         lmd_1_example_0_midi_path
     ]

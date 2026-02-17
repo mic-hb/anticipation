@@ -2,6 +2,7 @@ from tqdm import tqdm
 from typing import Optional, Iterable, Union, Iterator
 from collections import defaultdict
 from pathlib import Path
+from dataclasses import dataclass, fields
 import warnings
 
 import numpy as np
@@ -111,10 +112,32 @@ def _tokenize_midi_file(
     )
 
 
+@dataclass(frozen=True)
+class TokenizationStatSummary:
+    num_tokenized_files: int
+    num_sequences: int
+    num_times_end_triple_was_truncated: int
+    num_tick_tokens: int
+    num_separator_tokens: int
+    num_autoregress_tokens: int
+    num_anticipate_tokens: int
+    num_lost_tokens_left_in_buffer: int
+    num_truncations_before_augmentation: int
+    total_time_in_midi_ticks_before_augmentation: int
+    total_time_in_midi_ticks: int
+    ignored_files: dict[MIDIFileIgnoredReason, list[Path]]
+
+    @classmethod
+    def get_int_fields(cls) -> list[str]:
+        return [x.name for x in fields(cls) if x.type == int]
+
+
 class SequencePacker:
     """Buffer-like coordinator that flushes tokens to a file or just accumulates them to a list.
 
-    This adds punctuation-like semantic tokens to its outputs as they are streamed out.
+    This adds punctuation-like semantic tokens to its outputs as they are streamed out. We
+    also handle tracking of dataset tokenization stats and return them on close. Be careful,
+    because of the stat tracking this class has a lot of state.
 
     NB: list given in ctor is pass by reference, will mutate in place.
     """
@@ -145,6 +168,17 @@ class SequencePacker:
 
         self._target: Union[list, TokenSequenceBinaryFile]
 
+        # stats
+        self._total_seq_written = 0
+        self._total_times_end_triple_was_truncated = 0
+        self._total_time_in_midi_ticks_written = 0
+        self._token_counter = {
+            self._settings.vocab.TICK: 0,
+            self._settings.vocab.SEPARATOR: 0,
+            self._settings.vocab.AUTOREGRESS: 0,
+            self._settings.vocab.ANTICIPATE: 0,
+        }
+
     def add_tokenized_file(
         self,
         control_prefix: tuple[Token, ...],
@@ -169,6 +203,7 @@ class SequencePacker:
 
                     # truncate it... but
                     self._buf = self._buf[: self._settings.context_size]
+                    self._total_times_end_triple_was_truncated += 1
                     # repeat it at the start of the next sequence
                     split_token += list(next_elem)
 
@@ -186,21 +221,53 @@ class SequencePacker:
         # clear everything out
         self._iterator_queue = []
 
-    def _write_seq(self, buf: list[Token]):
-        self._target.append(list(buf))
+    def _write_seq(self, buf: list[Token]) -> None:
+        # copy, just for safety since buf is mutated a lot
+        local_copy = []
+        abs_time_in_ticks = 0
+        for i, token in enumerate(buf):
+            if token == self._settings.vocab.TICK:
+                abs_time_in_ticks += self._settings.tick_token_frequency_in_midi_ticks
+            if token in self._token_counter:
+                # keep a running counter of occurrences of some
+                # special tokens of interest
+                self._token_counter[token] += 1
+            local_copy.append(token)
 
-    def close(self) -> None:
+        self._total_time_in_midi_ticks_written += abs_time_in_ticks
+        self._total_seq_written += 1
+
+        # write it
+        self._target.append(local_copy)
+
+    def close(self) -> dict[str, int]:
         if self._settings.debug_flush_remaining_token_buffer:
             self._write_seq(self._buf)
             self._buf = []
 
+        num_lost_tokens_left_in_buffer = len(self._buf)
         if self._settings.debug:
-            print(f"Token buffer had remaining: {len(self._buf)}")
+            print(f"Token buffer had remaining: {num_lost_tokens_left_in_buffer}")
 
-        if isinstance(self._target, list):
-            return
+        if not isinstance(self._target, list):
+            self._target.close()
 
-        self._target.close()
+        # ideally keep this 1 level deep, so we can just gather them all
+        # and add them up. Nested dicts might make this annoying
+        return {
+            "num_sequences": self._total_seq_written,
+            "num_times_end_triple_was_truncated": self._total_times_end_triple_was_truncated,
+            "num_tick_tokens": self._token_counter[self._settings.vocab.TICK],
+            "num_separator_tokens": self._token_counter[self._settings.vocab.SEPARATOR],
+            "num_autoregress_tokens": self._token_counter[
+                self._settings.vocab.AUTOREGRESS
+            ],
+            "num_anticipate_tokens": self._token_counter[
+                self._settings.vocab.ANTICIPATE
+            ],
+            "num_lost_tokens_left_in_buffer": num_lost_tokens_left_in_buffer,
+            "total_time_in_midi_ticks": self._total_time_in_midi_ticks_written,
+        }
 
 
 def tokenize(
@@ -208,7 +275,7 @@ def tokenize(
     output: Union[list, Path],
     settings: AnticipationV2Settings,
     shard_id: int = -1,
-) -> dict[MIDIFileIgnoredReason, list[Path]]:
+) -> TokenizationStatSummary:
     """Tokenizes MIDI for v2 Anticipatory Training
 
     Args:
@@ -236,7 +303,11 @@ def tokenize(
     else:
         iter_obj = midi_files
 
-    stats: dict[MIDIFileIgnoredReason, list[Path]] = defaultdict(list)
+    ignored_files: dict[MIDIFileIgnoredReason, list[Path]] = defaultdict(list)
+    num_truncations_before_augmentation = 0
+    total_time_in_midi_ticks_before_augmentation = 0
+    num_tokenized_files = 0
+
     buf = SequencePacker(target=output, settings=settings)
     for file_idx, midi_file in enumerate(iter_obj):
         (
@@ -254,8 +325,13 @@ def tokenize(
                     UserWarning,
                 )
 
-            stats[reason_ignored].append(midi_file)
+            ignored_files[reason_ignored].append(midi_file)
             continue
+
+        # handle dataset stats - this is all BEFORE augmentation
+        num_truncations_before_augmentation += num_note_truncations
+        total_time_in_midi_ticks_before_augmentation += end_time_in_ticks
+        num_tokenized_files += 1
 
         # 1. pure autoregressive sequence
         for _ in range(settings.num_autoregressive_seq_per_midi_file):
@@ -264,6 +340,7 @@ def tokenize(
             )
             buf.add_tokenized_file(control_prefix, token_iterator)
 
+        # --- augmentations ---
         # 2. instrument anticipation
         for _ in range(
             settings.num_instrument_anticipation_augmentations_per_midi_file
@@ -286,10 +363,16 @@ def tokenize(
         buf.write_sequences()
 
     # close files if necessary
-    buf.close()
+    buf_stats = buf.close()
 
     # return any stats, cast to regular dictionary for safety
-    return dict(stats)
+    return TokenizationStatSummary(
+        num_tokenized_files=num_tokenized_files,
+        ignored_files=dict(ignored_files),
+        num_truncations_before_augmentation=num_truncations_before_augmentation,
+        total_time_in_midi_ticks_before_augmentation=total_time_in_midi_ticks_before_augmentation,
+        **buf_stats,
+    )
 
 
 def _get_augmentation_autoregressive(
