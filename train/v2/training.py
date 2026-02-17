@@ -1,9 +1,10 @@
 import os, time
 import argparse
-import torch
 from pathlib import Path
+import warnings
 
 import numpy as np
+import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
@@ -40,7 +41,13 @@ class PreTokenizedDataset(Dataset):
         return self.data.shape[0]
 
     def __getitem__(self, idx: int):
-        input_ids = torch.from_numpy(self.data[idx]).to(dtype=torch.long)
+        with warnings.catch_warnings():
+            # this warning is about writing to a tensor loaded in this way
+            # will result in undefined behavior, but this is the dataset, we
+            # are not going to mutate these samples
+            warnings.filterwarnings("ignore", category=UserWarning)
+            input_ids = torch.from_numpy(self.data[idx]).to(dtype=torch.long)
+
         attention_mask = torch.ones_like(input_ids)
         labels = input_ids.clone()
         labels = torch.roll(labels, shifts=-1, dims=0)
@@ -87,7 +94,7 @@ class GPT2LightningModule(pl.LightningModule):
 
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
-        self.log("train_loss", loss, prog_bar=True, logger=True)
+        self.log("train_loss", loss.detach(), prog_bar=True, logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -97,7 +104,7 @@ class GPT2LightningModule(pl.LightningModule):
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log(
-            "val_loss", loss, on_epoch=True, prog_bar=True, logger=True, sync_dist=True
+            "val_loss", loss.detach(), on_epoch=True, prog_bar=True, logger=True, sync_dist=True
         )
         return loss
 
