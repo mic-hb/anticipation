@@ -30,6 +30,6 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=4 train/v2/training.py \
     --output_dir output/checkpoints \
     --data_dir data/tokenized_data/5dbc372cdeae4c4fb44f447e66029461 \
     --gpus_per_node 4 \
-    --train_batch_size 256 \
+    --train_batch_size 512 \
     --gradient_accumulation_steps 1 \
     --use_wandb
