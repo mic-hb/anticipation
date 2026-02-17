@@ -13,7 +13,12 @@ from anticipation.tokenize import (
     extract_spans as v1_extract_spans,
 )
 
-from anticipation.v2.types import MIDIFileIgnoredReason, Token, MIDIProgramCode
+from anticipation.v2.types import (
+    MIDIFileIgnoredReason,
+    Token,
+    MIDIProgramCode,
+    MIDITick,
+)
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.convert import (
     midi_to_compound,
@@ -82,11 +87,18 @@ def _maybe_tokenize(
     return events, num_note_truncations, None
 
 
+@dataclass(frozen=True)
+class TokenizedMIDIFileResult:
+    events: list[Token]
+    num_note_truncations: int
+    reason_ignored: Optional[MIDIFileIgnoredReason]
+    all_midi_program_codes: list[MIDIProgramCode]
+    end_time_in_ticks: MIDITick
+
+
 def _tokenize_midi_file(
     my_midi_file: Path, settings: AnticipationV2Settings
-) -> tuple[
-    list[Token], int, Optional[MIDIFileIgnoredReason], list[MIDIProgramCode], int
-]:
+) -> TokenizedMIDIFileResult:
     assert isinstance(my_midi_file, Path)
 
     # now we are tokenizing the MIDI, using several tokens from our settings
@@ -103,17 +115,18 @@ def _tokenize_midi_file(
         all_midi_program_codes = list(v2_ops.get_instruments(all_events, settings))
         end_time_in_ticks: int = v2_ops.max_time(all_events, settings, seconds=False)
 
-    return (
-        all_events,
-        num_note_truncations,
-        reason_ignored,
-        all_midi_program_codes,
-        end_time_in_ticks,
+    return TokenizedMIDIFileResult(
+        events=all_events,
+        num_note_truncations=num_note_truncations,
+        reason_ignored=reason_ignored,
+        all_midi_program_codes=all_midi_program_codes,
+        end_time_in_ticks=end_time_in_ticks,
     )
 
 
 @dataclass(frozen=True)
 class TokenizationStatSummary:
+    num_given_files: int
     num_tokenized_files: int
     num_sequences: int
     num_times_end_triple_was_truncated: int
@@ -129,7 +142,7 @@ class TokenizationStatSummary:
 
     @classmethod
     def get_int_fields(cls) -> list[str]:
-        return [x.name for x in fields(cls) if x.type == int]
+        return [x.name for x in fields(cls) if x.type == int]  # noqa
 
 
 class SequencePacker:
@@ -291,6 +304,8 @@ def tokenize(
         by reference.
       settings: The Anticipation v2 settings object. Settings in here
         will affect how MIDI events are tokenized.
+      shard_id: Whether to show a tqdm progress bar. This is handled by
+        dataset tokenization script. Defaults to not showing it.
 
     Returns:
       A dictionary of (reason ignored, number of times it happened) for
@@ -303,76 +318,85 @@ def tokenize(
     else:
         iter_obj = midi_files
 
-    ignored_files: dict[MIDIFileIgnoredReason, list[Path]] = defaultdict(list)
+    # --- all these are dataset level stats ---
     num_truncations_before_augmentation = 0
     total_time_in_midi_ticks_before_augmentation = 0
     num_tokenized_files = 0
+    num_given_files = 0
+    ignored_files: dict[MIDIFileIgnoredReason, list[Path]] = defaultdict(list)
+    # -----
 
     buf = SequencePacker(target=output, settings=settings)
     for file_idx, midi_file in enumerate(iter_obj):
-        (
-            tokenized_midi,
-            num_note_truncations,
-            reason_ignored,
-            all_midi_program_codes,
-            end_time_in_ticks,
-        ) = _tokenize_midi_file(midi_file, settings)
-        if reason_ignored is not None:
+        num_given_files += 1
+
+        result: TokenizedMIDIFileResult = _tokenize_midi_file(midi_file, settings)
+        if result.reason_ignored is not None:
+            # can't use this file
             if settings.debug:
                 # suppress writing to stderr/stdout unless we are debugging
                 warnings.warn(
-                    f"Sequence in file {midi_file} was ignored for reason: {reason_ignored}",
+                    f"Sequence in file {midi_file} was ignored for reason: {result.reason_ignored}",
                     UserWarning,
                 )
-
-            ignored_files[reason_ignored].append(midi_file)
+            ignored_files[result.reason_ignored].append(midi_file)
             continue
 
         # handle dataset stats - this is all BEFORE augmentation
-        num_truncations_before_augmentation += num_note_truncations
-        total_time_in_midi_ticks_before_augmentation += end_time_in_ticks
         num_tokenized_files += 1
+        num_truncations_before_augmentation += result.num_note_truncations
+        total_time_in_midi_ticks_before_augmentation += result.end_time_in_ticks
 
-        # 1. pure autoregressive sequence
-        for _ in range(settings.num_autoregressive_seq_per_midi_file):
-            control_prefix, token_iterator = _get_augmentation_autoregressive(
-                tokenized_midi, settings
-            )
-            buf.add_tokenized_file(control_prefix, token_iterator)
-
-        # --- augmentations ---
-        # 2. instrument anticipation
-        for _ in range(
-            settings.num_instrument_anticipation_augmentations_per_midi_file
-        ):
-            control_prefix, token_iterator = _get_augmentation_instrument(
-                tokenized_midi,
-                all_midi_program_codes,
-                settings,
-            )
-            buf.add_tokenized_file(control_prefix, token_iterator)
-
-        # 3. span anticipation
-        for _ in range(settings.num_span_anticipation_augmentations_per_midi_file):
-            # TODO: not done w this yet
-            buf.add_tokenized_file(
-                _get_span_augmentation(tokenized_midi, end_time_in_ticks, settings)
-            )
-
-        # write all the sequences to a target
-        buf.write_sequences()
+        # actually tokenize and pack the sequences
+        _make_sequences(result, buf, settings)
 
     # close files if necessary
     buf_stats = buf.close()
 
     # return any stats, cast to regular dictionary for safety
     return TokenizationStatSummary(
+        num_given_files=num_given_files,
         num_tokenized_files=num_tokenized_files,
         ignored_files=dict(ignored_files),
         num_truncations_before_augmentation=num_truncations_before_augmentation,
         total_time_in_midi_ticks_before_augmentation=total_time_in_midi_ticks_before_augmentation,
         **buf_stats,
     )
+
+
+def _make_sequences(
+    tokenized_midi: TokenizedMIDIFileResult,
+    buf: SequencePacker,
+    settings: AnticipationV2Settings,
+) -> None:
+    # 1. pure autoregressive sequence
+    for _ in range(settings.num_autoregressive_seq_per_midi_file):
+        control_prefix, token_iterator = _get_augmentation_autoregressive(
+            tokenized_midi.events, settings
+        )
+        buf.add_tokenized_file(control_prefix, token_iterator)
+
+    # --- augmentations ---
+    # 2. instrument anticipation
+    for _ in range(settings.num_instrument_anticipation_augmentations_per_midi_file):
+        control_prefix, token_iterator = _get_augmentation_instrument(
+            tokenized_midi.events,
+            tokenized_midi.all_midi_program_codes,
+            settings,
+        )
+        buf.add_tokenized_file(control_prefix, token_iterator)
+
+    # 3. span anticipation
+    for _ in range(settings.num_span_anticipation_augmentations_per_midi_file):
+        # TODO: not done w this yet
+        buf.add_tokenized_file(
+            _get_span_augmentation(
+                tokenized_midi.events, tokenized_midi.end_time_in_ticks, settings
+            )
+        )
+
+    # write all the sequences to a target
+    buf.write_sequences()
 
 
 def _get_augmentation_autoregressive(

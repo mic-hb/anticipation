@@ -72,6 +72,9 @@ def midi_to_compound(midifile: Path, settings: AnticipationV2Settings) -> list[i
     compounds = []
     for track_idx, track in enumerate(score.tracks):
         instr = 128 if track.is_drum else track.program
+        # TODO: add augmentations
+        # https://yikai-liao.github.io/symusic/api_reference/score.html#modification-methods
+        # https://yikai-liao.github.io/symusic/api_reference/track.html#modification-methods
         for note in track.notes:
             on_set_time_in_ticks = round(time_resolution * note.time)
             duration_time_in_ticks = round(time_resolution * note.duration)

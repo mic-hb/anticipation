@@ -252,6 +252,7 @@ def _tokenize_dataset_in_parallel(
         all_dataset_stats["total_time_in_minutes_before_augmentation"] = (
             all_dataset_stats["total_time_in_sec_before_augmentation"] / 60
         )
+        all_dataset_stats["total_ignored_files"] = len(ignored_files)
         stat_path.write_text(dumps(all_dataset_stats, sort_keys=True, indent=4))
 
     return all_dataset_stats
@@ -359,10 +360,10 @@ if __name__ == "__main__":
         CONFIG_ROOT
         / "ar_only_local_midi_settings_b1f4b64911a603018ed67a154db6fb16.json"
     )
-    tokenize_data_at_path = Path("/Users/admin/Documents/RESEARCH/anticipation_v2/anticipation/data/lmd_full")
-    # tokenize_data_at_path = Path(
-    #     "/Users/admin/Documents/RESEARCH/anticipation_v2/anticipation/data/transcripts"
-    # )
+    # tokenize_data_at_path = Path("/Users/admin/Documents/RESEARCH/anticipation_v2/anticipation/data/lmd_full")
+    tokenize_data_at_path = Path(
+        "/Users/admin/Documents/RESEARCH/anticipation_v2/anticipation/data/transcripts"
+    )
     main(
         settings_path=ar_only_settings,
         put_shards_in_tmp=True,
