@@ -1,8 +1,13 @@
 import os, time
 import argparse
 import torch
+from pathlib import Path
 
+import numpy as np
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torch.optim.lr_scheduler import OneCycleLR
+
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 
@@ -16,47 +21,29 @@ from pytorch_lightning.callbacks import (
 from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_info
 
-from torch.utils.data import Dataset, DataLoader
-from torch.optim.lr_scheduler import OneCycleLR
 from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
+from anticipation.v2.config import AnticipationV2Settings
 
-class PretokenizedDataset(Dataset):
-    def __init__(self, file_path):
-        self.file_path = file_path
 
-        self.line_offsets = [0]
-        self.length = 0
-        with open(file_path, "rb") as f:
-            while True:
-                line = f.readline()
-                if not line:
-                    break
-                self.length += 1
-                self.line_offsets.append(f.tell())
+class PreTokenizedDataset(Dataset):
+    """
+    Must be constructed with v2 sequence packing.
+    """
 
-            f.seek(self.line_offsets[0])
-            context_length = len(f.readline().strip().split())
+    def __init__(self, path: Path) -> None:
+        # O(page size) random access apparently?
+        self.data = np.load(path, mmap_mode="r")
+        assert self.data.flags["C_CONTIGUOUS"]
 
-        rank_zero_info(f"Loaded a dataset {file_path}")
-        rank_zero_info(f"  - Sequence length: {context_length}")
-        rank_zero_info(f"  - Number of sequences: {self.length}")
-        rank_zero_info(f"  - Number of tokens: {context_length * self.length}")
+    def __len__(self) -> int:
+        return self.data.shape[0]
 
-    def __len__(self):
-        return self.length
-
-    def __getitem__(self, idx):
-        with open(self.file_path, "r", encoding="utf-8") as f:
-            f.seek(self.line_offsets[idx])
-            tokens = [int(token) for token in f.readline().strip().split()]
-
-        input_ids = torch.tensor(tokens, dtype=torch.long)
+    def __getitem__(self, idx: int):
+        input_ids = torch.from_numpy(self.data[idx]).to(dtype=torch.long)
         attention_mask = torch.ones_like(input_ids)
-
         labels = input_ids.clone()
         labels = torch.roll(labels, shifts=-1, dims=0)
-
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -67,7 +54,7 @@ class PretokenizedDataset(Dataset):
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
         self,
-        data_dir: str = "",
+        data_dir: Path,
         learning_rate: float = 5e-5,
         warmup_steps: int = 0,
         weight_decay: float = 0.0,
@@ -75,7 +62,6 @@ class GPT2LightningModule(pl.LightningModule):
         eval_batch_size: int = 32,
         pretrained_checkpoint: str = None,
         config: PretrainedConfig = None,
-        **kwargs,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -88,18 +74,6 @@ class GPT2LightningModule(pl.LightningModule):
             rank_zero_info(f"Loaded pre-trained model from {pretrained_checkpoint}")
         else:
             self.model = GPT2LMHeadModel(config)
-
-        # if pretrained_checkpoint:
-        #     rank_zero_info(f"Loading pre-trained model from {pretrained_checkpoint}")
-        #     self.model = GPT2LMHeadModel.from_pretrained(
-        #         pretrained_checkpoint,
-        #         config=config,
-        #         low_cpu_mem_usage=True,
-        #         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        #         device_map=None   # <- load fully on CPU first
-        #     )
-        # else:
-        #     self.model = GPT2LMHeadModel(config)
 
         self.model.gradient_checkpointing_enable()
         self.model.config.bos_token_id = self.model.config.eos_token_id = 0
@@ -157,7 +131,6 @@ class GPT2LightningModule(pl.LightningModule):
         if hasattr(train_dataloader, "dataset"):
             dataset_size = len(train_dataloader.dataset)
             pct_start = min(0.3, self.hparams.warmup_steps / self.trainer.max_steps)
-
             scheduler = OneCycleLR(
                 optimizer,
                 max_lr=self.hparams.learning_rate,
@@ -169,23 +142,19 @@ class GPT2LightningModule(pl.LightningModule):
                 three_phase=False,
                 cycle_momentum=False,
             )
-
             scheduler_config = {
                 "scheduler": scheduler,
                 "interval": "step",
                 "frequency": 1,
             }
-
             return [optimizer], [scheduler_config]
 
         return optimizer
 
-    def train_dataloader(self):
+    def train_dataloader(self) -> DataLoader:
         num_devices = max(1, self.trainer.num_devices)
         per_device_batch_size = self.hparams.train_batch_size // num_devices
-
-        dataset = PretokenizedDataset(os.path.join(self.data_dir, "train.txt"))
-
+        dataset = PreTokenizedDataset(self.data_dir / "train.npy")
         return DataLoader(
             dataset,
             batch_size=per_device_batch_size,
@@ -194,12 +163,10 @@ class GPT2LightningModule(pl.LightningModule):
             pin_memory=True,
         )
 
-    def val_dataloader(self):
+    def val_dataloader(self) -> DataLoader:
         num_devices = max(1, self.trainer.num_devices)
         per_device_batch_size = self.hparams.train_batch_size // num_devices
-
-        dataset = PretokenizedDataset(os.path.join(self.data_dir, "valid.txt"))
-
+        dataset = PreTokenizedDataset(self.data_dir / "valid.npy")
         return DataLoader(
             dataset,
             batch_size=per_device_batch_size,
@@ -253,12 +220,18 @@ class HuggingFaceCheckpoint(ModelCheckpoint):
         )
 
 
-def main(args):
+def main(args: argparse.Namespace) -> None:
     pl.seed_everything(args.seed)
-
+    tokenized_dataset_path = Path(args.data_dir)
+    assert tokenized_dataset_path.exists()
+    assert tokenized_dataset_path.is_dir()
+    settings_file = next(tokenized_dataset_path.glob("settings_*.json"), None)
+    if not settings_file:
+        raise RuntimeError("Unable to find settings")
+    settings = AnticipationV2Settings.load_from_disk(settings_file)
     model_config = GPT2Config(
-        vocab_size=args.vocab_size,
-        n_positions=args.seq_len,
+        vocab_size=settings.vocab.total_tokens(),
+        n_positions=settings.context_size,
         n_embd=args.hidden_dim,
         n_layer=args.num_layers,
         n_head=args.num_heads,
@@ -270,9 +243,8 @@ def main(args):
         scale_attn_by_inverse_layer_idx=True,
         use_cache=False,
     )
-
     model = GPT2LightningModule(
-        data_dir=args.data_dir,
+        data_dir=tokenized_dataset_path,
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
@@ -293,6 +265,15 @@ def main(args):
     )
     checkpoint_callback.CHECKPOINT_EQUALS_CHAR = "-"
 
+    logger_dict = {}
+    if args.use_wandb:
+        logger_dict["logger"] = WandbLogger(
+            project="gpt-anticipation-2.0",
+            name=f"run-{int(time.time())}",
+            save_dir=args.output_dir,
+            config=vars(args),
+        )
+
     trainer = pl.Trainer(
         max_steps=args.num_train_steps,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
@@ -310,22 +291,18 @@ def main(args):
         accumulate_grad_batches=args.gradient_accumulation_steps,
         log_every_n_steps=10,
         val_check_interval=args.steps_per_eval,
-        logger=WandbLogger(
-            project="gpt-anticipation-2.0",
-            name=f"run-{int(time.time())}",
-            save_dir=args.output_dir,
-            config=vars(args),
-        ),
+        **logger_dict,
     )
-
     trainer.fit(model)
 
 
-if __name__ == "__main__":
+def get_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="GPT-2 training script using PyTorch Lightning"
     )
-    parser.add_argument("--data_dir", type=str, help="Output directory for checkpoints")
+    parser.add_argument(
+        "--data_dir", type=str, help="Directory where tokenized dataset is located"
+    )
     parser.add_argument(
         "--output_dir", type=str, help="Output directory for checkpoints"
     )
@@ -335,15 +312,6 @@ if __name__ == "__main__":
         default=None,
         help="Initialize model weights from this checkpoint",
     )
-
-    # Dataset parameters
-    parser.add_argument(
-        "--vocab_size", type=int, default=35329, help="Dataset vocabulary size"
-    )
-    parser.add_argument(
-        "--seq_len", type=int, default=1024, help="Dataset sequence length"
-    )
-
     # Model parameters
     parser.add_argument(
         "--hidden_dim", type=int, default=768, help="Model hidden dimensions"
@@ -410,8 +378,14 @@ if __name__ == "__main__":
         "--gpus_per_node", type=int, default=1, help="Number of GPUs per node"
     )  # 4 gpus
 
-    args = parser.parse_args()
+    parser.add_argument(
+        "--use_wandb", action="store_true", help="whether to use wandb logging"
+    )
+    return parser
 
+
+if __name__ == "__main__":
+    ap = get_argparser()
+    args = ap.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-
     main(args)
