@@ -360,12 +360,17 @@ if __name__ == "__main__":
         CONFIG_ROOT
         / "ar_only_local_midi_settings_b1f4b64911a603018ed67a154db6fb16.json"
     )
+    ar_only_settings_with_no_instr_limit = (
+        CONFIG_ROOT
+        / "ar_only_local_midi_no_instr_limit_settings_b6b807961c44ab1e0eb7f9a900182af0.json"
+    )
+
     # tokenize_data_at_path = Path("/Users/admin/Documents/RESEARCH/anticipation_v2/anticipation/data/lmd_full")
     tokenize_data_at_path = Path(
         "/Users/admin/Documents/RESEARCH/anticipation_v2/anticipation/data/transcripts"
     )
     main(
-        settings_path=ar_only_settings,
+        settings_path=ar_only_settings_with_no_instr_limit,
         put_shards_in_tmp=True,
         raw_data_enclosing_path=tokenize_data_at_path,
     )

@@ -14,6 +14,7 @@ from anticipation.v2.io import TokenSequenceBinaryFile
 from tests.util.entities import Event, EventSpecialCode, get_note_instrument_token, Note
 from tests.util.visualize_sequence import get_figure_and_open
 
+from anticipation.v2.config import DATASET_ROOT
 from tests.conftest import (
     VISUALIZATIONS_PATH,
 )
@@ -329,6 +330,9 @@ def test_sequence_packing_file_correctness(
     in_memory_tokens = []
     stats = v2_tokenize(midi_files, in_memory_tokens, settings)
     assert not stats.ignored_files
+
+    # this token basically prefixes each file
+    assert stats.num_separator_tokens == 2
 
     # 97 complete sequences
     assert len(in_memory_tokens) == 97

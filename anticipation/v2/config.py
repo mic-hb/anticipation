@@ -91,7 +91,10 @@ class AnticipationV2Settings:
     min_track_events: int = 100
     min_track_time_in_seconds: int = 10
     max_track_time_in_seconds: int = 3600
+
+    # the maximum number of instruments that produce notes in a file
     max_track_instruments: int = 16
+
     max_midi_pitch: int = 128
     # 128 program codes + 1 for drums
     max_midi_instrument: int = 129
