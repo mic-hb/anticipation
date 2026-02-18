@@ -365,11 +365,11 @@ if __name__ == "__main__":
         },
         "transcripts": {
             "settings": CONFIG_ROOT
-            / "ar_only_local_midi_no_instr_limit_settings_87451b329323d36a658ac64ed9a8bb81",
+            / "ar_only_local_midi_no_instr_limit_settings_87451b329323d36a658ac64ed9a8bb81.json",
             "raw_data_enclosing_path": DATASET_ROOT / "transcripts",
         },
     }
-    dataset_choice = configs["lakh"]
+    dataset_choice = configs["transcripts"]
     main(
         settings_path=dataset_choice["settings"],
         put_shards_in_tmp=True,
