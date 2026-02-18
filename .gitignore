@@ -7,4 +7,5 @@ data/
 tests/visualizations
 __pycache__
 .DS_Store
+*.swp
 *.bin
