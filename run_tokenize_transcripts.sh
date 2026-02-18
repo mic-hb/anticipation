@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=50GB
 #SBATCH -t 100:00:00
-#SBATCH -J train_ar_local_midi_v2
+#SBATCH -J tokenize_dataset
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
