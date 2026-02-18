@@ -357,6 +357,7 @@ def main(
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     import os
+
     print("Custom Temporary Directory: ", os.environ.get("CUSTOM_TMP_DIR"))
 
     # TODO: do argparse thing
