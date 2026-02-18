@@ -1,4 +1,4 @@
-from typing import Iterator, Any
+from typing import Iterator, Any, ContextManager
 
 import os
 import hashlib
@@ -6,6 +6,33 @@ import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
+from contextlib import contextmanager
+
+
+@contextmanager
+def temporary_directory(
+    env_var: str = "CUSTOM_TMP_DIR",
+    require_exists: bool = True,
+    check_writable: bool = True,
+) -> ContextManager[str]:
+    root = os.environ.get(env_var)
+    if root is None:
+        # if the envar is not set, default to the regular behavior
+        # the temporary folder is OS/environment dependent
+        with tempfile.TemporaryDirectory() as td:
+            yield td
+
+    root_path = Path(root).expanduser().resolve()
+
+    if require_exists and not root_path.exists():
+        raise RuntimeError(f"{env_var}={root_path} does not exist")
+
+    if check_writable and not os.access(root_path, os.W_OK):
+        raise RuntimeError(f"{env_var}={root_path} is not writable")
+
+    with tempfile.TemporaryDirectory(dir=root_path) as td:
+        yield td
 
 
 def get_book_keeping_info() -> dict[str, Any]:

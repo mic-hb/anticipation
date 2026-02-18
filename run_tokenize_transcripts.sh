@@ -4,7 +4,7 @@
 #SBATCH -n 1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=50GB
-#SBATCH -t 100:00:00
+#SBATCH -t 20:00:00
 #SBATCH -J tokenize_dataset
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
@@ -20,6 +20,11 @@ if source "$CONDA_ACTIVATE_PATH" 2>/dev/null; then
 else
   echo "conda startup script not found."
 fi
+
+
+# we run out of space if we just write to tmp
+export CUSTOM_TMP_DIR=/scratch/$USER
+mkdir -p "$CUSTOM_TMP_DIR"
 
 
 # TODO: need to make lmd vs. transcripts toggle-able by argparse

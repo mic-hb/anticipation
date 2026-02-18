@@ -24,6 +24,7 @@ from anticipation.v2.tokenize import (
 from anticipation.v2.util import (
     iter_files,
     get_book_keeping_info,
+    temporary_directory,
 )
 from anticipation.v2.io import TokenSequenceBinaryFile, consolidate_bins
 
@@ -179,7 +180,7 @@ def _tokenize_dataset_in_parallel(
     all_dataset_stats: dict[str, Union[int, float]] = {
         x: 0 for x in TokenizationStatSummary.get_int_fields()
     }
-    with tempfile.TemporaryDirectory() as td:
+    with temporary_directory() as td:
         td_path = Path(td)
         if put_shards_in_tmp:
             shards_dir = td_path / "shards"
@@ -355,6 +356,8 @@ def main(
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
+    import os
+    print("Custom Temporary Directory: ", os.environ.get("CUSTOM_TMP_DIR"))
 
     # TODO: do argparse thing
     configs = {
