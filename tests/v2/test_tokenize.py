@@ -11,7 +11,7 @@ from anticipation.v2.tokenize import tokenize as v2_tokenize
 from anticipation.v2.tokenize import MIDIFileIgnoredReason, TokenizationStatSummary
 from anticipation.v2.io import TokenSequenceBinaryFile
 
-from tests.util.entities import Event, EventSpecialCode
+from tests.util.entities import Event, EventSpecialCode, get_note_instrument_token, Note
 from tests.util.visualize_sequence import get_figure_and_open
 
 from tests.conftest import (
@@ -46,11 +46,11 @@ def lmd_0_example_1_tokens_and_parsed_events(
     # tokens in the buffer that would typically be ignored in a production context
     assert all((len(x) == settings.context_size for x in in_memory_tokens[:-1]))
 
-    # there are 606 remaining that do not fit exactly into a context window
-    assert len(in_memory_tokens[8]) == 606
+    # there are 584 remaining that do not fit exactly into a context window
+    assert len(in_memory_tokens[8]) == 584
 
     all_tokens_flattened = [x for b in in_memory_tokens for x in b]
-    assert len(all_tokens_flattened) == 606 + (1024 * 8)
+    assert len(all_tokens_flattened) == 584 + (1024 * 8)
 
     num_total_separators = 0
     for i, packed_seq in enumerate(in_memory_tokens):
@@ -70,7 +70,7 @@ def lmd_0_example_1_tokens_and_parsed_events(
     parsed_events = Event.from_token_seq(
         [x for b in in_memory_tokens for x in b], settings
     )
-    assert len(parsed_events) == 3053
+    assert len(parsed_events) == 3045
     return in_memory_tokens, parsed_events, settings
 
 
@@ -340,7 +340,7 @@ def test_sequence_packing_file_correctness(
     # contains the end of the first file and start of the second
     seq_border_frame = in_memory_tokens[8]
     sep_idx = seq_border_frame.index(settings.vocab.SEPARATOR)
-    assert sep_idx == 606
+    assert sep_idx == 584
     lmd_0_example_1_actual_tokens = in_memory_tokens[:8] + [
         in_memory_tokens[8][:sep_idx]
     ]
@@ -393,3 +393,331 @@ def test_no_segfault(lmd_1_example_0_midi_path: Path) -> None:
     assert stats.ignored_files[MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE] == [
         lmd_1_example_0_midi_path
     ]
+
+
+def test_sequence_boundaries_for_truncated_end_triple(c_major_midi_path: Path) -> None:
+    settings = AnticipationV2Settings(
+        vocab=Vocab(),
+        debug=False,
+        debug_flush_remaining_token_buffer=True,
+        min_track_events=1,
+        min_track_time_in_seconds=1,
+        # small context size for this test, we want to examine what happens at
+        # the sequence boundaries
+        context_size=8,
+        num_autoregressive_seq_per_midi_file=1,
+        num_instrument_anticipation_augmentations_per_midi_file=0,
+        num_span_anticipation_augmentations_per_midi_file=0,
+        num_random_anticipation_augmentations_per_midi_file=0,
+        tick_token_frequency_in_midi_ticks=100,
+    )
+    tokens_to = []
+    stats: TokenizationStatSummary = v2_tokenize(
+        [c_major_midi_path], output=tokens_to, settings=settings
+    )
+    assert stats.num_times_end_triple_was_truncated == 2
+    assert len(tokens_to) == 16
+    assert stats.num_sequences == 16
+
+    seq_0 = tokens_to[0]
+    event_0 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("C1").midi_note_int, settings),
+    ]
+    event_1 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("D1").midi_note_int, settings),
+    ]
+    event_2 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("E1").midi_note_int, settings),
+    ]
+    event_3 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("F1").midi_note_int, settings),
+    ]
+    event_4 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("G1").midi_note_int, settings),
+    ]
+    event_5 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("A1").midi_note_int, settings),
+    ]
+    event_6 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("B1").midi_note_int, settings),
+    ]
+    event_7 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("C2").midi_note_int, settings),
+    ]
+    event_8 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("D2").midi_note_int, settings),
+    ]
+    event_9 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("E2").midi_note_int, settings),
+    ]
+    event_10 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("F2").midi_note_int, settings),
+    ]
+    event_11 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("G2").midi_note_int, settings),
+    ]
+    event_12 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("A2").midi_note_int, settings),
+    ]
+    event_13 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("B2").midi_note_int, settings),
+    ]
+    event_14 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("C3").midi_note_int, settings),
+    ]
+    event_15 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("D3").midi_note_int, settings),
+    ]
+    event_16 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("E3").midi_note_int, settings),
+    ]
+    event_17 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("F3").midi_note_int, settings),
+    ]
+    event_18 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("G3").midi_note_int, settings),
+    ]
+    event_19 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("A3").midi_note_int, settings),
+    ]
+    event_20 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("B3").midi_note_int, settings),
+    ]
+    event_21 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("C4").midi_note_int, settings),
+    ]
+    event_22 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("D4").midi_note_int, settings),
+    ]
+    event_23 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("E4").midi_note_int, settings),
+    ]
+    event_24 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("F4").midi_note_int, settings),
+    ]
+    event_25 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("G4").midi_note_int, settings),
+    ]
+    event_26 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("A4").midi_note_int, settings),
+    ]
+    event_27 = [
+        0,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("B4").midi_note_int, settings),
+    ]
+    event_28 = [
+        50,
+        settings.vocab.DUR_OFFSET + 50,
+        get_note_instrument_token(0, Note.make("C5").midi_note_int, settings),
+    ]
+    assert seq_0 == [
+        # special
+        settings.vocab.SEPARATOR,
+        settings.vocab.AUTOREGRESS,
+        # tick
+        settings.vocab.TICK,
+        # event 0
+        *event_0,
+        # event 1, is cut off - this is the first truncation
+        *event_1[:2],
+    ]
+    seq_1 = tokens_to[1]
+    assert seq_1 == [
+        # special
+        settings.vocab.AUTOREGRESS,
+        # but event 1 continues the next sequence and
+        # is represented in full
+        *event_1,
+        settings.vocab.TICK,
+        # event 2
+        *event_2,
+    ]
+    seq_2 = tokens_to[2]
+    assert seq_2 == [
+        # special
+        settings.vocab.AUTOREGRESS,
+        # event 2 appeared in full, so we start with event 3
+        *event_3,
+        settings.vocab.TICK,
+        # event 4
+        *event_4,
+    ]
+    seq_3 = tokens_to[3]
+    assert seq_3 == [
+        # special
+        settings.vocab.AUTOREGRESS,
+        *event_5,
+        settings.vocab.TICK,
+        *event_6,
+    ]
+    seq_4 = tokens_to[4]
+    assert seq_4 == [
+        # special
+        settings.vocab.AUTOREGRESS,
+        *event_7,
+        settings.vocab.TICK,
+        # event 8 comes 50 midi ticks after tick token
+        # there is a 50 midi tick rest after event 7
+        *event_8,
+    ]
+    seq_5 = tokens_to[5]
+    assert seq_5 == [
+        settings.vocab.AUTOREGRESS,
+        # now the tick is at the front, that's just how it turned out
+        # with the context length
+        settings.vocab.TICK,
+        *event_9,
+        *event_10,
+    ]
+    seq_6 = tokens_to[6]
+    assert seq_6 == [
+        settings.vocab.AUTOREGRESS,
+        settings.vocab.TICK,
+        *event_11,
+        *event_12,
+    ]
+    seq_7 = tokens_to[7]
+    assert seq_7 == [
+        settings.vocab.AUTOREGRESS,
+        settings.vocab.TICK,
+        *event_13,
+        *event_14,
+    ]
+    seq_8 = tokens_to[8]
+    assert seq_8 == [
+        settings.vocab.AUTOREGRESS,
+        settings.vocab.TICK,
+        *event_15,
+        settings.vocab.TICK,
+        # second truncation
+        *event_16[:2],
+    ]
+    seq_9 = tokens_to[9]
+    assert seq_9 == [
+        settings.vocab.AUTOREGRESS,
+        # continue the truncated event from previous sequence
+        *event_16,
+        *event_17,
+        # tick is now at the end
+        settings.vocab.TICK,
+    ]
+    seq_10 = tokens_to[10]
+    assert seq_10 == [
+        settings.vocab.AUTOREGRESS,
+        *event_18,
+        *event_19,
+        settings.vocab.TICK,
+    ]
+    seq_11 = tokens_to[11]
+    assert seq_11 == [
+        settings.vocab.AUTOREGRESS,
+        *event_20,
+        *event_21,
+        settings.vocab.TICK,
+    ]
+    seq_12 = tokens_to[12]
+    assert seq_12 == [
+        settings.vocab.AUTOREGRESS,
+        *event_22,
+        settings.vocab.TICK,
+        *event_23,
+    ]
+    seq_13 = tokens_to[13]
+    assert seq_13 == [
+        settings.vocab.AUTOREGRESS,
+        *event_24,
+        settings.vocab.TICK,
+        *event_25,
+    ]
+    seq_14 = tokens_to[14]
+    assert seq_14 == [
+        settings.vocab.AUTOREGRESS,
+        *event_26,
+        settings.vocab.TICK,
+        *event_27,
+    ]
+
+    # this sequence won't appear in the dataset, we have the setting
+    # `debug_flush_remaining_token_buffer` set to true in this test,
+    # so the tokens that are in the buffer at the end of tokenization
+    # are returned rather than discarded.
+    seq_15 = tokens_to[15]
+    assert seq_15 == [
+        settings.vocab.AUTOREGRESS,
+        *event_28,
+    ]
+
+    # check reconstructing the events
+    parsed_events = Event.from_token_seq([x for b in tokens_to for x in b], settings)
+    note_strikes = [x for x in parsed_events if x.is_note_event()]
+    tick_tokens = [x for x in parsed_events if x.is_tick()]
+
+    # 29 original notes
+    assert len(note_strikes) == 29
+    # the time resolution is 100, we play a note every 50 ticks
+    # so there will be a tick every sequence
+    assert len(tick_tokens) == 16
+
+    # check that there are no strange repeated events
+    get_figure_and_open(
+        events=parsed_events,
+        delta=settings.delta,
+        time_resolution=settings.time_resolution,
+        path=(VISUALIZATIONS_PATH / "c_major_with_ticks.html"),
+        auto_open=False,
+    )

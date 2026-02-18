@@ -25,6 +25,12 @@ VISUALIZATIONS_PATH.mkdir(exist_ok=True)
 
 @pytest.fixture
 def c_major_midi_path() -> Path:
+    # deliberately simple MIDI file for diagnostic purposes
+    # this is a C major scale starting at C1, with a new note every
+    # 50 ticks. The C of the next octave is omitted, so it goes:
+    # C1, D1, E1, F1, G1, A1, B1, C1, (rest for 50 ticks), D2, E2, ...
+    # up until C5.
+    # There are 29 notes in total.
     return TEST_DATA_PATH / "cmajor.mid"
 
 

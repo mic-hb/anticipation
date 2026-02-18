@@ -380,6 +380,11 @@ class Event:
     def is_tick(self) -> bool:
         return self.special_code == EventSpecialCode.TICK
 
+    def is_note_event(self) -> bool:
+        return (
+            self.special_code == EventSpecialCode.TYPICAL_EVENT
+        ) and not self.is_control
+
     def __eq__(self, other) -> bool:
         if not isinstance(other, Event):
             return False

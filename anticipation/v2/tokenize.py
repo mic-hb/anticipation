@@ -207,28 +207,29 @@ class SequencePacker:
             to_add = [self._settings.vocab.SEPARATOR, *control_prefix]
 
             self._buf += to_add
-            split_token = []
             for next_elem in iter_curr_tokens:
-                if len(self._buf) + len(next_elem) > self._settings.context_size:
+                if (
+                    len(self._buf) != self._settings.context_size
+                    and len(self._buf) + len(next_elem) > self._settings.context_size
+                ):
                     # adding the next element would split a note down the
                     # middle between sequences...
                     self._buf += next_elem
 
-                    # truncate it... but
+                    # truncate it... but we still have it in next_elem,
+                    # it will start the next seq, sequence is surely
+                    # exactly context size now
                     self._buf = self._buf[: self._settings.context_size]
                     self._total_times_end_triple_was_truncated += 1
-                    # repeat it at the start of the next sequence
-                    split_token += list(next_elem)
 
                 if len(self._buf) == self._settings.context_size:
                     # write sequence
                     self._write_seq(self._buf)
 
-                    # reset the buffer to contain controls and any tokens
-                    # that got split
-                    self._buf = [*control_prefix, *split_token]
-                    split_token = []
+                    # reset the buffer
+                    self._buf = [*control_prefix]
 
+                # continue accumulating
                 self._buf += list(next_elem)
 
         # clear everything out
