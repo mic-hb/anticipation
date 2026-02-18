@@ -12,6 +12,7 @@ def test_serialize_anticipation_v2_settings() -> None:
         vocab=Vocab(),
     )
     assert settings.to_dict() == {
+        "augmentation_pitch_shifts": (),
         "compound_size": 5,
         "context_size": 1024,
         "debug": False,
@@ -52,22 +53,40 @@ def test_serialize_anticipation_v2_settings() -> None:
         },
     }
     s, _ = settings._get_as_file()
-    assert settings.md5_hash() == "3eefbbb7d44ba2624ea4f0817fadcb62"
-    reloaded_settings = loads(s)
-    assert settings.to_dict() == reloaded_settings
+    assert settings.md5_hash() == "d12e0635b62bd7a827c8455cd402d323"
 
 
 def test_save_load_settings() -> None:
     with tempfile.TemporaryDirectory() as td:
         temp_enclosing_path = Path(td)
         settings = AnticipationV2Settings(
-            vocab=Vocab(),
+            vocab=Vocab(), augmentation_pitch_shifts=(-1, 1)
         )
         saved_to = settings.save_to_disk(temp_enclosing_path)
         assert isinstance(saved_to, Path)
 
         reloaded_settings = AnticipationV2Settings.load_from_disk(saved_to)
+
+        # these might need some special reload logic
+        assert isinstance(reloaded_settings.augmentation_pitch_shifts, tuple)
+        assert isinstance(reloaded_settings.vocab, Vocab)
+
         assert settings == reloaded_settings
+
+
+def test_create_invalid_pitch_augmentations_settings() -> None:
+    with pytest.raises(AssertionError):
+        # forbid zeros because they will lead to duplication
+        AnticipationV2Settings(
+            vocab=Vocab(),
+            augmentation_pitch_shifts=(
+                -1,
+                0,
+            ),
+        )
+    with pytest.raises(AssertionError):
+        # forbid out of bounds transpositions
+        AnticipationV2Settings(vocab=Vocab(), augmentation_pitch_shifts=(128,))
 
 
 def test_create_invalid_vocab() -> None:

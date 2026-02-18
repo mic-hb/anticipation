@@ -74,6 +74,10 @@ class Note:
         octave = (self.midi_note_int // 12) - 2
         return f"{self.NAMES[pitch_class]}{octave}"
 
+    @property
+    def name(self) -> str:
+        return self.to_name()
+
     def __int__(self) -> MIDINote:
         return self.midi_note_int
 

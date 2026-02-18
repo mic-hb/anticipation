@@ -122,8 +122,15 @@ class AnticipationV2Settings:
     # anticipation interval
     delta: int = 5
 
+    # new data augmentation styles in v2
+    augmentation_pitch_shifts: tuple[int, ...] = ()
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)  # noqa
+        settings = asdict(self)  # noqa
+        settings["augmentation_pitch_shifts"] = tuple(
+            settings["augmentation_pitch_shifts"]
+        )
+        return settings
 
     def _get_as_file(self) -> tuple[str, str]:
         """
@@ -160,8 +167,15 @@ class AnticipationV2Settings:
         assert md5 == get_md5_of_string(settings_str), "file integrity compromised."
 
         settings_parsed = loads(settings_str)
+        augmentation_pitch_shifts = tuple(
+            settings_parsed.pop("augmentation_pitch_shifts")
+        )
         v_str = settings_parsed.pop("vocab")
-        return AnticipationV2Settings(vocab=Vocab(**v_str), **settings_parsed)
+        return AnticipationV2Settings(
+            vocab=Vocab(**v_str),
+            augmentation_pitch_shifts=augmentation_pitch_shifts,
+            **settings_parsed,
+        )
 
     def __post_init__(self) -> None:
         # this runs after the constructor
@@ -190,3 +204,12 @@ class AnticipationV2Settings:
         assert v.SEPARATOR >= v.SPECIAL_OFFSET
         assert v.AUTOREGRESS > v.SEPARATOR
         assert v.ANTICIPATE > v.AUTOREGRESS
+
+        # ensure there's no 0s in this
+        assert 0 not in self.augmentation_pitch_shifts, (
+            "adding zero shift results in duplication"
+        )
+        # causes a strange type error, but we wouldn't want to do this
+        # extreme of a transposition anyway. Just check it here for faster
+        # failing.
+        assert all(abs(x) <= 127 for x in self.augmentation_pitch_shifts)

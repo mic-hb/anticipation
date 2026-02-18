@@ -57,7 +57,9 @@ def compound_to_events(
     return tokens, num_note_truncations
 
 
-def midi_to_compound(midifile: Path, settings: AnticipationV2Settings) -> list[int]:
+def midi_to_compound(
+    midifile: Path, settings: AnticipationV2Settings, pitch_transpose: int = 0
+) -> list[int]:
     time_resolution = settings.time_resolution
     try:
         # always have sanitize_data equal to true. Without it, symusic may segfault or crash
@@ -72,9 +74,22 @@ def midi_to_compound(midifile: Path, settings: AnticipationV2Settings) -> list[i
     compounds = []
     for track_idx, track in enumerate(score.tracks):
         instr = 128 if track.is_drum else track.program
-        # TODO: add augmentations
-        # https://yikai-liao.github.io/symusic/api_reference/score.html#modification-methods
-        # https://yikai-liao.github.io/symusic/api_reference/track.html#modification-methods
+
+        if not track.is_drum and pitch_transpose != 0:
+            # only shift the pitch if the instrument is not drums
+            # https://yikai-liao.github.io/symusic/api_reference/track.html#modification-methods
+            try:
+                track.shift_pitch(offset=pitch_transpose, inplace=True)
+            except ValueError as e:
+                # ValueError: Overflow while adding (x) and (offset)
+                raise SymusicRuntimeError(str(e))
+            except TypeError as e:
+                # throws a type error if abs(offset) > 127
+                raise SymusicRuntimeError(
+                    f"pitch_transpose is too large, got value: {pitch_transpose}. Recall that there are only 128 valid MIDI note values. Original exception from symusic: "
+                    + str(e)
+                )
+
         for note in track.notes:
             on_set_time_in_ticks = round(time_resolution * note.time)
             duration_time_in_ticks = round(time_resolution * note.duration)

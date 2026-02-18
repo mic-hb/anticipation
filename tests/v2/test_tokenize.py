@@ -14,7 +14,6 @@ from anticipation.v2.io import TokenSequenceBinaryFile
 from tests.util.entities import Event, EventSpecialCode, get_note_instrument_token, Note
 from tests.util.visualize_sequence import get_figure_and_open
 
-from anticipation.v2.config import DATASET_ROOT
 from tests.conftest import (
     VISUALIZATIONS_PATH,
 )
@@ -55,14 +54,7 @@ def lmd_0_example_1_tokens_and_parsed_events(
 
     num_total_separators = 0
     for i, packed_seq in enumerate(in_memory_tokens):
-        if i == 0:
-            # first sequence should have sample sep
-            assert packed_seq[0] == settings.vocab.SEPARATOR
-            assert packed_seq[1] == settings.vocab.AUTOREGRESS
-        else:
-            # all others should start with anticipation sample
-            assert packed_seq[0] == settings.vocab.AUTOREGRESS
-
+        assert packed_seq[0] == settings.vocab.AUTOREGRESS
         num_total_separators += len(
             [x for x in packed_seq if x == settings.vocab.SEPARATOR]
         )
@@ -136,13 +128,7 @@ def test_tokenize_v2_lakh_instrument_for_visualization(
     num_total_separators = 0
     for i, packed_seq in enumerate(instrument_anticipation_sample):
         assert len(packed_seq) == settings.context_size
-        if i == 0:
-            # first sequence should have sample sep
-            assert packed_seq[0] == settings.vocab.SEPARATOR
-            assert packed_seq[1] == settings.vocab.ANTICIPATE
-        else:
-            # all others should start with anticipation sample
-            assert packed_seq[0] == settings.vocab.ANTICIPATE
+        assert packed_seq[0] == settings.vocab.ANTICIPATE
 
         num_total_separators += len(
             [x for x in packed_seq if x == settings.vocab.SEPARATOR]
@@ -186,17 +172,11 @@ def test_tokenize_with_ticks_for_small_sequence_ar(
     num_total_separators = 0
     for i, packed_seq in enumerate(tokenized_seq):
         assert len(packed_seq) == settings.context_size
-        if i == 0:
-            # first sequence should have sample sep
-            assert packed_seq[0] == settings.vocab.SEPARATOR
-            assert packed_seq[1] == settings.vocab.AUTOREGRESS
-        else:
-            # all others should start with anticipation sample
-            assert packed_seq[0] == settings.vocab.AUTOREGRESS
-
+        assert packed_seq[0] == settings.vocab.AUTOREGRESS
         num_total_separators += len(
             [x for x in packed_seq if x == settings.vocab.SEPARATOR]
         )
+
     parsed_events = Event.from_token_seq(
         [x for b in tokenized_seq for x in b], settings
     )
@@ -234,14 +214,7 @@ def test_tokenize_with_ticks_for_lakh_ar(lmd_0_example_1_midi_path: Path) -> Non
     num_total_separators = 0
     for i, packed_seq in enumerate(tokenized_seq):
         assert len(packed_seq) == settings.context_size
-        if i == 0:
-            # first sequence should have sample sep
-            assert packed_seq[0] == settings.vocab.SEPARATOR
-            assert packed_seq[1] == settings.vocab.AUTOREGRESS
-        else:
-            # all others should start with anticipation sample
-            assert packed_seq[0] == settings.vocab.AUTOREGRESS
-
+        assert packed_seq[0] == settings.vocab.AUTOREGRESS
         num_total_separators += len(
             [x for x in packed_seq if x == settings.vocab.SEPARATOR]
         )
@@ -571,8 +544,8 @@ def test_sequence_boundaries_for_truncated_end_triple(c_major_midi_path: Path) -
     ]
     assert seq_0 == [
         # special
-        settings.vocab.SEPARATOR,
         settings.vocab.AUTOREGRESS,
+        settings.vocab.SEPARATOR,
         # tick
         settings.vocab.TICK,
         # event 0
@@ -725,3 +698,258 @@ def test_sequence_boundaries_for_truncated_end_triple(c_major_midi_path: Path) -
         path=(VISUALIZATIONS_PATH / "c_major_with_ticks.html"),
         auto_open=False,
     )
+
+
+def test_apply_pitch_augmentation(c_major_midi_path: Path) -> None:
+    settings = AnticipationV2Settings(
+        vocab=Vocab(),
+        debug=False,
+        debug_flush_remaining_token_buffer=True,
+        min_track_events=1,
+        min_track_time_in_seconds=1,
+        context_size=105,
+        num_autoregressive_seq_per_midi_file=1,
+        num_instrument_anticipation_augmentations_per_midi_file=0,
+        num_span_anticipation_augmentations_per_midi_file=0,
+        num_random_anticipation_augmentations_per_midi_file=0,
+        tick_token_frequency_in_midi_ticks=100,
+        # 3 tranpositions that will work, one that will fail - our implementation
+        # should be able to handle the one that pushes notes out of bounds - it
+        # should just ignore it
+        augmentation_pitch_shifts=(-3, -2, -1, 1, 2, 3, 127),
+    )
+    tokens_to = []
+    stats: TokenizationStatSummary = v2_tokenize(
+        [c_major_midi_path], output=tokens_to, settings=settings
+    )
+    assert stats.num_pitch_transpose_augmentations == 6
+    assert stats.num_times_end_triple_was_truncated == 0
+    assert len(tokens_to) == 7  # transpositions (-3, -2, -1, 0, 1, 2, 3)
+
+    # order here matters, it's the order in which augmentations took place
+    expected_note_names = [
+        [
+            "C1",
+            "D1",
+            "E1",
+            "F1",
+            "G1",
+            "A1",
+            "B1",
+            "C2",
+            "D2",
+            "E2",
+            "F2",
+            "G2",
+            "A2",
+            "B2",
+            "C3",
+            "D3",
+            "E3",
+            "F3",
+            "G3",
+            "A3",
+            "B3",
+            "C4",
+            "D4",
+            "E4",
+            "F4",
+            "G4",
+            "A4",
+            "B4",
+            "C5",
+        ],
+        [
+            "A0",
+            "B0",
+            "C#1",
+            "D1",
+            "E1",
+            "F#1",
+            "G#1",
+            "A1",
+            "B1",
+            "C#2",
+            "D2",
+            "E2",
+            "F#2",
+            "G#2",
+            "A2",
+            "B2",
+            "C#3",
+            "D3",
+            "E3",
+            "F#3",
+            "G#3",
+            "A3",
+            "B3",
+            "C#4",
+            "D4",
+            "E4",
+            "F#4",
+            "G#4",
+            "A4",
+        ],
+        [
+            "A#0",
+            "C1",
+            "D1",
+            "D#1",
+            "F1",
+            "G1",
+            "A1",
+            "A#1",
+            "C2",
+            "D2",
+            "D#2",
+            "F2",
+            "G2",
+            "A2",
+            "A#2",
+            "C3",
+            "D3",
+            "D#3",
+            "F3",
+            "G3",
+            "A3",
+            "A#3",
+            "C4",
+            "D4",
+            "D#4",
+            "F4",
+            "G4",
+            "A4",
+            "A#4",
+        ],
+        [
+            "B0",
+            "C#1",
+            "D#1",
+            "E1",
+            "F#1",
+            "G#1",
+            "A#1",
+            "B1",
+            "C#2",
+            "D#2",
+            "E2",
+            "F#2",
+            "G#2",
+            "A#2",
+            "B2",
+            "C#3",
+            "D#3",
+            "E3",
+            "F#3",
+            "G#3",
+            "A#3",
+            "B3",
+            "C#4",
+            "D#4",
+            "E4",
+            "F#4",
+            "G#4",
+            "A#4",
+            "B4",
+        ],
+        [
+            "C#1",
+            "D#1",
+            "F1",
+            "F#1",
+            "G#1",
+            "A#1",
+            "C2",
+            "C#2",
+            "D#2",
+            "F2",
+            "F#2",
+            "G#2",
+            "A#2",
+            "C3",
+            "C#3",
+            "D#3",
+            "F3",
+            "F#3",
+            "G#3",
+            "A#3",
+            "C4",
+            "C#4",
+            "D#4",
+            "F4",
+            "F#4",
+            "G#4",
+            "A#4",
+            "C5",
+            "C#5",
+        ],
+        [
+            "D1",
+            "E1",
+            "F#1",
+            "G1",
+            "A1",
+            "B1",
+            "C#2",
+            "D2",
+            "E2",
+            "F#2",
+            "G2",
+            "A2",
+            "B2",
+            "C#3",
+            "D3",
+            "E3",
+            "F#3",
+            "G3",
+            "A3",
+            "B3",
+            "C#4",
+            "D4",
+            "E4",
+            "F#4",
+            "G4",
+            "A4",
+            "B4",
+            "C#5",
+            "D5",
+        ],
+        [
+            "D#1",
+            "F1",
+            "G1",
+            "G#1",
+            "A#1",
+            "C2",
+            "D2",
+            "D#2",
+            "F2",
+            "G2",
+            "G#2",
+            "A#2",
+            "C3",
+            "D3",
+            "D#3",
+            "F3",
+            "G3",
+            "G#3",
+            "A#3",
+            "C4",
+            "D4",
+            "D#4",
+            "F4",
+            "G4",
+            "G#4",
+            "A#4",
+            "C5",
+            "D5",
+            "D#5",
+        ],
+    ]
+    for i, seq in enumerate(tokens_to):
+        assert len(seq) == settings.context_size
+        assert seq[0] == settings.vocab.AUTOREGRESS
+        assert seq[1] == settings.vocab.SEPARATOR
+        parsed_events = Event.from_token_seq(seq, settings)
+        notes = [x.note().name for x in parsed_events if x.is_note_event()]
+        assert notes == expected_note_names[i]

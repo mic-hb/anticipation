@@ -3,6 +3,7 @@ from typing import Optional, Iterable, Union, Iterator
 from collections import defaultdict
 from pathlib import Path
 from dataclasses import dataclass, fields
+from itertools import chain
 import warnings
 
 import numpy as np
@@ -29,13 +30,16 @@ from anticipation.v2.io import TokenSequenceBinaryFile
 
 
 def _maybe_tokenize(
-    my_midi_file: Path, settings: AnticipationV2Settings
+    my_midi_file: Path,
+    settings: AnticipationV2Settings,
+    pitch_transpose: int = 0,
 ) -> tuple[list[Token], int, Optional[MIDIFileIgnoredReason]]:
     try:
         # try to convert this file to compound 5-tuple representation
         compound_tokens: list[int] = midi_to_compound(
             my_midi_file,
             settings=settings,
+            pitch_transpose=pitch_transpose,
         )
     except SymusicRuntimeError as e:
         if "File header is not MThd" in str(e):
@@ -97,13 +101,15 @@ class TokenizedMIDIFileResult:
 
 
 def _tokenize_midi_file(
-    my_midi_file: Path, settings: AnticipationV2Settings
+    my_midi_file: Path,
+    settings: AnticipationV2Settings,
+    pitch_transpose: int = 0,
 ) -> TokenizedMIDIFileResult:
     assert isinstance(my_midi_file, Path)
 
     # now we are tokenizing the MIDI, using several tokens from our settings
     all_events, num_note_truncations, reason_ignored = _maybe_tokenize(
-        my_midi_file, settings
+        my_midi_file, settings, pitch_transpose
     )
 
     all_midi_program_codes = []
@@ -136,6 +142,7 @@ class TokenizationStatSummary:
     num_anticipate_tokens: int
     num_lost_tokens_left_in_buffer: int
     num_truncations_before_augmentation: int
+    num_pitch_transpose_augmentations: int
     total_time_in_midi_ticks_before_augmentation: int
     total_time_in_midi_ticks: int
     ignored_files: dict[MIDIFileIgnoredReason, list[Path]]
@@ -180,6 +187,7 @@ class SequencePacker:
             raise TypeError("Must have path or list as target.")
 
         self._target: Union[list, TokenSequenceBinaryFile]
+        self._most_recent_control_prefix = ()
 
         # stats
         self._total_seq_written = 0
@@ -204,33 +212,37 @@ class SequencePacker:
 
     def write_sequences(self) -> None:
         for control_prefix, iter_curr_tokens in self._iterator_queue:
-            to_add = [self._settings.vocab.SEPARATOR, *control_prefix]
+            # this is whatever should be between two distinct files in the dataset
+            punctuation = (self._settings.vocab.SEPARATOR,)
 
-            self._buf += to_add
-            for next_elem in iter_curr_tokens:
-                if (
-                    len(self._buf) != self._settings.context_size
-                    and len(self._buf) + len(next_elem) > self._settings.context_size
-                ):
-                    # adding the next element would split a note down the
-                    # middle between sequences...
-                    self._buf += next_elem
+            # the context size, but with enough room to always prepend the control
+            # at the very start of the sequence
+            n = self._settings.context_size - len(control_prefix)
 
-                    # truncate it... but we still have it in next_elem,
-                    # it will start the next seq, sequence is surely
-                    # exactly context size now
-                    self._buf = self._buf[: self._settings.context_size]
-                    self._total_times_end_triple_was_truncated += 1
-
-                if len(self._buf) == self._settings.context_size:
-                    # write sequence
-                    self._write_seq(self._buf)
-
-                    # reset the buffer
-                    self._buf = [*control_prefix]
-
+            for next_elem in chain([punctuation], iter_curr_tokens):
                 # continue accumulating
                 self._buf += list(next_elem)
+
+                if len(self._buf) >= n:
+                    # we have enough tokens to write a sequence
+                    last_tuple_truncated = False
+                    if len(self._buf) > n:
+                        last_tuple_truncated = True
+                        self._total_times_end_triple_was_truncated += 1
+
+                    # truncate the last group of tokens and write
+                    self._buf = self._buf[:n]
+                    self._write_seq([*control_prefix] + self._buf)
+
+                    # if the last token was truncated start the buffer with
+                    # that token which was truncated, otherwise it's empty
+                    if last_tuple_truncated:
+                        self._buf = [*next_elem]
+                    else:
+                        self._buf = []
+
+            # I dislike that I have done this :( there's definitely a better way
+            self._most_recent_control_prefix = control_prefix
 
         # clear everything out
         self._iterator_queue = []
@@ -255,14 +267,11 @@ class SequencePacker:
         self._target.append(local_copy)
 
     def close(self) -> dict[str, int]:
-        if self._settings.debug_flush_remaining_token_buffer:
-            self._write_seq(self._buf)
+        if self._settings.debug_flush_remaining_token_buffer and self._buf:
+            self._write_seq([*self._most_recent_control_prefix] + self._buf)
             self._buf = []
 
         num_lost_tokens_left_in_buffer = len(self._buf)
-        if self._settings.debug:
-            print(f"Token buffer had remaining: {num_lost_tokens_left_in_buffer}")
-
         if not isinstance(self._target, list):
             self._target.close()
 
@@ -324,6 +333,7 @@ def tokenize(
     total_time_in_midi_ticks_before_augmentation = 0
     num_tokenized_files = 0
     num_given_files = 0
+    num_pitch_transpose_augmentations = 0
     ignored_files: dict[MIDIFileIgnoredReason, list[Path]] = defaultdict(list)
     # -----
 
@@ -351,12 +361,30 @@ def tokenize(
         # actually tokenize and pack the sequences
         _make_sequences(result, buf, settings)
 
+        # transpose the original file, now that we know it passes criteria for including
+        for transposition_offset in settings.augmentation_pitch_shifts:
+            try:
+                result: TokenizedMIDIFileResult = _tokenize_midi_file(
+                    midi_file, settings, transposition_offset
+                )
+            except SymusicRuntimeError as e:
+                if "Overflow while adding" in str(e):
+                    # transposition goes out of range
+                    continue
+                else:
+                    raise e
+
+            # using the transposed notes, do more augmentations
+            _make_sequences(result, buf, settings)
+            num_pitch_transpose_augmentations += 1
+
     # close files if necessary
     buf_stats = buf.close()
 
     # return any stats, cast to regular dictionary for safety
     return TokenizationStatSummary(
         num_given_files=num_given_files,
+        num_pitch_transpose_augmentations=num_pitch_transpose_augmentations,
         num_tokenized_files=num_tokenized_files,
         ignored_files=dict(ignored_files),
         num_truncations_before_augmentation=num_truncations_before_augmentation,
