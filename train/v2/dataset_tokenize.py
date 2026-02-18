@@ -15,6 +15,7 @@ from anticipation.v2.config import (
     CONFIG_ROOT,
     LAKH_MIDI_FULL_PATH,
     TOKENIZED_DATASETS_SAVE_TO_PATH,
+    DATASET_ROOT,
 )
 from anticipation.v2.tokenize import (
     tokenize,
@@ -356,21 +357,21 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
 
     # TODO: do argparse thing
-    ar_only_settings = (
-        CONFIG_ROOT
-        / "ar_only_local_midi_settings_b1f4b64911a603018ed67a154db6fb16.json"
-    )
-    ar_only_settings_with_no_instr_limit = (
-        CONFIG_ROOT
-        / "ar_only_local_midi_no_instr_limit_settings_b6b807961c44ab1e0eb7f9a900182af0.json"
-    )
-
-    # tokenize_data_at_path = Path("/Users/admin/Documents/RESEARCH/anticipation_v2/anticipation/data/lmd_full")
-    tokenize_data_at_path = Path(
-        "/Users/admin/Documents/RESEARCH/anticipation_v2/anticipation/data/transcripts"
-    )
+    configs = {
+        "lakh": {
+            "settings": CONFIG_ROOT
+            / "ar_only_local_midi_settings_b82a7a2750e3c5836ffb9bf564720cd8.json",
+            "raw_data_enclosing_path": DATASET_ROOT / "lmd_full",
+        },
+        "transcripts": {
+            "settings": CONFIG_ROOT
+            / "ar_only_local_midi_no_instr_limit_settings_87451b329323d36a658ac64ed9a8bb81",
+            "raw_data_enclosing_path": DATASET_ROOT / "transcripts",
+        },
+    }
+    dataset_choice = configs["lakh"]
     main(
-        settings_path=ar_only_settings_with_no_instr_limit,
+        settings_path=dataset_choice["settings"],
         put_shards_in_tmp=True,
-        raw_data_enclosing_path=tokenize_data_at_path,
+        raw_data_enclosing_path=dataset_choice["raw_data_enclosing_path"],
     )

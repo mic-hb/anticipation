@@ -1,4 +1,5 @@
 {
+    "augmentation_pitch_shifts": [],
     "compound_size": 5,
     "context_size": 1024,
     "debug": false,
@@ -9,7 +10,7 @@
     "max_midi_instrument": 129,
     "max_midi_pitch": 128,
     "max_note_duration_in_seconds": 10,
-    "max_track_instruments": 16,
+    "max_track_instruments": 129,
     "max_track_time_in_seconds": 3600,
     "min_track_events": 100,
     "min_track_time_in_seconds": 10,

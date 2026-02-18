@@ -251,4 +251,6 @@ def local_midi_settings_ar_only(local_midi_vocab: Vocab) -> AnticipationV2Settin
         vocab=local_midi_vocab,
         tick_token_frequency_in_midi_ticks=100,
         num_workers_in_dataset_construction=10,
+        # toggle for cap on instruments
+        # max_track_instruments=129,
     )
