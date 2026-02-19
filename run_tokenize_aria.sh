@@ -4,7 +4,7 @@
 #SBATCH -n 1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=50GB
-#SBATCH -t 05:00:00
+#SBATCH -t 20:00:00
 #SBATCH -J tokenize_dataset_aria
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out

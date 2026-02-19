@@ -393,7 +393,7 @@ if __name__ == "__main__":
             "raw_data_enclosing_path": DATASET_ROOT / "aria-midi-v1-pruned-ext",
         },
     }
-    dataset_choice = configs["transcripts"]
+    dataset_choice = configs[args.dataset_type]
     main(
         settings_path=dataset_choice["settings"],
         put_shards_in_tmp=True,
