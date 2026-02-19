@@ -1,3 +1,5 @@
+import os
+import argparse
 import csv
 import math
 from pathlib import Path
@@ -5,7 +7,6 @@ from typing import Iterable, Any, Union
 from functools import partial
 from json import dumps
 import multiprocessing as mp
-import tempfile
 
 import numpy as np
 from tqdm.contrib.concurrent import process_map
@@ -164,6 +165,7 @@ def _get_lakh_midi_splits_and_configs(
         {
             "name": "test",
             "dataset_paths": lmd_test,
+            # TODO: implement this!
             "do_shuffle": False,
         },
     ]
@@ -354,13 +356,25 @@ def main(
     )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Dataset Tokenization Script")
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="lakh",
+        choices=["lakh", "aria", "transcripts"],
+        help=(
+            "Which dataset to tokenize. These are expected to be in specific locations in the ./data/ folder"
+        ),
+    )
+    args = parser.parse_args()
+    return args
+
+
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
-    import os
+    args = parse_args()
 
-    print("Custom Temporary Directory: ", os.environ.get("CUSTOM_TMP_DIR"))
-
-    # TODO: do argparse thing
     configs = {
         "lakh": {
             "settings": CONFIG_ROOT
@@ -371,6 +385,12 @@ if __name__ == "__main__":
             "settings": CONFIG_ROOT
             / "ar_only_local_midi_no_instr_limit_settings_87451b329323d36a658ac64ed9a8bb81.json",
             "raw_data_enclosing_path": DATASET_ROOT / "transcripts",
+        },
+        "aria": {
+            # can use the same config as local lakh
+            "settings": CONFIG_ROOT
+            / "ar_only_local_midi_settings_b82a7a2750e3c5836ffb9bf564720cd8.json",
+            "raw_data_enclosing_path": DATASET_ROOT / "aria-midi-v1-pruned-ext",
         },
     }
     dataset_choice = configs["transcripts"]

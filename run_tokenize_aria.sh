@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=50GB
 #SBATCH -t 05:00:00
-#SBATCH -J tokenize_dataset_transcripts
+#SBATCH -J tokenize_dataset_aria
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
@@ -26,4 +26,4 @@ fi
 export CUSTOM_TMP_DIR=/scratch/$USER
 mkdir -p "$CUSTOM_TMP_DIR"
 
-PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type transcripts
+PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type aria
