@@ -298,6 +298,7 @@ def tokenize(
     output: Union[list, Path],
     settings: AnticipationV2Settings,
     shard_id: int = -1,
+    is_training_split: bool = True,
 ) -> TokenizationStatSummary:
     """Tokenizes MIDI for v2 Anticipatory Training
 
@@ -361,22 +362,23 @@ def tokenize(
         # actually tokenize and pack the sequences
         _make_sequences(result, buf, settings)
 
-        # transpose the original file, now that we know it passes criteria for including
-        for transposition_offset in settings.augmentation_pitch_shifts:
-            try:
-                result: TokenizedMIDIFileResult = _tokenize_midi_file(
-                    midi_file, settings, transposition_offset
-                )
-            except SymusicRuntimeError as e:
-                if "Overflow while adding" in str(e):
-                    # transposition goes out of range
-                    continue
-                else:
-                    raise e
+        if is_training_split:
+            # transpose the original file, now that we know it passes criteria for including
+            for transposition_offset in settings.augmentation_pitch_shifts:
+                try:
+                    result: TokenizedMIDIFileResult = _tokenize_midi_file(
+                        midi_file, settings, transposition_offset
+                    )
+                except SymusicRuntimeError as e:
+                    if "Overflow while adding" in str(e):
+                        # transposition goes out of range
+                        continue
+                    else:
+                        raise e
 
-            # using the transposed notes, do more augmentations
-            _make_sequences(result, buf, settings)
-            num_pitch_transpose_augmentations += 1
+                # using the transposed notes, do more augmentations
+                _make_sequences(result, buf, settings)
+                num_pitch_transpose_augmentations += 1
 
     # close files if necessary
     buf_stats = buf.close()
