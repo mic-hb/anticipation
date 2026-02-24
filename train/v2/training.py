@@ -1,5 +1,4 @@
 import torchmetrics
-import math
 import os, time
 import argparse
 from pathlib import Path
@@ -59,6 +58,7 @@ class PreTokenizedDataset(Dataset):
             "labels": labels,
         }
 
+
 class TokenPerplexity(torchmetrics.Metric):
     full_state_update = False
 
@@ -87,6 +87,7 @@ class TokenPerplexity(torchmetrics.Metric):
         mean_nll = self.nll_sum / self.tok_sum.clamp_min(1.0)
         return torch.exp(mean_nll.clamp(max=50.0))
 
+
 class ApproxBPS(torchmetrics.Metric):
     full_state_update = False
 
@@ -96,7 +97,9 @@ class ApproxBPS(torchmetrics.Metric):
         self.add_state("num_tokens", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("seconds_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
 
-    def update(self, loss_sum: torch.Tensor, num_seconds: float, num_tokens: int) -> None:
+    def update(
+        self, loss_sum: torch.Tensor, num_seconds: float, num_tokens: int
+    ) -> None:
         loss_sum = loss_sum.detach()
 
         # Convert int -> tensor on correct device/dtype
@@ -120,8 +123,9 @@ class ApproxBPS(torchmetrics.Metric):
 
     def compute(self):
         mean_nll = self.nll_sum / self.num_tokens.clamp_min(1.0)
-        approx_bps  = mean_nll * np.log2(np.e) * (self.num_tokens / self.seconds_sum)
+        approx_bps = mean_nll * np.log2(np.e) * (self.num_tokens / self.seconds_sum)
         return approx_bps
+
 
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
@@ -215,14 +219,13 @@ class GPT2LightningModule(pl.LightningModule):
                 shift_logits.reshape(-1, shift_logits.size(-1)),
                 targets.reshape(-1),
                 reduction="none",
-            ).view_as(targets) # [bs, L-1]
-
+            ).view_as(targets)  # [bs, L-1]
 
             # we don't really care about loss on the controls since we put those in ourselves
             controls = (
-                (targets == v.SEPARATOR) |
-                (targets == v.ANTICIPATE) |
-                (targets == v.AUTOREGRESS)
+                (targets == v.SEPARATOR)
+                | (targets == v.ANTICIPATE)
+                | (targets == v.AUTOREGRESS)
             )
 
             # exclude the controls form overall perplexity
@@ -232,41 +235,46 @@ class GPT2LightningModule(pl.LightningModule):
             self.ppl.update(loss_sum=total_loss_sum, n_tokens=total_tokens)
             self.log("ppl", self.ppl, on_epoch=True, prog_bar=True, sync_dist=True)
 
-            ticks = (targets == v.TICK)
+            ticks = targets == v.TICK
             tick_mask = ticks
             num_ticks = tick_mask.sum()
 
             num_seconds_approx = (
-                num_ticks * self.anticipation_settings.tick_token_frequency_in_midi_ticks
+                num_ticks
+                * self.anticipation_settings.tick_token_frequency_in_midi_ticks
             ) / self.anticipation_settings.time_resolution
             self.approx_bps.update(
                 loss_sum=total_loss_sum,
                 num_seconds=num_seconds_approx,
                 num_tokens=total_tokens,
             )
-            self.log("approx_bps", self.approx_bps, on_epoch=True, prog_bar=True, sync_dist=True)
-
+            self.log(
+                "approx_bps",
+                self.approx_bps,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
 
             # events are everything that isn't a control and isn't a tick
             events = (~controls) & (~ticks)
 
             # Event index within each sequence: 0,1,2,... for event positions
             # (non-event positions will have junk values, but we always AND with `events`)
-            event_idx = torch.cumsum(events.to(torch.int64), dim=1) - 1   # [bs, L-1]
+            event_idx = torch.cumsum(events.to(torch.int64), dim=1) - 1  # [bs, L-1]
 
             # How many event tokens per sequence, and how many to keep (truncate tail to multiple of 3)
-            n_event_tokens = events.sum(dim=1).to(torch.int64)            # [bs]
-            n_keep_tokens = (n_event_tokens // 3) * 3                     # [bs]  multiple of 3
-            n_events = (n_keep_tokens // 3)                               # [bs]  number of triples/events
+            n_event_tokens = events.sum(dim=1).to(torch.int64)  # [bs]
+            n_keep_tokens = (n_event_tokens // 3) * 3  # [bs]  multiple of 3
+            n_events = n_keep_tokens // 3  # [bs]  number of triples/events
             num_events_total = n_events.sum()
 
             # Keep only event tokens that are within the kept prefix (drops incomplete last triple per seq)
-            keep_events = events & (event_idx < n_keep_tokens.unsqueeze(1))     # [bs, L-1]
+            keep_events = events & (event_idx < n_keep_tokens.unsqueeze(1))  # [bs, L-1]
 
             onsets = keep_events & ((event_idx % 3) == 0)
             durs = keep_events & ((event_idx % 3) == 1)
             note_instrs = keep_events & ((event_idx % 3) == 2)
-
 
             event_loss_sum = per_tok_ce[keep_events].sum()
             event_token_count = keep_events.sum()
@@ -278,113 +286,81 @@ class GPT2LightningModule(pl.LightningModule):
 
             # does not include the tick
             self.event_ppl.update(loss_sum=event_loss_sum, n_tokens=event_token_count)
-            self.log("event_ppl", self.event_ppl, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log(
+                "event_ppl",
+                self.event_ppl,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
 
             # each part of the triple (time, duration, note x instrument)
             # both with and without the CE contributed by the tick
-            self.onset_ppl.update(loss_sum=(onset_loss_sum + tick_loss_sum), n_tokens=num_events_total)
-            self.log("onset_ppl", self.onset_ppl, on_epoch=True, prog_bar=True, sync_dist=True)
-            self.onset_ppl_no_ticks.update(loss_sum=onset_loss_sum, n_tokens=num_events_total)
-            self.log("onset_ppl_no_ticks", self.onset_ppl_no_ticks, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.onset_ppl.update(
+                loss_sum=(onset_loss_sum + tick_loss_sum), n_tokens=num_events_total
+            )
+            self.log(
+                "onset_ppl",
+                self.onset_ppl,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
+            self.onset_ppl_no_ticks.update(
+                loss_sum=onset_loss_sum, n_tokens=num_events_total
+            )
+            self.log(
+                "onset_ppl_no_ticks",
+                self.onset_ppl_no_ticks,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
 
-            self.dur_ppl.update(loss_sum=(dur_loss_sum + tick_loss_sum), n_tokens=num_events_total)
-            self.log("dur_ppl", self.dur_ppl, on_epoch=True, prog_bar=True, sync_dist=True)
-            self.dur_ppl_no_ticks.update(loss_sum=dur_loss_sum, n_tokens=num_events_total)
-            self.log("dur_ppl_no_ticks", self.dur_ppl_no_ticks, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.dur_ppl.update(
+                loss_sum=(dur_loss_sum + tick_loss_sum), n_tokens=num_events_total
+            )
+            self.log(
+                "dur_ppl", self.dur_ppl, on_epoch=True, prog_bar=True, sync_dist=True
+            )
+            self.dur_ppl_no_ticks.update(
+                loss_sum=dur_loss_sum, n_tokens=num_events_total
+            )
+            self.log(
+                "dur_ppl_no_ticks",
+                self.dur_ppl_no_ticks,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
 
-            self.note_instr_ppl.update(loss_sum=(note_instr_loss_sum + tick_loss_sum), n_tokens=num_events_total)
-            self.log("note_instr_ppl", self.note_instr_ppl, on_epoch=True, prog_bar=True, sync_dist=True)
-            self.note_instr_ppl_no_ticks.update(loss_sum=note_instr_loss_sum, n_tokens=num_events_total)
-            self.log("note_instr_ppl_no_ticks", self.note_instr_ppl_no_ticks, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.note_instr_ppl.update(
+                loss_sum=(note_instr_loss_sum + tick_loss_sum),
+                n_tokens=num_events_total,
+            )
+            self.log(
+                "note_instr_ppl",
+                self.note_instr_ppl,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
+            self.note_instr_ppl_no_ticks.update(
+                loss_sum=note_instr_loss_sum, n_tokens=num_events_total
+            )
+            self.log(
+                "note_instr_ppl_no_ticks",
+                self.note_instr_ppl_no_ticks,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
 
             self.tick_ppl.update(loss_sum=tick_loss_sum, n_tokens=num_ticks)
-            self.log("tick_ppl", self.tick_ppl, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log(
+                "tick_ppl", self.tick_ppl, on_epoch=True, prog_bar=True, sync_dist=True
+            )
 
-
-        """
-        # in validation_step the model is in inference mode and no gradients are computed
-        # ...
-        # (bs, seq_len)
-        ce = torch.empty(0).cpu()
-        ce_ticks = torch.empty(0).cpu()
-        ce_events = torch.empty(0).cpu()
-        v = self.anticipation_settings.vocab
-        tokens = batch['input_ids']
-        for seq in tokens:
-            # for this token sequence, need to find the point where the first
-            # event triple happens
-            seq = seq.unsqueeze(0)
-
-            with torch.no_grad():
-                # (s, vocab)
-                logits = self(input_ids=seq).logits[0]
-
-                # per token nll
-                targets = seq[0,1:]
-                curr_ce = F.cross_entropy(logits[:-1],targets,reduction='none')
-
-                # do not measure for controls, those are given by us
-                controls = (
-                    (targets == v.SEPARATOR) |
-                    (targets == v.ANTICIPATE) |
-                    (targets == v.AUTOREGRESS)
-                )
-
-                # isolate the tick cross entropy
-                ticks = (targets == v.TICK)
-                tick_ce = curr_ce[ticks]
-
-                # anything that is not a tick and is not a control is a triple
-                event_ce = curr_ce[(~ticks) & (~controls)]
-                if event_ce.shape[0] % 3 != 0:
-                    # truncate incomplete remaining triple if needed
-                    event_ce = event_ce[:-1 * (event_ce.shape[0] % 3)]
-
-                assert event_ce.shape[0] % 3 == 0
-
-                ce = torch.cat([ce, curr_ce.cpu()]) # everything
-                ce_events = torch.cat([ce_events, event_ce.cpu()]) # triples
-                ce_ticks = torch.cat([ce_ticks, tick_ce.cpu()]) # ticks
-
-        self.event_ppl.update(
-            loss_sum=ce_events.sum(),
-            n_tokens=ce_events.shape[0],
-        )
-        self.log("event_ppl", self.event_ppl, on_epoch=True, prog_bar=True, sync_dist=True)
-
-        # consider the total log loss of onsets and ticks, average over number
-        # of events
-        num_events = ce_events.shape[0] // 3
-        self.onset_ppl.update(
-            loss_sum=(ce_events[0::3].sum() + ce_ticks.sum()),
-            n_tokens=num_events,
-        )
-        self.log("onset_ppl", self.onset_ppl, on_epoch=True, prog_bar=True, sync_dist=True)
-
-        num_ticks = ce_ticks.shape[0]
-        self.tick_ppl.update(
-            loss_sum=ce_ticks.sum(),
-            n_tokens=num_ticks,
-        )
-        self.log("tick_ppl", self.tick_ppl, on_epoch=True, prog_bar=True, sync_dist=True)
-
-        self.onset_ppl_no_ticks.update(
-            loss_sum = ce_events[0::3].sum(),
-            n_tokens = num_events,
-        )
-        self.log("onset_ppl_no_ticks", self.onset_ppl_no_ticks, on_epoch=True, prog_bar=True, sync_dist=True)
-
-        num_seconds_approx = (
-            num_ticks * self.anticipation_settings.tick_token_frequency_in_midi_ticks
-        ) / self.anticipation_settings.time_resolution
-
-        self.approx_bps.update(
-            loss_sum = ce_events.sum(),
-            num_seconds = num_seconds_approx,
-            num_tokens = ce_events.shape[0],
-        )
-        self.log("approx_bps", self.approx_bps, on_epoch=True, prog_bar=True, sync_dist=True)
-        """
         return loss
 
     def configure_optimizers(self):
@@ -532,7 +508,8 @@ def main(args: argparse.Namespace) -> None:
     model = GPT2LightningModule(
         data_dir=tokenized_dataset_path,
         settings=settings,
-        detailed_eval_every_k_steps=args.do_detailed_metrics_every_k_evals * args.steps_per_eval,
+        detailed_eval_every_k_steps=args.do_detailed_metrics_every_k_evals
+        * args.steps_per_eval,
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
