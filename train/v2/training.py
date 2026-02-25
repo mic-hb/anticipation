@@ -21,9 +21,9 @@ from pytorch_lightning.utilities import rank_zero_info
 from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
 from anticipation.v2.config import AnticipationV2Settings
-from train.v2.metrics import TokenPerplexity, ApproxBPS
-from train.v2.dataset import PreTokenizedDataset
-from train.v2.logging import GenerateSamplesOnValEnd, SampleConfig, MaxStepProgressBar
+from train.v2.custom_metrics import TokenPerplexity, ApproxBPS
+from train.v2.dataset_utils import PreTokenizedDataset
+from train.v2.logging_utils import GenerateSamplesOnValEnd, SampleConfig, MaxStepProgressBar
 
 
 class GPT2LightningModule(pl.LightningModule):
