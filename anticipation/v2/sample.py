@@ -18,6 +18,9 @@ def safe_logits(
     )  # don't generate controls
     logits[v.SPECIAL_OFFSET :] = -float("inf")  # don't generate special tokens
 
+    # forbid the tick token
+    logits[v.TICK] = -float("inf")
+
     # don't generate stuff in the wrong time slot
     if idx % 3 == 0:
         # ensure offset generated
@@ -25,11 +28,11 @@ def safe_logits(
         logits[v.NOTE_OFFSET : v.NOTE_OFFSET + settings.max_note] = -float("inf")
     elif idx % 3 == 1:
         # ensure duration generated
-        logits[v.TIME_OFFSET : v.TIME_OFFSET + settings.max_time] = -float("inf")
+        logits[v.TIME_OFFSET : v.TIME_OFFSET + settings.tick_token_frequency_in_midi_ticks] = -float("inf")
         logits[v.NOTE_OFFSET : v.NOTE_OFFSET + settings.max_note] = -float("inf")
     elif idx % 3 == 2:
         # ensure note generated
-        logits[v.TIME_OFFSET : v.TIME_OFFSET + settings.max_time] = -float("inf")
+        logits[v.TIME_OFFSET : v.TIME_OFFSET + settings.tick_token_frequency_in_midi_ticks] = -float("inf")
         logits[v.DUR_OFFSET : v.DUR_OFFSET + settings.max_dur] = -float("inf")
 
     return logits
@@ -78,6 +81,7 @@ def instr_logits(
     logits: torch.Tensor, full_history, settings: AnticipationV2Settings
 ) -> torch.Tensor:
     """don't sample more than 16 instruments"""
+    # TODO: implement this for tuples + ticks
     instrs = v1_ops.get_instruments(full_history)
     if len(instrs) < 15:  # 16 - 1 to account for the reserved drum track
         return logits
@@ -92,6 +96,19 @@ def instr_logits(
 
     return logits
 
+def check_probs(probs):
+    if not torch.isfinite(probs).all():
+        bad = (~torch.isfinite(probs)).nonzero()
+        raise RuntimeError(f"Non-finite probs")
+
+    if (probs < 0).any():
+        bad = (probs < 0).nonzero()
+        raise RuntimeError(f"Negative probs at")
+
+    row_sums = probs.sum(dim=-1)
+    if (row_sums == 0).any():
+        raise RuntimeError(f"Zero-sum prob row at step")
+
 
 def add_token(
     model,
@@ -101,8 +118,6 @@ def add_token(
     current_time: int,
     settings: AnticipationV2Settings,
 ) -> tuple[Token, ...]:
-    assert len(tokens) % 3 == 0
-
     tmp = tokens.copy()
     unwrapped_tokens = [x for b in tmp for x in b]
 
@@ -139,8 +154,8 @@ def add_token(
                     logits = instr_logits(logits, tokens, settings)
 
                 logits = nucleus(logits, top_p)
-
                 probs = F.softmax(logits, dim=-1)
+                check_probs(probs)
                 token = torch.multinomial(probs, 1)
                 new_token.append(int(token))
 
@@ -162,7 +177,10 @@ def tick_tokens_to_abs_time(
         else:
             # this is a triple
             rel_time, dur, note_instr = event
+            rel_time -= settings.vocab.TIME_OFFSET
             cur_time += rel_time
+            dur -= settings.vocab.DUR_OFFSET
+            note_instr -= settings.vocab.NOTE_OFFSET
             abs_triples.extend([cur_time, dur, note_instr])
 
     return abs_triples
@@ -200,8 +218,8 @@ def generate_ar_simple(
             new_onset, new_dur, new_note_isntr = new_event
             new_token_rel_time = new_onset - settings.vocab.TIME_OFFSET
             current_time += new_token_rel_time
+            tokens.append(new_event)
 
-        tokens.append(new_event)
 
     # need to un-relativize
     tokens = tick_tokens_to_abs_time(tokens, settings)

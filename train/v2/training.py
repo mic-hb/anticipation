@@ -1,8 +1,14 @@
+from __future__ import annotations
 import torchmetrics
 import os, time
 import argparse
 from pathlib import Path
 import warnings
+from dataclasses import dataclass
+from typing import Optional, Callable, Any
+
+import pytorch_lightning as pl
+import torch
 
 import numpy as np
 import torch
@@ -26,6 +32,7 @@ from pytorch_lightning.utilities import rank_zero_info
 from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
 from anticipation.v2.config import AnticipationV2Settings
+from anticipation.v2.sample import generate_ar_simple
 
 
 class PreTokenizedDataset(Dataset):
@@ -126,6 +133,90 @@ class ApproxBPS(torchmetrics.Metric):
         approx_bps = mean_nll * np.log2(np.e) * (self.num_tokens / self.seconds_sum)
         return approx_bps
 
+def log_bytes_at_step(run: wandb.sdk.wandb_run.Run, data: bytes, step: int):
+    art = wandb.Artifact(name=f"payload-step-{step:08d}", type="custom")
+    buffer = io.BytesIO(data)
+    art.add_file(buffer, name="midi_step_{step:08d}.mid")
+
+    run.log_artifact(art, aliases=[f"step-{step}", "latest"])
+
+    run.log(
+        {
+            "payload/artifact_name": art.name,
+        },
+        step=step,
+    )
+
+
+@dataclass
+class SampleConfig:
+    every_n_steps: int = 500          # cadence in optimizer steps
+    start_step: int = 5_000           # don't run before this
+    num_events_to_generate: int = 100
+    top_p: float = 1.0
+    max_new_tokens: int = 128
+    log_tag: str = "samples"
+
+
+class GenerateSamplesOnValEnd(pl.Callback):
+    def __init__(
+        self,
+        cfg: SampleConfig,
+        *,
+        prompt_fn: Optional[Callable[[pl.LightningModule], Any]] = None,
+    ):
+        self.cfg = cfg
+        self.prompt_fn = prompt_fn  # optional: build prompts from the module/config
+
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        # Only once globally in DDP
+        if not trainer.is_global_zero:
+            return
+        if trainer.sanity_checking:
+            return
+
+        step = trainer.global_step
+        if step < self.cfg.start_step:
+            return
+        if step == 0 or (step % self.cfg.every_n_steps) != 0:
+            return
+
+        # Build prompts / conditioning input
+        prompts = self.prompt_fn(pl_module) if self.prompt_fn else None
+
+        pl_module.eval()
+        with torch.no_grad():
+            sample = self._generate(pl_module, prompts)
+
+        # Log however you like (W&B shown as an example)
+        self._log_samples(trainer, sample, step)
+
+    def _generate(self, pl_module: pl.LightningModule, prompts) -> bytes:
+        model = getattr(pl_module, "model", pl_module)
+        settings = getattr(pl_module, "anticipation_settings", None)
+        assert settings
+
+        # use our simple autoregressive generation function to
+        # get a small midi file
+        midi_file = generate_ar_simple(
+            model,
+            settings,
+            num_events_to_generate=self.cfg.num_events_to_generate,
+            top_p=self.cfg.top_p
+        )
+        bytes_io = io.BytesIO()
+        midi_file.save(file=bytes_io)
+        return bytes_io.getvalue()
+
+    def _log_samples(self, trainer: pl.Trainer, sample, step: int) -> None:
+        logger = trainer.logger
+        if logger is None:
+            return
+
+        log_bytes_on_step(logger.experiment, samples, step)
+
+        # Fallback: log as text blobs if logger supports it
+        #logger.log_metrics({f"{self.cfg.log_tag}/0": samples[0]}, step=step)
 
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
@@ -549,6 +640,7 @@ def main(args: argparse.Namespace) -> None:
             checkpoint_callback,
             LearningRateMonitor(logging_interval="step"),
             MaxStepProgressBar(),
+            GenerateSamplesOnValEnd(SampleConfig(every_n_steps=1, start_step=1)),
         ],
         enable_progress_bar=True,
         precision="bf16-mixed" if args.bf16 else 32,
