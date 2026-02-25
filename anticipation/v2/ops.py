@@ -10,6 +10,26 @@ from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import Token
 
 
+def get_instruments(
+    tokens: list[Token], settings: AnticipationV2Settings
+) -> dict[int, int]:
+    instruments = defaultdict(int)
+    for time, dur, note in zip(tokens[0::3], tokens[1::3], tokens[2::3]):
+        if note >= settings.vocab.SPECIAL_OFFSET:
+            continue
+
+        if note < settings.vocab.CONTROL_OFFSET:
+            note -= settings.vocab.NOTE_OFFSET
+        else:
+            note -= settings.vocab.ANOTE_OFFSET
+
+        instr = note // 2**7
+        instruments[instr] += 1
+
+    # (instrument type, num instances)
+    return dict(instruments)
+
+
 def get_punctuation_tokens_idx(
     tokens: list[Token], settings: AnticipationV2Settings
 ) -> dict[str, int]:

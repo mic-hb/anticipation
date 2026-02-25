@@ -6,7 +6,7 @@ import mido
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import Token
 from anticipation.v2.convert import compound_to_midi
-from anticipation import ops as v1_ops
+from anticipation.v2 import ops as v2_ops
 
 
 def safe_logits(
@@ -28,11 +28,15 @@ def safe_logits(
         logits[v.NOTE_OFFSET : v.NOTE_OFFSET + settings.max_note] = -float("inf")
     elif idx % 3 == 1:
         # ensure duration generated
-        logits[v.TIME_OFFSET : v.TIME_OFFSET + settings.tick_token_frequency_in_midi_ticks] = -float("inf")
+        logits[
+            v.TIME_OFFSET : v.TIME_OFFSET + settings.tick_token_frequency_in_midi_ticks
+        ] = -float("inf")
         logits[v.NOTE_OFFSET : v.NOTE_OFFSET + settings.max_note] = -float("inf")
     elif idx % 3 == 2:
         # ensure note generated
-        logits[v.TIME_OFFSET : v.TIME_OFFSET + settings.tick_token_frequency_in_midi_ticks] = -float("inf")
+        logits[
+            v.TIME_OFFSET : v.TIME_OFFSET + settings.tick_token_frequency_in_midi_ticks
+        ] = -float("inf")
         logits[v.DUR_OFFSET : v.DUR_OFFSET + settings.max_dur] = -float("inf")
 
     return logits
@@ -78,11 +82,17 @@ def future_logits(
 
 
 def instr_logits(
-    logits: torch.Tensor, full_history, settings: AnticipationV2Settings
+    logits: torch.Tensor,
+    full_history: list[tuple[Token, ...]],
+    settings: AnticipationV2Settings,
 ) -> torch.Tensor:
     """don't sample more than 16 instruments"""
-    # TODO: implement this for tuples + ticks
-    instrs = v1_ops.get_instruments(full_history)
+    # need to remove the ticks
+    v1_style_seq = [x for x in full_history if len(x) == 3]
+    # then flatten to triples, we can use the v1 logit
+    v1_style_seq_unwrapped = [x for b in v1_style_seq for x in b]
+    instrs = v2_ops.get_instruments(v1_style_seq_unwrapped, settings)
+
     if len(instrs) < 15:  # 16 - 1 to account for the reserved drum track
         return logits
 
@@ -96,7 +106,9 @@ def instr_logits(
 
     return logits
 
+
 def check_probs(probs):
+    # just a spot check for debugging
     if not torch.isfinite(probs).all():
         bad = (~torch.isfinite(probs)).nonzero()
         raise RuntimeError(f"Non-finite probs")
@@ -219,7 +231,6 @@ def generate_ar_simple(
             new_token_rel_time = new_onset - settings.vocab.TIME_OFFSET
             current_time += new_token_rel_time
             tokens.append(new_event)
-
 
     # need to un-relativize
     tokens = tick_tokens_to_abs_time(tokens, settings)

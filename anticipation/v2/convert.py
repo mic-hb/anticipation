@@ -164,6 +164,8 @@ def compound_to_midi(
                     if num_tracks == 9:
                         num_tracks += 1  # skip the drums track
 
+                # channel idx
+                assert idx <= 16
                 track.append(
                     mido.Message(
                         "note_on",

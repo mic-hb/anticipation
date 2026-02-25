@@ -1,18 +1,17 @@
 from __future__ import annotations
-import torchmetrics
+import io
+import tempfile
 import os, time
 import argparse
 from pathlib import Path
 import warnings
 from dataclasses import dataclass
-from typing import Optional, Callable, Any
-
-import pytorch_lightning as pl
-import torch
+from typing import Optional, Callable, Any, Union
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torchmetrics
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 
@@ -30,6 +29,8 @@ from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_info
 
 from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
+
+import wandb
 
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.sample import generate_ar_simple
@@ -74,7 +75,9 @@ class TokenPerplexity(torchmetrics.Metric):
         self.add_state("nll_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("tok_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
 
-    def update(self, loss_sum: torch.Tensor, n_tokens: int) -> None:
+    def update(
+        self, loss_sum: torch.Tensor, n_tokens: Union[int, torch.Tensor]
+    ) -> None:
         loss_sum = loss_sum.detach()
 
         # Convert int -> tensor on correct device/dtype
@@ -105,7 +108,10 @@ class ApproxBPS(torchmetrics.Metric):
         self.add_state("seconds_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
 
     def update(
-        self, loss_sum: torch.Tensor, num_seconds: float, num_tokens: int
+        self,
+        loss_sum: torch.Tensor,
+        num_seconds: Union[float, torch.Tensor],
+        num_tokens: Union[int, torch.Tensor],
     ) -> None:
         loss_sum = loss_sum.detach()
 
@@ -119,11 +125,15 @@ class ApproxBPS(torchmetrics.Metric):
         else:
             num_seconds = num_seconds.detach().to(loss_sum.device, loss_sum.dtype)
 
-        num_tokens = torch.tensor(
-            num_tokens,
-            device=loss_sum.device,
-            dtype=loss_sum.dtype,
-        )
+        if not torch.is_tensor(num_tokens):
+            num_tokens = torch.tensor(
+                num_tokens,
+                device=loss_sum.device,
+                dtype=loss_sum.dtype,
+            )
+        else:
+            num_tokens = num_tokens.detach().to(loss_sum.device, loss_sum.dtype)
+
         self.nll_sum += loss_sum
         self.num_tokens += num_tokens
         self.seconds_sum += num_seconds
@@ -133,29 +143,37 @@ class ApproxBPS(torchmetrics.Metric):
         approx_bps = mean_nll * np.log2(np.e) * (self.num_tokens / self.seconds_sum)
         return approx_bps
 
-def log_bytes_at_step(run: wandb.sdk.wandb_run.Run, data: bytes, step: int):
-    art = wandb.Artifact(name=f"payload-step-{step:08d}", type="custom")
-    buffer = io.BytesIO(data)
-    art.add_file(buffer, name="midi_step_{step:08d}.mid")
 
-    run.log_artifact(art, aliases=[f"step-{step}", "latest"])
+def log_bytes_at_step(run: wandb.sdk.wandb_run.Run, data: bytes, step: int) -> None:
+    if wandb.run is None:
+        # raise RuntimeError("No active wandb run. Make sure WandbLogger has initialized (e.g. after on_fit_start).")
+        return
 
-    run.log(
-        {
-            "payload/artifact_name": art.name,
-        },
-        step=step,
-    )
+    with tempfile.TemporaryDirectory() as td:
+        # write this file
+        td_path = Path(td)
+        f_name = f"midi_step_{step:08d}.mid"
+        temp_file = td_path / f_name
+        temp_file.write_bytes(data)
+
+        # wandb needs a real file, not buffered io for some reason...
+        # below code is really finicky
+        art = wandb.Artifact(name=f"inference-midi", type="custom")
+        art.add_file(temp_file, name=f_name)
+        wandb.log_artifact(art, aliases=[f"inference-midi-step-{step}", "latest"])
+        wandb.log(
+            {
+                "payload/artifact_name": art.name,
+            },
+            step=step,
+        )
 
 
 @dataclass
 class SampleConfig:
-    every_n_steps: int = 500          # cadence in optimizer steps
-    start_step: int = 5_000           # don't run before this
+    start_after_step: int = 5_000
     num_events_to_generate: int = 100
     top_p: float = 1.0
-    max_new_tokens: int = 128
-    log_tag: str = "samples"
 
 
 class GenerateSamplesOnValEnd(pl.Callback):
@@ -166,9 +184,11 @@ class GenerateSamplesOnValEnd(pl.Callback):
         prompt_fn: Optional[Callable[[pl.LightningModule], Any]] = None,
     ):
         self.cfg = cfg
-        self.prompt_fn = prompt_fn  # optional: build prompts from the module/config
+        self.prompt_fn = prompt_fn
 
-    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+    def on_validation_epoch_end(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
         # Only once globally in DDP
         if not trainer.is_global_zero:
             return
@@ -176,19 +196,17 @@ class GenerateSamplesOnValEnd(pl.Callback):
             return
 
         step = trainer.global_step
-        if step < self.cfg.start_step:
-            return
-        if step == 0 or (step % self.cfg.every_n_steps) != 0:
+        if step < self.cfg.start_after_step:
+            # too early
             return
 
-        # Build prompts / conditioning input
+        # https://lightning.ai/docs/pytorch/stable/extensions/callbacks.html#on-validation-epoch-end
+        # hoping that this callback is called only ONCE per validation, instead of once per
+        # validation batch.
         prompts = self.prompt_fn(pl_module) if self.prompt_fn else None
-
         pl_module.eval()
         with torch.no_grad():
             sample = self._generate(pl_module, prompts)
-
-        # Log however you like (W&B shown as an example)
         self._log_samples(trainer, sample, step)
 
     def _generate(self, pl_module: pl.LightningModule, prompts) -> bytes:
@@ -202,7 +220,7 @@ class GenerateSamplesOnValEnd(pl.Callback):
             model,
             settings,
             num_events_to_generate=self.cfg.num_events_to_generate,
-            top_p=self.cfg.top_p
+            top_p=self.cfg.top_p,
         )
         bytes_io = io.BytesIO()
         midi_file.save(file=bytes_io)
@@ -213,10 +231,9 @@ class GenerateSamplesOnValEnd(pl.Callback):
         if logger is None:
             return
 
-        log_bytes_on_step(logger.experiment, samples, step)
+        # if not using wandb, this is a noop
+        log_bytes_at_step(logger.experiment, sample, step)
 
-        # Fallback: log as text blobs if logger supports it
-        #logger.log_metrics({f"{self.cfg.log_tag}/0": samples[0]}, step=step)
 
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
@@ -526,6 +543,7 @@ class GPT2LightningModule(pl.LightningModule):
             num_workers=4,
             shuffle=False,
             pin_memory=True,
+            persistent_workers=True,
         )
 
 
@@ -630,17 +648,30 @@ def main(args: argparse.Namespace) -> None:
             config=vars(args),
         )
 
+    ddp_params = {}
+    if not args.no_ddp:
+        ddp_params["strategy"] = DDPStrategy(
+            find_unused_parameters=False, static_graph=False
+        )
+
     trainer = pl.Trainer(
         max_steps=args.num_train_steps,
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        # always use gpu and then thrown an error if it's unavailable - that's preferrable
+        # to defaulting to cpu imo
+        accelerator="gpu",
         devices=args.gpus_per_node,
         num_nodes=args.num_nodes,
-        strategy=DDPStrategy(find_unused_parameters=False, static_graph=False),
+        **ddp_params,
         callbacks=[
             checkpoint_callback,
             LearningRateMonitor(logging_interval="step"),
             MaxStepProgressBar(),
-            GenerateSamplesOnValEnd(SampleConfig(every_n_steps=1, start_step=1)),
+            GenerateSamplesOnValEnd(
+                SampleConfig(
+                    start_after_step=args.save_midi_output_after_step,
+                    num_events_to_generate=args.num_events_to_generate_for_midi_inference,
+                )
+            ),
         ],
         enable_progress_bar=True,
         precision="bf16-mixed" if args.bf16 else 32,
@@ -735,6 +766,19 @@ def get_argparser() -> argparse.ArgumentParser:
         help="Number of steps between checkpoints",
     )  # set back to 1000
 
+    parser.add_argument(
+        "--save_midi_output_after_step",
+        type=int,
+        default=5000,
+        help="After this number of steps, at the end of a validation epoch, we will otout MIDI to wandb.",
+    )
+    parser.add_argument(
+        "--num_events_to_generate_for_midi_inference",
+        type=int,
+        default=100,
+        help="Number of EVENTS, not tokens. An event is a triple or tick.",
+    )
+
     # System parameters
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes")
     parser.add_argument(
@@ -743,6 +787,11 @@ def get_argparser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--use_wandb", action="store_true", help="whether to use wandb logging"
+    )
+    parser.add_argument(
+        "--no_ddp",
+        action="store_true",
+        help="whether to ignore using DDP - just for testing really.",
     )
     return parser
 
