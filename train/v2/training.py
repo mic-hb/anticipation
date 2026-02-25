@@ -1,18 +1,9 @@
-from __future__ import annotations
-import io
-import tempfile
 import os, time
 import argparse
 from pathlib import Path
-import warnings
-from dataclasses import dataclass
-from typing import Optional, Callable, Any, Union
-
-import numpy as np
 import torch
 import torch.nn.functional as F
-import torchmetrics
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 
 import pytorch_lightning as pl
@@ -23,216 +14,16 @@ torch.set_float32_matmul_precision("high")
 from pytorch_lightning.callbacks import (
     ModelCheckpoint,
     LearningRateMonitor,
-    TQDMProgressBar,
 )
 from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_info
 
 from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
-import wandb
-
 from anticipation.v2.config import AnticipationV2Settings
-from anticipation.v2.sample import generate_ar_simple
-
-
-class PreTokenizedDataset(Dataset):
-    """
-    Must be constructed with v2 sequence packing.
-    """
-
-    def __init__(self, path: Path) -> None:
-        # O(page size) random access apparently?
-        self.data = np.load(path, mmap_mode="r")
-        assert self.data.flags["C_CONTIGUOUS"]
-
-    def __len__(self) -> int:
-        return self.data.shape[0]
-
-    def __getitem__(self, idx: int):
-        with warnings.catch_warnings():
-            # this warning is about writing to a tensor loaded in this way
-            # will result in undefined behavior, but this is the dataset, we
-            # are not going to mutate these samples
-            warnings.filterwarnings("ignore", category=UserWarning)
-            input_ids = torch.from_numpy(self.data[idx]).to(dtype=torch.long)
-
-        attention_mask = torch.ones_like(input_ids)
-        labels = input_ids.clone()
-        labels = torch.roll(labels, shifts=-1, dims=0)
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-        }
-
-
-class TokenPerplexity(torchmetrics.Metric):
-    full_state_update = False
-
-    def __init__(self):
-        super().__init__()
-        self.add_state("nll_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("tok_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
-
-    def update(
-        self, loss_sum: torch.Tensor, n_tokens: Union[int, torch.Tensor]
-    ) -> None:
-        loss_sum = loss_sum.detach()
-
-        # Convert int -> tensor on correct device/dtype
-        if not torch.is_tensor(n_tokens):
-            n_tokens = torch.tensor(
-                n_tokens,
-                device=loss_sum.device,
-                dtype=loss_sum.dtype,
-            )
-        else:
-            n_tokens = n_tokens.detach().to(loss_sum.device, loss_sum.dtype)
-
-        self.nll_sum += loss_sum
-        self.tok_sum += n_tokens
-
-    def compute(self):
-        mean_nll = self.nll_sum / self.tok_sum.clamp_min(1.0)
-        return torch.exp(mean_nll.clamp(max=50.0))
-
-
-class ApproxBPS(torchmetrics.Metric):
-    full_state_update = False
-
-    def __init__(self):
-        super().__init__()
-        self.add_state("nll_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("num_tokens", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("seconds_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
-
-    def update(
-        self,
-        loss_sum: torch.Tensor,
-        num_seconds: Union[float, torch.Tensor],
-        num_tokens: Union[int, torch.Tensor],
-    ) -> None:
-        loss_sum = loss_sum.detach()
-
-        # Convert int -> tensor on correct device/dtype
-        if not torch.is_tensor(num_seconds):
-            num_seconds = torch.tensor(
-                num_seconds,
-                device=loss_sum.device,
-                dtype=loss_sum.dtype,
-            )
-        else:
-            num_seconds = num_seconds.detach().to(loss_sum.device, loss_sum.dtype)
-
-        if not torch.is_tensor(num_tokens):
-            num_tokens = torch.tensor(
-                num_tokens,
-                device=loss_sum.device,
-                dtype=loss_sum.dtype,
-            )
-        else:
-            num_tokens = num_tokens.detach().to(loss_sum.device, loss_sum.dtype)
-
-        self.nll_sum += loss_sum
-        self.num_tokens += num_tokens
-        self.seconds_sum += num_seconds
-
-    def compute(self):
-        mean_nll = self.nll_sum / self.num_tokens.clamp_min(1.0)
-        approx_bps = mean_nll * np.log2(np.e) * (self.num_tokens / self.seconds_sum)
-        return approx_bps
-
-
-def log_bytes_at_step(run: wandb.sdk.wandb_run.Run, data: bytes, step: int) -> None:
-    if wandb.run is None:
-        # raise RuntimeError("No active wandb run. Make sure WandbLogger has initialized (e.g. after on_fit_start).")
-        return
-
-    with tempfile.TemporaryDirectory() as td:
-        # write this file
-        td_path = Path(td)
-        f_name = f"midi_step_{step:08d}.mid"
-        temp_file = td_path / f_name
-        temp_file.write_bytes(data)
-
-        # wandb needs a real file, not buffered io for some reason...
-        # below code is really finicky
-        art = wandb.Artifact(name=f"inference-midi", type="custom")
-        art.add_file(temp_file, name=f_name)
-        wandb.log_artifact(art, aliases=[f"inference-midi-step-{step}", "latest"])
-        wandb.log(
-            {
-                "payload/artifact_name": art.name,
-            },
-            step=step,
-        )
-
-
-@dataclass
-class SampleConfig:
-    start_after_step: int = 5_000
-    num_events_to_generate: int = 100
-    top_p: float = 1.0
-
-
-class GenerateSamplesOnValEnd(pl.Callback):
-    def __init__(
-        self,
-        cfg: SampleConfig,
-        *,
-        prompt_fn: Optional[Callable[[pl.LightningModule], Any]] = None,
-    ):
-        self.cfg = cfg
-        self.prompt_fn = prompt_fn
-
-    def on_validation_epoch_end(
-        self, trainer: pl.Trainer, pl_module: pl.LightningModule
-    ) -> None:
-        # Only once globally in DDP
-        if not trainer.is_global_zero:
-            return
-        if trainer.sanity_checking:
-            return
-
-        step = trainer.global_step
-        if step < self.cfg.start_after_step:
-            # too early
-            return
-
-        # https://lightning.ai/docs/pytorch/stable/extensions/callbacks.html#on-validation-epoch-end
-        # hoping that this callback is called only ONCE per validation, instead of once per
-        # validation batch.
-        prompts = self.prompt_fn(pl_module) if self.prompt_fn else None
-        pl_module.eval()
-        with torch.no_grad():
-            sample = self._generate(pl_module, prompts)
-        self._log_samples(trainer, sample, step)
-
-    def _generate(self, pl_module: pl.LightningModule, prompts) -> bytes:
-        model = getattr(pl_module, "model", pl_module)
-        settings = getattr(pl_module, "anticipation_settings", None)
-        assert settings
-
-        # use our simple autoregressive generation function to
-        # get a small midi file
-        midi_file = generate_ar_simple(
-            model,
-            settings,
-            num_events_to_generate=self.cfg.num_events_to_generate,
-            top_p=self.cfg.top_p,
-        )
-        bytes_io = io.BytesIO()
-        midi_file.save(file=bytes_io)
-        return bytes_io.getvalue()
-
-    def _log_samples(self, trainer: pl.Trainer, sample, step: int) -> None:
-        logger = trainer.logger
-        if logger is None:
-            return
-
-        # if not using wandb, this is a noop
-        log_bytes_at_step(logger.experiment, sample, step)
+from train.v2.metrics import TokenPerplexity, ApproxBPS
+from train.v2.dataset import PreTokenizedDataset
+from train.v2.logging import GenerateSamplesOnValEnd, SampleConfig, MaxStepProgressBar
 
 
 class GPT2LightningModule(pl.LightningModule):
@@ -545,31 +336,6 @@ class GPT2LightningModule(pl.LightningModule):
             pin_memory=True,
             persistent_workers=True,
         )
-
-
-class MaxStepProgressBar(TQDMProgressBar):
-    def __init__(self):
-        super().__init__()
-        self._persistent_bar = None
-
-    def init_train_tqdm(self):
-        if self._persistent_bar is None:
-            bar = super().init_train_tqdm()
-            bar.set_description("Training Progress")
-            self._persistent_bar = bar
-
-        return self._persistent_bar
-
-    def on_train_epoch_start(self, trainer, pl_module):
-        if self._persistent_bar is not None:
-            self._persistent_bar.set_description("Training Progress")
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        current = trainer.global_step
-        total = trainer.max_steps
-        self.train_progress_bar.n = current
-        self.train_progress_bar.total = total
-        self._persistent_bar.refresh()
 
 
 class HuggingFaceCheckpoint(ModelCheckpoint):
