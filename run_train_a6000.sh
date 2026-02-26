@@ -31,7 +31,7 @@ mkdir -p "$CUSTOM_TMP_DIR"
 # ----------------- non-preamble ---------------
 
 # this is the place where our tokenized data is, relative to repo root
-dataset_location="data/tokenized_data/5dbc372cdeae4c4fb44f447e66029461"
+dataset_location="data/tokenized_datasets/lmd_full/b82a7a2750e3c5836ffb9bf564720cd8"
 
 # move this to our scratch directory, which is faster than NFS
 # note that the scratch dir depends on the node that you have obtained for the job
@@ -39,10 +39,16 @@ dataset_location="data/tokenized_data/5dbc372cdeae4c4fb44f447e66029461"
 src="$dataset_location"
 dst="$CUSTOM_TMP_DIR/$dataset_location"
 
+parent="$(dirname "$dst")"
+mkdir -p "$parent"
+
 # do nothing if it's already there
 if [[ ! -d "$dst" ]]; then
-    cp -a "$src" "$dst"
+    cp -R "$src" "$dst"
 fi
+
+echo "Using data_dir: "
+echo "$dst"
 
 PYTHONPATH=. torchrun --standalone --nproc_per_node=4 train/v2/training.py \
     --output_dir "output/slurm_logs/$SLURM_JOB_ID/checkpoints" \
