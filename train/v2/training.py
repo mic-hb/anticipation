@@ -1,6 +1,8 @@
-import os, time
+import os
+import time
 import argparse
 from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -9,6 +11,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 
+# keep this!!!
 torch.set_float32_matmul_precision("high")
 
 from pytorch_lightning.callbacks import (
@@ -23,7 +26,11 @@ from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 from anticipation.v2.config import AnticipationV2Settings
 from train.v2.custom_metrics import TokenPerplexity, ApproxBPS
 from train.v2.dataset_utils import PreTokenizedDataset
-from train.v2.logging_utils import GenerateSamplesOnValEnd, SampleConfig, MaxStepProgressBar
+from train.v2.logging_utils import (
+    GenerateSamplesOnValEnd,
+    SampleConfig,
+    MaxStepProgressBar,
+)
 
 
 class GPT2LightningModule(pl.LightningModule):
@@ -31,7 +38,6 @@ class GPT2LightningModule(pl.LightningModule):
         self,
         data_dir: Path,
         settings: AnticipationV2Settings,
-        detailed_eval_every_k_steps: int,
         learning_rate: float = 5e-5,
         warmup_steps: int = 0,
         weight_decay: float = 0.0,
@@ -56,8 +62,7 @@ class GPT2LightningModule(pl.LightningModule):
         self.model.config.bos_token_id = self.model.config.eos_token_id = 0
         self.anticipation_settings = settings
 
-        self.detailed_eval_every_k_steps = detailed_eval_every_k_steps
-
+        # --- validation split metrics ----
         self.ppl = TokenPerplexity()
 
         # all triples
@@ -80,19 +85,27 @@ class GPT2LightningModule(pl.LightningModule):
     def forward(self, **inputs):
         return self.model(**inputs)
 
-    def training_step(self, batch, batch_idx):
+    def training_step(
+        self, batch: dict[str, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         labels = batch.pop("labels")
         outputs = self(**batch)
 
+        # keep this upcast!
+        # https://x.com/jwthickstun/status/1737134520141246938
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log("train_loss", loss.detach(), prog_bar=True, logger=True)
         return loss
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(
+        self, batch: dict[str, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         labels = batch.pop("labels")
         outputs = self(**batch)
 
+        # keep this upcast!
+        # https://x.com/jwthickstun/status/1737134520141246938
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log(
@@ -104,161 +117,151 @@ class GPT2LightningModule(pl.LightningModule):
             sync_dist=True,
         )
 
-        # global step of the training carrier
-        step = self.trainer.global_step
+        # ----- new metrics -----
+        v = self.anticipation_settings.vocab
+        tokens = batch["input_ids"]
 
-        if step % self.detailed_eval_every_k_steps == 0:
-            # ----- new metrics -----
-            v = self.anticipation_settings.vocab
-            tokens = batch["input_ids"]
+        shift_logits = logits[:, :-1, :]
+        targets = tokens[:, 1:]
+        per_tok_ce = F.cross_entropy(
+            shift_logits.reshape(-1, shift_logits.size(-1)),
+            targets.reshape(-1),
+            reduction="none",
+        ).view_as(targets)  # [bs, L-1]
 
-            shift_logits = logits[:, :-1, :]
-            targets = tokens[:, 1:]
-            per_tok_ce = F.cross_entropy(
-                shift_logits.reshape(-1, shift_logits.size(-1)),
-                targets.reshape(-1),
-                reduction="none",
-            ).view_as(targets)  # [bs, L-1]
+        # we don't really care about loss on the controls since we put those in ourselves
+        controls = (
+            (targets == v.SEPARATOR)
+            | (targets == v.ANTICIPATE)
+            | (targets == v.AUTOREGRESS)
+        )
 
-            # we don't really care about loss on the controls since we put those in ourselves
-            controls = (
-                (targets == v.SEPARATOR)
-                | (targets == v.ANTICIPATE)
-                | (targets == v.AUTOREGRESS)
-            )
+        # exclude the controls form overall perplexity
+        ppl_overall_mask: torch.Tensor = ~controls  # type: ignore
+        total_loss_sum = per_tok_ce[ppl_overall_mask].sum()
+        total_tokens = ppl_overall_mask.sum()
+        self.ppl.update(loss_sum=total_loss_sum, n_tokens=total_tokens)
+        self.log("ppl", self.ppl, on_epoch=True, prog_bar=True, sync_dist=True)
 
-            # exclude the controls form overall perplexity
-            ppl_overall_mask = ~controls
-            total_loss_sum = per_tok_ce[ppl_overall_mask].sum()
-            total_tokens = ppl_overall_mask.sum()
-            self.ppl.update(loss_sum=total_loss_sum, n_tokens=total_tokens)
-            self.log("ppl", self.ppl, on_epoch=True, prog_bar=True, sync_dist=True)
+        ticks = targets == v.TICK
+        tick_mask: torch.Tensor = ticks  # type: ignore
+        num_ticks = tick_mask.sum()
 
-            ticks = targets == v.TICK
-            tick_mask = ticks
-            num_ticks = tick_mask.sum()
+        num_seconds_approx = (
+            num_ticks * self.anticipation_settings.tick_token_frequency_in_midi_ticks
+        ) / self.anticipation_settings.time_resolution
+        self.approx_bps.update(
+            loss_sum=total_loss_sum,
+            num_seconds=num_seconds_approx,
+            num_tokens=total_tokens,
+        )
+        self.log(
+            "approx_bps",
+            self.approx_bps,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
 
-            num_seconds_approx = (
-                num_ticks
-                * self.anticipation_settings.tick_token_frequency_in_midi_ticks
-            ) / self.anticipation_settings.time_resolution
-            self.approx_bps.update(
-                loss_sum=total_loss_sum,
-                num_seconds=num_seconds_approx,
-                num_tokens=total_tokens,
-            )
-            self.log(
-                "approx_bps",
-                self.approx_bps,
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-            )
+        # events are everything that isn't a control and isn't a tick
+        events: torch.Tensor = (~controls) & (~ticks)  # type: ignore
 
-            # events are everything that isn't a control and isn't a tick
-            events = (~controls) & (~ticks)
+        # Event index within each sequence: 0,1,2,... for event positions
+        # (non-event positions will have junk values, but we always AND with `events`)
+        event_idx = torch.cumsum(events.to(torch.int64), dim=1) - 1
 
-            # Event index within each sequence: 0,1,2,... for event positions
-            # (non-event positions will have junk values, but we always AND with `events`)
-            event_idx = torch.cumsum(events.to(torch.int64), dim=1) - 1  # [bs, L-1]
+        # How many event tokens per sequence, and how many to keep (truncate tail to multiple of 3)
+        n_event_tokens = events.sum(dim=1).to(torch.int64)
+        n_keep_tokens = (n_event_tokens // 3) * 3
+        n_events = n_keep_tokens // 3
+        num_events_total = n_events.sum()
 
-            # How many event tokens per sequence, and how many to keep (truncate tail to multiple of 3)
-            n_event_tokens = events.sum(dim=1).to(torch.int64)  # [bs]
-            n_keep_tokens = (n_event_tokens // 3) * 3  # [bs]  multiple of 3
-            n_events = n_keep_tokens // 3  # [bs]  number of triples/events
-            num_events_total = n_events.sum()
+        # drops incomplete / truncated last triple per seq if necessary
+        keep_events = events & (event_idx < n_keep_tokens.unsqueeze(1))
 
-            # Keep only event tokens that are within the kept prefix (drops incomplete last triple per seq)
-            keep_events = events & (event_idx < n_keep_tokens.unsqueeze(1))  # [bs, L-1]
+        # isolate each part of a triple (time aka onset, duration, note x instrument)
+        onsets = keep_events & ((event_idx % 3) == 0)
+        durs = keep_events & ((event_idx % 3) == 1)
+        note_instrs = keep_events & ((event_idx % 3) == 2)
 
-            onsets = keep_events & ((event_idx % 3) == 0)
-            durs = keep_events & ((event_idx % 3) == 1)
-            note_instrs = keep_events & ((event_idx % 3) == 2)
+        onset_loss_sum = per_tok_ce[onsets].sum()
+        dur_loss_sum = per_tok_ce[durs].sum()
+        note_instr_loss_sum = per_tok_ce[note_instrs].sum()
+        tick_loss_sum = per_tok_ce[tick_mask].sum()
 
-            event_loss_sum = per_tok_ce[keep_events].sum()
-            event_token_count = keep_events.sum()
+        # does not include the tick
+        # formulation here is approximate, following the v1 eval script
+        self.event_ppl.update(loss_sum=(3 * per_tok_ce[keep_events].mean()), n_tokens=1)
+        self.log(
+            "event_ppl",
+            self.event_ppl,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
 
-            onset_loss_sum = per_tok_ce[onsets].sum()
-            dur_loss_sum = per_tok_ce[durs].sum()
-            note_instr_loss_sum = per_tok_ce[note_instrs].sum()
-            tick_loss_sum = per_tok_ce[tick_mask].sum()
+        # each part of the triple (time, duration, note x instrument)
+        # both with and without the CE contributed by the tick
+        self.onset_ppl.update(
+            loss_sum=(onset_loss_sum + tick_loss_sum), n_tokens=num_events_total
+        )
+        self.log(
+            "onset_ppl",
+            self.onset_ppl,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.onset_ppl_no_ticks.update(
+            loss_sum=onset_loss_sum, n_tokens=num_events_total
+        )
+        self.log(
+            "onset_ppl_no_ticks",
+            self.onset_ppl_no_ticks,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
 
-            # does not include the tick
-            self.event_ppl.update(loss_sum=event_loss_sum, n_tokens=event_token_count)
-            self.log(
-                "event_ppl",
-                self.event_ppl,
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-            )
+        self.dur_ppl.update(
+            loss_sum=(dur_loss_sum + tick_loss_sum), n_tokens=num_events_total
+        )
+        self.log("dur_ppl", self.dur_ppl, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.dur_ppl_no_ticks.update(loss_sum=dur_loss_sum, n_tokens=num_events_total)
+        self.log(
+            "dur_ppl_no_ticks",
+            self.dur_ppl_no_ticks,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
 
-            # each part of the triple (time, duration, note x instrument)
-            # both with and without the CE contributed by the tick
-            self.onset_ppl.update(
-                loss_sum=(onset_loss_sum + tick_loss_sum), n_tokens=num_events_total
-            )
-            self.log(
-                "onset_ppl",
-                self.onset_ppl,
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-            )
-            self.onset_ppl_no_ticks.update(
-                loss_sum=onset_loss_sum, n_tokens=num_events_total
-            )
-            self.log(
-                "onset_ppl_no_ticks",
-                self.onset_ppl_no_ticks,
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-            )
+        self.note_instr_ppl.update(
+            loss_sum=(note_instr_loss_sum + tick_loss_sum),
+            n_tokens=num_events_total,
+        )
+        self.log(
+            "note_instr_ppl",
+            self.note_instr_ppl,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.note_instr_ppl_no_ticks.update(
+            loss_sum=note_instr_loss_sum, n_tokens=num_events_total
+        )
+        self.log(
+            "note_instr_ppl_no_ticks",
+            self.note_instr_ppl_no_ticks,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
 
-            self.dur_ppl.update(
-                loss_sum=(dur_loss_sum + tick_loss_sum), n_tokens=num_events_total
-            )
-            self.log(
-                "dur_ppl", self.dur_ppl, on_epoch=True, prog_bar=True, sync_dist=True
-            )
-            self.dur_ppl_no_ticks.update(
-                loss_sum=dur_loss_sum, n_tokens=num_events_total
-            )
-            self.log(
-                "dur_ppl_no_ticks",
-                self.dur_ppl_no_ticks,
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-            )
-
-            self.note_instr_ppl.update(
-                loss_sum=(note_instr_loss_sum + tick_loss_sum),
-                n_tokens=num_events_total,
-            )
-            self.log(
-                "note_instr_ppl",
-                self.note_instr_ppl,
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-            )
-            self.note_instr_ppl_no_ticks.update(
-                loss_sum=note_instr_loss_sum, n_tokens=num_events_total
-            )
-            self.log(
-                "note_instr_ppl_no_ticks",
-                self.note_instr_ppl_no_ticks,
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-            )
-
-            self.tick_ppl.update(loss_sum=tick_loss_sum, n_tokens=num_ticks)
-            self.log(
-                "tick_ppl", self.tick_ppl, on_epoch=True, prog_bar=True, sync_dist=True
-            )
+        self.tick_ppl.update(loss_sum=tick_loss_sum, n_tokens=num_ticks)
+        self.log(
+            "tick_ppl", self.tick_ppl, on_epoch=True, prog_bar=True, sync_dist=True
+        )
 
         return loss
 
@@ -383,8 +386,6 @@ def main(args: argparse.Namespace) -> None:
     model = GPT2LightningModule(
         data_dir=tokenized_dataset_path,
         settings=settings,
-        detailed_eval_every_k_steps=args.do_detailed_metrics_every_k_evals
-        * args.steps_per_eval,
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
@@ -518,12 +519,6 @@ def get_argparser() -> argparse.ArgumentParser:
         type=int,
         default=1000,
         help="Number of steps between validation evals",
-    )
-    parser.add_argument(
-        "--do_detailed_metrics_every_k_evals",
-        type=int,
-        default=2,
-        help="If this is 5, then produce detailed metrics every 5th eval",
     )
     parser.add_argument(
         "--steps_per_checkpoint",
