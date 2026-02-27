@@ -14,13 +14,13 @@ PYTHONPATH=. python train/v2/training.py \
     --data_dir data/tokenized_datasets/lmd_full/b82a7a2750e3c5836ffb9bf564720cd8 \
     --num_layers 1 \
     --gpus_per_node 1 \
-    --train_batch_size 32 \
-    --eval_batch_size 32 \
+    --train_batch_size 256 \
+    --eval_batch_size 256 \
+    --steps_per_eval 1000 \
     --num_heads 8 \
     --hidden_dim 64 \
-    --gradient_accumulation_steps 1 \
-    --steps_per_eval 50 \
-    --save_midi_output_after_step 25 \
+    --gradient_accumulation_steps 2 \
     --num_events_to_generate_for_midi_inference 80 \
+    --steps_per_checkpoint 100000 \
     --use_wandb \
     --no_ddp

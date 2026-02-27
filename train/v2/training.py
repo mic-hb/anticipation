@@ -35,16 +35,16 @@ from train.v2.logging_utils import (
 
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
-        self,
-        data_dir: Path,
-        settings: AnticipationV2Settings,
-        learning_rate: float = 5e-5,
-        warmup_steps: int = 0,
-        weight_decay: float = 0.0,
-        train_batch_size: int = 32,
-        eval_batch_size: int = 32,
-        pretrained_checkpoint: str = None,
-        config: PretrainedConfig = None,
+            self,
+            data_dir: Path,
+            settings: AnticipationV2Settings,
+            learning_rate: float = 5e-5,
+            warmup_steps: int = 0,
+            weight_decay: float = 0.0,
+            train_batch_size: int = 32,
+            eval_batch_size: int = 32,
+            pretrained_checkpoint: str = None,
+            config: PretrainedConfig = None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -86,7 +86,7 @@ class GPT2LightningModule(pl.LightningModule):
         return self.model(**inputs)
 
     def training_step(
-        self, batch: dict[str, torch.Tensor], batch_idx: int
+            self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
         labels = batch.pop("labels")
         outputs = self(**batch)
@@ -99,7 +99,7 @@ class GPT2LightningModule(pl.LightningModule):
         return loss
 
     def validation_step(
-        self, batch: dict[str, torch.Tensor], batch_idx: int
+            self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
         labels = batch.pop("labels")
         outputs = self(**batch)
@@ -131,9 +131,9 @@ class GPT2LightningModule(pl.LightningModule):
 
         # we don't really care about loss on the controls since we put those in ourselves
         controls = (
-            (targets == v.SEPARATOR)
-            | (targets == v.ANTICIPATE)
-            | (targets == v.AUTOREGRESS)
+                (targets == v.SEPARATOR)
+                | (targets == v.ANTICIPATE)
+                | (targets == v.AUTOREGRESS)
         )
 
         # exclude the controls form overall perplexity
@@ -148,8 +148,8 @@ class GPT2LightningModule(pl.LightningModule):
         num_ticks = tick_mask.sum()
 
         num_seconds_approx = (
-            num_ticks * self.anticipation_settings.tick_token_frequency_in_midi_ticks
-        ) / self.anticipation_settings.time_resolution
+                                     num_ticks * self.anticipation_settings.tick_token_frequency_in_midi_ticks
+                             ) / self.anticipation_settings.time_resolution
         self.approx_bps.update(
             loss_sum=total_loss_sum,
             num_seconds=num_seconds_approx,
