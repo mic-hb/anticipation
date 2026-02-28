@@ -8,6 +8,7 @@ from torch.utils.checkpoint import checkpoint
 
 from anticipation.v2.nanochat.flash_attention import flash_attn
 
+
 @dataclass
 class CausalLMOutputLite:
     loss: torch.Tensor | None
@@ -37,7 +38,7 @@ class GPT2ConfigLite:
     # Positional embedding choice (non-HF extension)
     pos_emb: str = "absolute"  # "absolute" or "rope"
     rope_theta: float = 10000.0
-    rope_pct: float = 1.0      # fraction of head_dim to rotate
+    rope_pct: float = 1.0  # fraction of head_dim to rotate
     window_pattern: str = "L"
 
     @classmethod
@@ -51,7 +52,6 @@ class GPT2ConfigLite:
         return cls(**{k: v for k, v in d.items() if hasattr(cls, k)})
 
 
-
 CONV1D_SUFFIXES = (
     ".attn.c_attn.weight",
     ".attn.c_proj.weight",
@@ -59,7 +59,10 @@ CONV1D_SUFFIXES = (
     ".mlp.c_proj.weight",
 )
 
-def remap_state_dict(sd, *, rename_rules=None, drop_prefixes=(), drop_exact=(), conv1d_to_linear=False):
+
+def remap_state_dict(
+    sd, *, rename_rules=None, drop_prefixes=(), drop_exact=(), conv1d_to_linear=False
+):
     """
     sd: dict[str, Tensor]
     rename_rules: list[tuple[pattern, repl]] where pattern is regex
@@ -86,39 +89,47 @@ def remap_state_dict(sd, *, rename_rules=None, drop_prefixes=(), drop_exact=(), 
 
     return out
 
+
 def load_hf_state_dict_into_model(model, hf_sd, *, strict=False, **remap_kwargs):
     sd = remap_state_dict(hf_sd, **remap_kwargs)
     missing, unexpected = model.load_state_dict(sd, strict=strict)
     return missing, unexpected
 
+
 def save_hf_style_checkpoint(save_dir, model, config_dict):
     import json
     from pathlib import Path
+
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    (save_dir / "config.json").write_text(json.dumps(config_dict, indent=2, sort_keys=True))
+    (save_dir / "config.json").write_text(
+        json.dumps(config_dict, indent=2, sort_keys=True)
+    )
     torch.save(model.state_dict(), save_dir / "pytorch_model.bin")
 
 
 def rotary_cos_sin(seq_len: int, dim: int, theta: float, device, dtype):
     # dim must be even
-    inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device, dtype=dtype) / dim))
+    inv_freq = 1.0 / (
+        theta ** (torch.arange(0, dim, 2, device=device, dtype=dtype) / dim)
+    )
     t = torch.arange(seq_len, device=device, dtype=dtype)
     freqs = torch.einsum("i,j->ij", t, inv_freq)  # [T, dim/2]
     cos = freqs.cos()[None, None, :, :]  # [1,1,T,dim/2]
     sin = freqs.sin()[None, None, :, :]  # [1,1,T,dim/2]
     return cos, sin
 
+
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     # x: [B, H, T, D]; rotate first D_rope = 2 * cos.size(-1)
     d2 = cos.size(-1)
-    x1 = x[..., : 2*d2]
-    x2 = x[..., 2*d2 :]
+    x1 = x[..., : 2 * d2]
+    x2 = x[..., 2 * d2 :]
     x1_even = x1[..., 0::2]
-    x1_odd  = x1[..., 1::2]
+    x1_odd = x1[..., 1::2]
     rot_even = x1_even * cos - x1_odd * sin
-    rot_odd  = x1_even * sin + x1_odd * cos
+    rot_odd = x1_even * sin + x1_odd * cos
     x1_rot = torch.stack([rot_even, rot_odd], dim=-1).flatten(-2)
     return torch.cat([x1_rot, x2], dim=-1)
 
@@ -137,9 +148,10 @@ class Conv1D(nn.Module):
         return x.view(size_out)
 
 
-
 class GPT2AttentionLite(nn.Module):
-    def __init__(self, config: GPT2ConfigLite, layer_idx: int, ve_gate_channels: int = 32):
+    def __init__(
+        self, config: GPT2ConfigLite, layer_idx: int, ve_gate_channels: int = 32
+    ):
         super().__init__()
         self.embed_dim = config.n_embd
         self.num_heads: int = config.n_head
@@ -150,22 +162,35 @@ class GPT2AttentionLite(nn.Module):
         self.scale_attn_by_inverse_layer_idx = config.scale_attn_by_inverse_layer_idx
         self.layer_idx = layer_idx
 
-        self.c_attn = Conv1D(3 * self.embed_dim, self.embed_dim, init_std=config.initializer_range)
-        self.c_proj = Conv1D(self.embed_dim, self.embed_dim, init_std=config.initializer_range)
+        self.c_attn = Conv1D(
+            3 * self.embed_dim, self.embed_dim, init_std=config.initializer_range
+        )
+        self.c_proj = Conv1D(
+            self.embed_dim, self.embed_dim, init_std=config.initializer_range
+        )
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
 
         # Optional legacy buffers (keep for checkpoint compatibility)
         max_pos = config.n_positions
-        self.register_buffer("bias", torch.tril(torch.ones(max_pos, max_pos, dtype=torch.uint8)).view(1, 1, max_pos, max_pos))
+        self.register_buffer(
+            "bias",
+            torch.tril(torch.ones(max_pos, max_pos, dtype=torch.uint8)).view(
+                1, 1, max_pos, max_pos
+            ),
+        )
         self.register_buffer("masked_bias", torch.tensor(-1e4))
 
-        self.use_rope = (config.pos_emb == "rope")
+        self.use_rope = config.pos_emb == "rope"
         self.rope_theta = config.rope_theta
         self.rope_pct = config.rope_pct
 
         self.ve_gate_channels = ve_gate_channels
-        self.ve_gate = nn.Linear(self.ve_gate_channels, self.num_heads, bias=False) if has_ve(layer_idx, config.n_layer) else None
+        self.ve_gate = (
+            nn.Linear(self.ve_gate_channels, self.num_heads, bias=False)
+            if has_ve(layer_idx, config.n_layer)
+            else None
+        )
 
     def _split_heads(self, x):
         b, t, c = x.shape
@@ -177,19 +202,27 @@ class GPT2AttentionLite(nn.Module):
         b, t, h, d = x.shape
         return x.view(b, t, h * d)
 
-    def forward(self, x, ve, window_size, attention_mask=None, ):
+    def forward(
+        self,
+        x,
+        ve,
+        window_size,
+        attention_mask=None,
+    ):
         # note: not using the attention mask because we always use causal attention
         # and that is controlled by a single variable in flash_attn
         b, t, _ = x.shape
-        qkv = self.c_attn(x)             # [B,T,3*C]
+        qkv = self.c_attn(x)  # [B,T,3*C]
         q, k, v = qkv.split(self.embed_dim, dim=2)
         q = self._split_heads(q)
         k = self._split_heads(k)
-        v = self._split_heads(v) # (b, n_heads, t, d)
+        v = self._split_heads(v)  # (b, n_heads, t, d)
 
         if ve is not None:
             ve = ve.view(b, t, self.num_heads, self.head_dim)
-            gate = 2 * torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))  # (B, T, n_head), range (0, 2)
+            gate = 2 * torch.sigmoid(
+                self.ve_gate(x[..., : self.ve_gate_channels])
+            )  # (B, T, n_head), range (0, 2)
             _to_add = gate.unsqueeze(-1) * ve
             _to_add = _to_add.permute(0, 2, 1, 3).contiguous()
             v = v + _to_add
@@ -198,18 +231,22 @@ class GPT2AttentionLite(nn.Module):
             rope_dim = int(self.rope_pct * self.head_dim)
             rope_dim = rope_dim - (rope_dim % 2)
             cos, sin = rotary_cos_sin(t, rope_dim, self.rope_theta, x.device, x.dtype)
-            q = torch.cat([apply_rope(q[..., :rope_dim], cos, sin), q[..., rope_dim:]], dim=-1)
-            k = torch.cat([apply_rope(k[..., :rope_dim], cos, sin), k[..., rope_dim:]], dim=-1)
+            q = torch.cat(
+                [apply_rope(q[..., :rope_dim], cos, sin), q[..., rope_dim:]], dim=-1
+            )
+            k = torch.cat(
+                [apply_rope(k[..., :rope_dim], cos, sin), k[..., rope_dim:]], dim=-1
+            )
 
         # B,H,T,D -> B,T,H,D
-        q = q.permute(0,2,1,3)
-        k = k.permute(0,2,1,3)
-        v = v.permute(0,2,1,3)
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
         y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         # B T H D -> B H T D
-        y = y.permute(0,2,1,3)
+        y = y.permute(0, 2, 1, 3)
 
-        y = self._merge_heads(y)         # [B,T,C]
+        y = self._merge_heads(y)  # [B,T,C]
         y = self.c_proj(y)
         y = self.resid_dropout(y)
         return y
@@ -225,9 +262,12 @@ class GPT2MLPLite(nn.Module):
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = torch.nn.functional.gelu(x)  # keep minimal; HF supports multiple activations
+        x = torch.nn.functional.gelu(
+            x
+        )  # keep minimal; HF supports multiple activations
         x = self.c_proj(x)
         return self.dropout(x)
+
 
 class GPT2BlockLite(nn.Module):
     def __init__(self, config, layer_idx: int):
@@ -238,7 +278,9 @@ class GPT2BlockLite(nn.Module):
         self.mlp = GPT2MLPLite(config)
 
     def forward(self, x, *, window_size, ve, attention_mask=None):
-        x = x + self.attn(self.ln_1(x), ve=ve, window_size=window_size, attention_mask=attention_mask)
+        x = x + self.attn(
+            self.ln_1(x), ve=ve, window_size=window_size, attention_mask=attention_mask
+        )
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -247,6 +289,7 @@ def has_ve(layer_idx: int, n_layer: int) -> bool:
     """Returns True if GPT layer should have Value Embedding (alternating, last layer always included)."""
     return layer_idx % 2 == (n_layer - 1) % 2
 
+
 class GPT2ModelLite(nn.Module):
     def __init__(self, config: GPT2ConfigLite):
         super().__init__()
@@ -254,18 +297,23 @@ class GPT2ModelLite(nn.Module):
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
         self.drop = nn.Dropout(config.embd_pdrop)
-        self.h = nn.ModuleList([GPT2BlockLite(config, layer_idx=i) for i in range(config.n_layer)])
+        self.h = nn.ModuleList(
+            [GPT2BlockLite(config, layer_idx=i) for i in range(config.n_layer)]
+        )
         self.ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.gradient_checkpointing = False
         self.window_sizes = self._compute_window_sizes(config)
 
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
-        self.x0_lambdas = nn.Parameter(
-            torch.full((config.n_layer,), 0.1)
+        self.x0_lambdas = nn.Parameter(torch.full((config.n_layer,), 0.1))
+        self.value_embeds = nn.ModuleDict(
+            {
+                str(i): nn.Embedding(config.vocab_size, config.n_embd)
+                for i in range(config.n_layer)
+                if has_ve(i, config.n_layer)
+            }
         )
-        self.value_embeds = nn.ModuleDict({str(i): nn.Embedding(config.vocab_size, config.n_embd) for i in range(config.n_layer) if has_ve(i, config.n_layer)})
         self.reset_parameters()
-
 
     def _compute_window_sizes(self, config: GPT2ConfigLite):
         """
@@ -279,7 +327,9 @@ class GPT2ModelLite(nn.Module):
         Characters: L=long (full context), S=short (half context)
         """
         pattern = config.window_pattern.upper()
-        assert all(c in "SL" for c in pattern), f"Invalid window_pattern: {pattern}. Use only S and L."
+        assert all(c in "SL" for c in pattern), (
+            f"Invalid window_pattern: {pattern}. Use only S and L."
+        )
         # Map characters to window sizes
         long_window = config.n_positions
         short_window = long_window // 2
@@ -325,20 +375,26 @@ class GPT2ModelLite(nn.Module):
         for i, block in enumerate(self.h):
             window_size = self.window_sizes[i]
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.value_embeds[str(i)](input_ids) if str(i) in self.value_embeds else None
+            ve = (
+                self.value_embeds[str(i)](input_ids)
+                if str(i) in self.value_embeds
+                else None
+            )
 
             if self.gradient_checkpointing and self.training:
                 # Explicitly set use_reentrant per PyTorch recommendation.
-                x = checkpoint(lambda _x: block(
-                    _x,
-                    ve=ve,
-                    window_size=window_size,
-                    attention_mask=attn_bias
-                ), x, use_reentrant=False)
+                x = checkpoint(
+                    lambda _x: block(
+                        _x, ve=ve, window_size=window_size, attention_mask=attn_bias
+                    ),
+                    x,
+                    use_reentrant=False,
+                )
             else:
                 x = block(x, ve=ve, window_size=window_size, attention_mask=attn_bias)
 
         return self.ln_f(x)
+
 
 class GPT2LMHeadModelLite(nn.Module):
     def __init__(self, config):
@@ -355,7 +411,14 @@ class GPT2LMHeadModelLite(nn.Module):
     def gradient_checkpointing_disable(self):
         self.transformer.gradient_checkpointing = False
 
-    def forward(self, input_ids=None, attention_mask=None, labels=None, return_dict=True, **kwargs):
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        labels=None,
+        return_dict=True,
+        **kwargs,
+    ):
         hidden = self.transformer(input_ids=input_ids, attention_mask=attention_mask)
         logits = self.lm_head(hidden)
 
@@ -363,7 +426,9 @@ class GPT2LMHeadModelLite(nn.Module):
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            loss = nn.CrossEntropyLoss()(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            loss = nn.CrossEntropyLoss()(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            )
 
         if return_dict:
             return CausalLMOutputLite(loss=loss, logits=logits)

@@ -36,8 +36,9 @@ from train.v2.logging_utils import (
 from train.v2.gpt2 import GPT, GPTConfig
 from train.v2.hf_gpt2_rewrite import GPT2LMHeadModelLite, GPT2ConfigLite
 
+
 def build_model_meta(
-    depth, vocab_size, aspect_raio, max_seq_len, head_dim, window_pattern = "L"
+    depth, vocab_size, aspect_raio, max_seq_len, head_dim, window_pattern="L"
 ) -> GPT:
     """Build a model on meta device for a given depth (shapes/dtypes only, no data)."""
     # Model dim is nudged up to nearest multiple of head_dim for clean division
@@ -107,6 +108,7 @@ class CustomMLP(torch.nn.Module):
         x = self.dropout(x)
         return x
 
+
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
         self,
@@ -140,7 +142,7 @@ class GPT2LightningModule(pl.LightningModule):
             # params = self.model.num_scaling_params()
             # from pprint import pprint
             # pprint(params)
-            #self.model = GPT2LMHeadModel(config)
+            # self.model = GPT2LMHeadModel(config)
             self.model = GPT2LMHeadModelLite(config)
             # for block in self.model.transformer.h:
             #     block.mlp = CustomMLP(config.n_embd, config.resid_pdrop)
@@ -181,7 +183,7 @@ class GPT2LightningModule(pl.LightningModule):
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
         labels = batch.pop("labels")
-        #logits = self(**batch)
+        # logits = self(**batch)
         outputs = self(**batch)
         # labels = batch.pop("labels")
         # loss = self(idx=batch["input_ids"], targets=labels)
@@ -189,7 +191,7 @@ class GPT2LightningModule(pl.LightningModule):
         # keep this upcast!
         # https://x.com/jwthickstun/status/1737134520141246938
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
-        #logits = logits.float()  # upcast logits and compute loss in fp32
+        # logits = logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log("train_loss", loss.detach(), prog_bar=True, logger=True)
         return loss
@@ -201,12 +203,12 @@ class GPT2LightningModule(pl.LightningModule):
         # labels = batch.pop("labels")
         labels = batch.pop("labels")
         outputs = self(**batch)
-        #logits = self(**batch)
+        # logits = self(**batch)
 
         # keep this upcast!
         # https://x.com/jwthickstun/status/1737134520141246938
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
-        #logits = logits.float()  # upcast logits and compute loss in fp32
+        # logits = logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log(
             "val_loss",
@@ -373,7 +375,10 @@ class GPT2LightningModule(pl.LightningModule):
                 "params": [
                     p
                     for n, p in self.model.named_parameters()
-                    if (not any(nd in n for nd in no_decay) and not any(nd in n for nd in special))
+                    if (
+                        not any(nd in n for nd in no_decay)
+                        and not any(nd in n for nd in special)
+                    )
                 ],
                 "weight_decay": self.hparams.weight_decay,
             },
@@ -434,7 +439,7 @@ class GPT2LightningModule(pl.LightningModule):
             optimizer_grouped_parameters,
             lr=self.hparams.learning_rate,
             betas=(0.9, 0.95),
-            fused=True
+            fused=True,
         )
 
         train_dataloader = self.train_dataloader()
@@ -529,7 +534,7 @@ def main(args: argparse.Namespace) -> None:
         scale_attn_by_inverse_layer_idx=True,
         use_cache=False,
         pos_emb="rope",
-        window_pattern="SSSL"
+        window_pattern="SSSL",
     )
     model = GPT2LightningModule(
         data_dir=tokenized_dataset_path,
