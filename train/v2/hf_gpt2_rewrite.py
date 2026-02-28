@@ -1,4 +1,6 @@
+import os
 import json
+import math
 import re
 from dataclasses import dataclass
 
@@ -7,6 +9,13 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from anticipation.v2.nanochat.flash_attention import flash_attn
+from anticipation.v2.config import AnticipationV2Settings
+
+
+def print0(s="", **kwargs):
+    ddp_rank = int(os.environ.get("RANK", 0))
+    if ddp_rank == 0:
+        print(s, **kwargs)
 
 
 @dataclass
@@ -437,3 +446,337 @@ class GPT2LMHeadModelLite(nn.Module):
     @property
     def device(self) -> torch.device:
         return self.wte.weight.device
+
+
+def build_model_meta(
+    depth: int,
+    anticipation_settings: AnticipationV2Settings,
+    embd_pdrop,
+    resid_pdrop,
+    aspect_ratio: int = 64,
+    head_dim: int = 128,
+    window_pattern: str = "SSSL",
+    activation_function: str = "gelu_new",
+    layer_norm_epsilon: float = 1e-5,
+    scale_attn_weights: bool = True,
+    scale_attn_by_inverse_layer_idx: bool = True,
+    pos_emb: str = "rope",
+) -> GPT2ConfigLite:
+    """
+    From: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L125
+
+    :param anticipation_settings: AMT settings
+    :param depth: The number of transformer blocks in the model
+    :param aspect_ratio: model_dim = depth * aspect_ratio. Default is 64, same as nanochat
+    :param head_dim: The target head dimension for attention. Default 128, same as nanochat
+    :param window_pattern: S = half context, L = full context, e.g. SSSL = short short short long.
+        default is SSSL, same as nanochat
+    :return: model config that can be used to build GPT-2 style AMT.
+    """
+    base_dim = depth * aspect_ratio
+    model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim
+    num_heads = model_dim // head_dim
+    return GPT2ConfigLite(
+        vocab_size=anticipation_settings.vocab.total_tokens(),
+        n_positions=anticipation_settings.context_size,
+        # --- leave these below ---
+        n_embd=model_dim,
+        n_layer=depth,
+        n_head=num_heads,
+        # ----------------------
+        embd_pdrop=embd_pdrop,
+        resid_pdrop=resid_pdrop,
+        activation_function=activation_function,
+        layer_norm_epsilon=layer_norm_epsilon,
+        scale_attn_weights=scale_attn_weights,
+        scale_attn_by_inverse_layer_idx=scale_attn_by_inverse_layer_idx,
+        use_cache=False,
+        pos_emb=pos_emb,
+        window_pattern=window_pattern,
+    )
+
+
+def get_num_scaling_params(gpt: GPT2LMHeadModelLite) -> dict[str, int]:
+    # https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/nanochat/gpt.py#L319
+    # Count each group separately (mirrors the grouping in setup_optimizers)
+    wte = sum(p.numel() for p in gpt.transformer.wte.parameters())
+    value_embeds = sum(p.numel() for p in gpt.value_embeds.parameters())
+    lm_head = sum(p.numel() for p in gpt.lm_head.parameters())
+    transformer_matrices = sum(p.numel() for p in gpt.transformer.h.parameters())
+    scalars = gpt.resid_lambdas.numel() + gpt.x0_lambdas.numel()
+    total = wte + value_embeds + lm_head + transformer_matrices + scalars
+    assert total == sum(p.numel() for p in gpt.parameters()), "Parameter count mismatch"
+    return {
+        "wte": wte,
+        "value_embeds": value_embeds,
+        "lm_head": lm_head,
+        "transformer_matrices": transformer_matrices,
+        "scalars": scalars,
+        "total": total,
+    }
+
+
+def estimate_flops(gpt: GPT2LMHeadModelLite) -> int:
+    """
+    Return the estimated FLOPs per token for the model (forward + backward).
+    Each matmul weight parameter contributes 2 FLOPs (multiply *, accumulate +) in forward,
+        and 2X that in backward => 2+4=6.
+
+    Cleanest explanation of this:
+        https://medium.com/@dzmitrybahdanau/the-flops-calculus-of-language-model-training-3b19c1f025e4
+
+    On top of that, 12 * h * q * effective_seq_len accounts for key @ query matmul flops inside attention.
+
+    With sliding windows, effective_seq_len varies per layer (capped by window size).
+
+    Ref: https://arxiv.org/abs/2204.02311 (PaLM paper).
+
+    This is ~1% off from the exact formulas of Chinchilla paper, the difference is:
+    - Chinchilla counts the embedding layer as flops (? weird, it's just a lookup => we ignore)
+    - Chinchilla counts exp/sum/divide in attention softmax as flops (a little sus and very tiny => we ignore)
+    """
+    nparams = sum(p.numel() for p in gpt.parameters())
+
+    # Exclude non-matmul params: embeddings and per-layer scalars
+    value_embeds_numel = sum(ve.weight.numel() for ve in gpt.value_embeds.values())
+    nparams_exclude = (
+        gpt.transformer.wte.weight.numel()
+        + value_embeds_numel
+        + gpt.resid_lambdas.numel()
+        + gpt.x0_lambdas.numel()
+    )
+    h = gpt.config.n_head
+    q = gpt.config.n_embd // gpt.config.n_head
+    t = gpt.config.n_positions
+
+    # Sum attention FLOPs per layer, accounting for sliding window
+    attn_flops = 0
+    for window_size in gpt.window_sizes:
+        window = window_size[0]  # (left, right) tuple, we use left
+        effective_seq = t if window < 0 else min(window, t)
+        attn_flops += 12 * h * q * effective_seq
+    num_flops_per_token = 6 * (nparams - nparams_exclude) + attn_flops
+    return num_flops_per_token
+
+
+def get_scaling_params(m: GPT2LMHeadModelLite) -> int:
+    # From: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L258
+    # As for which params to use exactly, transformer matrices + lm_head gives
+    # cleanest scaling laws (see dev/LOG.md Jan 27, 2026)
+    params_counts = get_num_scaling_params(m)
+    _scaling_params = params_counts["transformer_matrices"] + params_counts["lm_head"]
+    return _scaling_params
+
+
+def get_scaling_analysis_data(
+    gpt: GPT2LMHeadModelLite,
+    num_sequences_per_batch: int,
+    num_iterations: int = -1,
+    target_param_data_ratio: float = -1.0,
+    target_flops: int = -1,
+) -> dict:
+    """Determine the number of steps to train for given some target.
+
+    We may define the number of steps during training in a few ways:
+    - explicitly as an argument `num_iterations`, which is basically a hard override
+    - target_param_data_ratio, which is the quantity D:N reported in Chinchilla paper
+        we need to discover the optimal ratio for ourselves, do not just look at the paper and put in
+        the value of 20, which is what they found to be optimal in their analysis.
+    - target_flops, which is the total number of algorithmic flops we want to spend on
+        training the model.
+
+    Any of these can be given, the function will return the number of training steps required to meet that
+    budget.
+
+    To discover the optimal ratio D:N, we want to sweep over:
+    - FLOP budgets
+    - Model Depth, which in term changes the number of parameters
+
+    The script used to do this for nanochat is here:
+        https://github.com/karpathy/nanochat/blob/master/runs/scaling_laws.sh
+
+    From here:
+        https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L326
+
+    :param gpt: The model instance we wish to use.
+        This object holds the number of parameters, estimated FLOPs, and the depth of the model.
+    :param num_sequences_per_batch: The batch size we wish to use in SEQUENCES (not tokens)
+        in nanochat, they choose this dynamically - but only after discovering the optimal D:N ratio.
+    :param num_iterations:
+        the number of iterations to train for. If set to -1, determine the effective number of iterations
+        based on the other arguments, otherwise this parameter is exactly the number of iterations to train
+    :param target_param_data_ratio:
+        D:N in chinchilla, set to -1 if we want to determine the number of iterations by FLOPs.
+    :param target_flops: The total number of FLOP we have to train this model. In the nanochat scaling laws
+        experiment, they choose:
+            - 1e18
+            - 2.15e18
+            - 4.64e18
+            - 1e19
+
+    :return:
+    """
+    # Calculate the number of iterations we will train for and set up the various schedulers
+    total_batch_size = num_sequences_per_batch * gpt.config.n_positions
+
+    # num_iterations: either it is given, or from target flops, or from target data:param ratio (in that order)
+    assert num_iterations > 0 or target_param_data_ratio > 0 or target_flops > 0
+
+    num_scaling_params = get_scaling_params(gpt)
+    num_flops_per_token = estimate_flops(gpt)
+
+    if num_iterations > 0:
+        # Override num_iterations to a specific value if given
+        effective_num_iterations = num_iterations
+        print0(
+            f"Using user-provided number of iterations: {effective_num_iterations:,}"
+        )
+    elif target_flops > 0:
+        # Calculate the number of iterations from the target flops (used in scaling laws
+        # analysis, e.g. runs/scaling_laws.sh)
+        effective_num_iterations = round(
+            target_flops / (num_flops_per_token * total_batch_size)
+        )
+        print0(
+            f"Calculated number of iterations from target FLOPs: {effective_num_iterations:,}"
+        )
+    elif target_param_data_ratio > 0:
+        # target_tokens is the optimal number of tokens for the model we are about to train
+        target_tokens = int(target_param_data_ratio * num_scaling_params)
+
+        # Calculate the number of iterations from the target param data ratio (the most common use case)
+        effective_num_iterations = target_tokens // total_batch_size
+        print0(
+            f"Calculated number of iterations from target data:param ratio: {effective_num_iterations:,}"
+        )
+    else:
+        raise ValueError("No training horizon specified")
+
+    # the actual number of tokens we will train for
+    total_tokens = total_batch_size * effective_num_iterations
+    print0(f"Total number of training tokens: {total_tokens:,}")
+
+    # e.g. Chinchilla was ~20
+    print0(
+        f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}"
+    )
+    print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
+
+    # If we are doing scaling law stuff, then we want to produce 3 plots similar to Chinchilla:
+    # 1. IsoFLOP Curves: Final Validation Metric vs. FLOPs
+    #       do a quadratic fit and then pick the model that achieves lowest loss for fixed FLOPs
+    #       we need to know, for that model, its parameter count and number of training tokens
+    #       for each FLOP budget, use each dimension: parameter count, token count to create the
+    #       next two graphs...
+    # 2. Compute Optimal Model Size: Optimal Parameters vs. FLOPs
+    # 3. Compute Optimal Training Tokens: Optimal Training Tokens vs. FLOPs
+    param_counts_by_purpose = {
+        "num_params_" + x: y for x, y in get_num_scaling_params(gpt).items()
+    }
+    return {
+        "num_iterations": effective_num_iterations,
+        "num_scaling_params": num_scaling_params,
+        "num_flops_per_token": num_flops_per_token,
+        "target_flops": target_flops,
+        "total_tokens": total_tokens,
+        "effective_flops": num_flops_per_token * total_tokens,
+        "total_batch_size": total_batch_size,
+        **param_counts_by_purpose,
+    }
+
+
+def get_compute_optimal_settings(
+    gpt: GPT2LMHeadModelLite,
+    anticipation_settings: AnticipationV2Settings,
+    target_param_data_ratio: float = 10.5,
+    total_batch_size: int = -1,
+    weight_decay: float = 0.2,
+):
+    """Get parameters for scaling laws analysis.
+
+    All credit here goes to nanochat:
+        https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L255
+        https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/runs/scaling_laws.sh#L69
+
+    :param gpt: The model we want to train using compute-optimal settings.
+    :param anticipation_settings: The AMT settings.
+    :param target_param_data_ratio: The target param to data ratio, from the Chinchilla paper this is N:D.
+    :param total_batch_size: The total batch size to use during training. If this is -1 then we will
+        determine the optimal batch size for fixed FLOPs. If not -1, then we use that value.
+    :param weight_decay: set to 0.2, which is the default argument in the nanochat codebase.
+    :return:
+    """
+
+    # 1) Use scaling laws to determine the optimal training horizon in tokens
+    # The compute-optimal models satisfy the Tokens:Params ratio of --target-param-data-ratio (derived experimentally
+    # via scaling laws analysis).
+    # We've already initialized the model so we have Params.
+    # Optimal Tokens is now simply: --target-param-data-ratio * Params
+
+    scaling_params = get_scaling_params(gpt)
+
+    # optimal tokens for the model we are about to train
+    target_tokens = int(target_param_data_ratio * scaling_params)
+
+    with torch.device("meta"):
+        d12_ref_config = build_model_meta(
+            depth=12,
+            anticipation_settings=anticipation_settings,
+            aspect_ratio=64,
+            head_dim=128,
+            window_pattern="SSSL",
+        )
+        d12_ref = GPT2LMHeadModelLite(d12_ref_config)
+
+        # compute-optimal d12 training horizon in tokens (measured empirically)
+        D_REF = target_param_data_ratio * get_scaling_params(d12_ref)
+
+        # optimal batch size at d12 ~= 524,288 tokens (measured empirically)
+        B_REF = 2**19
+
+    # 2) Now that we have the token horizon, we can calculate the optimal batch size
+    # We follow the Power Lines paper (Bopt ∝ D^0.383), ref: https://arxiv.org/abs/2505.13738
+    # The optimal batch size grows as approximately D^0.383,
+    # so e.g. if D doubles from d12 to d24, B should grow by 2^0.383 ≈ 1.3x.
+    if total_batch_size == -1:
+        # when this is set to -1, then we auto compute it - otherwise it is a user-override.
+        batch_size_ratio = target_tokens / D_REF
+        predicted_batch_size = B_REF * batch_size_ratio**0.383
+
+        # clamp the batch size to the nearest power of 2 for efficiency
+        total_batch_size = 2 ** round(math.log2(predicted_batch_size))
+        print0(f"Auto-computed optimal batch size: {total_batch_size:,} tokens")
+
+    # 3) Knowing the batch size, we can now calculate a learning rate correction
+    # (bigger batch size allows higher learning rates)
+    batch_lr_scale = 1.0
+    batch_ratio = total_batch_size / B_REF  # B/B_ref
+    if batch_ratio != 1.0:
+        # SGD: linear scaling with batch size is standard (not used in nanochat)
+        # AdamW: sqrt scaling is standard: η ∝ \sqrt{(B/B_ref)}
+        # Muon: we will use the same scaling for Muon as for AdamW: η ∝ \sqrt{(B/B_ref)}
+        #   (not studied carefully, assumption!)
+        # NOTE: for AMT, we do not use Muon so far
+
+        # η ∝ \sqrt{(B/B_ref)}
+        batch_lr_scale = batch_ratio**0.5
+        print0(
+            f"Scaling LRs by {batch_lr_scale:.4f} for batch size {total_batch_size:,} (reference: {B_REF:,})"
+        )
+
+    # 4) Knowing the batch size and the token horizon, we can now calculate the appropriate weight decay scaling
+    # We adopt the T_epoch framework from https://arxiv.org/abs/2405.13698
+    # Central idea of the paper is that T_epoch = B/(η·λ·D) should remain constant.
+    # Above, we used learning rate scaling η ∝ √(B/B_ref). So it's a matter of ~10 lines of math
+    # to derive that to keep T_epoch constant, we need:
+    #   λ = λ_ref · √(B/B_ref) · (D_ref/D)
+    #
+    # Note that these papers study AdamW, *not* Muon. We are blindly following AdamW theory for scaling
+    # hoping it ~works for Muon too.
+    weight_decay_scaled = (
+        weight_decay * math.sqrt(total_batch_size / B_REF) * (D_REF / target_tokens)
+    )
+    if weight_decay_scaled != weight_decay:
+        print0(
+            f"Scaling weight decay from {weight_decay:.6f} to {weight_decay_scaled:.6f} for depth 12."
+        )

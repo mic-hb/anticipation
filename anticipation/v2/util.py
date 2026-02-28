@@ -10,6 +10,12 @@ import tempfile
 from contextlib import contextmanager
 
 
+def save_text(text_file_path: Path, my_text: str) -> None:
+    ddp_rank = int(os.environ.get("RANK", 0))
+    if ddp_rank == 0:
+        text_file_path.write_text(my_text, encoding="utf-8")
+
+
 @contextmanager
 def temporary_directory(
     env_var: str = "CUSTOM_TMP_DIR",

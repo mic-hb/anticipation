@@ -1,3 +1,4 @@
+import gc
 import os
 import time
 import argparse
@@ -26,6 +27,7 @@ from pytorch_lightning.utilities import rank_zero_info
 from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
 from anticipation.v2.config import AnticipationV2Settings
+from anticipation.v2.util import save_text
 from train.v2.custom_metrics import TokenPerplexity, ApproxBPS
 from train.v2.dataset_utils import PreTokenizedDataset
 from train.v2.logging_utils import (
@@ -33,80 +35,12 @@ from train.v2.logging_utils import (
     SampleConfig,
     MaxStepProgressBar,
 )
-from train.v2.gpt2 import GPT, GPTConfig
-from train.v2.hf_gpt2_rewrite import GPT2LMHeadModelLite, GPT2ConfigLite
-
-
-def build_model_meta(
-    depth, vocab_size, aspect_raio, max_seq_len, head_dim, window_pattern="L"
-) -> GPT:
-    """Build a model on meta device for a given depth (shapes/dtypes only, no data)."""
-    # Model dim is nudged up to nearest multiple of head_dim for clean division
-    # (FA3 requires head_dim divisible by 8, and this guarantees head_dim == args.head_dim exactly)
-    base_dim = depth * aspect_raio
-    model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim
-    num_heads = model_dim // head_dim
-    config = GPTConfig(
-        sequence_len=max_seq_len,
-        vocab_size=vocab_size,
-        n_layer=12,
-        n_head=12,
-        n_kv_head=12,
-        n_embd=768,
-        window_pattern="L",
-    )
-    with torch.device("meta"):
-        model_meta = GPT(config)
-    return model_meta
-
-
-def create_model_from_settings(
-    settings: AnticipationV2Settings,
-    depth: int,
-    head_dim: int,
-    aspect_ratio: int = 64,
-    window_pattern: str = "L",
-) -> GPT:
-    # 1) Build on meta device (only shapes/dtypes, no data)
-    model = build_model_meta(
-        depth=depth,
-        vocab_size=settings.vocab.total_tokens(),
-        aspect_raio=aspect_ratio,
-        max_seq_len=settings.context_size,
-        head_dim=head_dim,
-        window_pattern=window_pattern,
-    )
-    model_config = model.config
-    model_config_kwargs = asdict(model_config)
-    device = "cuda"
-    print(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
-
-    # 2) All tensors get storage on target device but with uninitialized (garbage) data
-    model.to_empty(device=device)
-
-    # 3) All tensors get initialized
-    model.init_weights()
-
-    # orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-    model = torch.compile(
-        model, dynamic=False
-    )  # the inputs to model will never change shape so dynamic=False is safe
-    return model
-
-
-class CustomMLP(torch.nn.Module):
-    def __init__(self, n_embed, resid_pdrop):
-        super().__init__()
-        self.dropout = torch.nn.Dropout(resid_pdrop)
-        self.c_fc = torch.nn.Linear(n_embed, 4 * n_embed, bias=False)
-        self.c_proj = torch.nn.Linear(4 * n_embed, n_embed, bias=False)
-
-    def forward(self, x):
-        x = self.c_fc(x)
-        x = F.relu(x).square()
-        x = self.c_proj(x)
-        x = self.dropout(x)
-        return x
+from train.v2.hf_gpt2_rewrite import (
+    GPT2LMHeadModelLite,
+    GPT2ConfigLite,
+    build_model_meta,
+    get_scaling_analysis_data,
+)
 
 
 class GPT2LightningModule(pl.LightningModule):
@@ -114,6 +48,7 @@ class GPT2LightningModule(pl.LightningModule):
         self,
         data_dir: Path,
         settings: AnticipationV2Settings,
+        num_flops_per_token: int,
         learning_rate: float = 5e-5,
         warmup_steps: int = 0,
         weight_decay: float = 0.0,
@@ -125,6 +60,7 @@ class GPT2LightningModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.data_dir = data_dir
+        self.num_flops_per_token = num_flops_per_token
 
         if pretrained_checkpoint:
             self.model = GPT2LMHeadModel.from_pretrained(
@@ -132,24 +68,9 @@ class GPT2LightningModule(pl.LightningModule):
             )
             rank_zero_info(f"Loaded pre-trained model from {pretrained_checkpoint}")
         else:
-            # self.model = create_model_from_settings(
-            #     settings,
-            #     depth=12,
-            #     head_dim=64,
-            #     aspect_ratio=64,
-            #     window_pattern="L",
-            # )
-            # params = self.model.num_scaling_params()
-            # from pprint import pprint
-            # pprint(params)
             # self.model = GPT2LMHeadModel(config)
             self.model = GPT2LMHeadModelLite(config)
-            # for block in self.model.transformer.h:
-            #     block.mlp = CustomMLP(config.n_embd, config.resid_pdrop)
-            #
-            self.model = torch.compile(
-                self.model, dynamic=False
-            )  # the inputs to model will never change shape so dynamic=False is safe
+            self.model = torch.compile(self.model, dynamic=False)
 
         self.model.gradient_checkpointing_enable()
         self.model.config.bos_token_id = self.model.config.eos_token_id = 0
@@ -194,6 +115,20 @@ class GPT2LightningModule(pl.LightningModule):
         # logits = logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log("train_loss", loss.detach(), prog_bar=True, logger=True)
+
+        # things that are logged in nanochat training,
+        # see: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L539
+        step = self.global_step
+
+        if self.num_flops_per_token != -1:
+            # DDP stuff is taken care of for us
+            num_tokens_per_step = (
+                self.hparams.train_batch_size * self.anticipation_settings.context_size
+            )
+            flops_per_step = self.num_flops_per_token * num_tokens_per_step
+            flops_so_far = step * flops_per_step
+            self.log("flops_so_far", flops_so_far, prog_bar=False, logger=True)
+
         return loss
 
     def validation_step(
@@ -390,6 +325,8 @@ class GPT2LightningModule(pl.LightningModule):
                 ],
                 "weight_decay": 0.0,
             },
+            # --- new nanochat groups ---
+            # see: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/nanochat/gpt.py#L348
             {
                 "params": [self.model.transformer.resid_lambdas],
                 "lr": 0.5 * 0.01,
@@ -404,37 +341,6 @@ class GPT2LightningModule(pl.LightningModule):
                 "eps": 1e-10,
             },
         ]
-        # optimizer_grouped_parameters = [
-        #     {
-        #         "params": list(self.model.lm_head.parameters()),
-        #         "weight_decay": self.hparams.weight_decay,
-        #     },
-        #     {
-        #         "params": list(self.model.transformer.wte.parameters()),
-        #         "weight_decay": self.hparams.weight_decay,
-        #     },
-        #     {
-        #         "params": list(self.model.transformer.h.parameters()),
-        #         "weight_decay": self.hparams.weight_decay,
-        #     },
-        #     {
-        #         "params": [self.model.resid_lambdas],
-        #         "weight_decay": self.hparams.weight_decay,
-        #     },
-        #     {
-        #         "params": [self.model.x0_lambdas],
-        #         "weight_decay": self.hparams.weight_decay,
-        #     },
-        #     # {
-        #     #     "params": [
-        #     #         p
-        #     #         for n, p in self.model.named_parameters()
-        #     #         if any(nd in n for nd in no_decay)
-        #     #     ],
-        #     #     "weight_decay": 0.0,
-        #     # },
-        # ]
-
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters,
             lr=self.hparams.learning_rate,
@@ -505,6 +411,7 @@ class HuggingFaceCheckpoint(ModelCheckpoint):
 
         step_dir = os.path.join(self.dirpath, f"step-{trainer.global_step}")
 
+        # TODO: don't forget to re-enabled this
         raw_model = pl_module.model if hasattr(pl_module, "model") else pl_module
         # raw_model.save_pretrained(
         #     step_dir, safe_serialization=True, max_shard_size="2GB"
@@ -516,35 +423,96 @@ def main(args: argparse.Namespace) -> None:
     tokenized_dataset_path = Path(args.data_dir)
     assert tokenized_dataset_path.exists()
     assert tokenized_dataset_path.is_dir()
-    settings_file = next(tokenized_dataset_path.glob("settings_*.json"), None)
-    if not settings_file:
-        raise RuntimeError("Unable to find settings")
-    settings = AnticipationV2Settings.load_from_disk(settings_file)
-    model_config = GPT2ConfigLite(
-        vocab_size=settings.vocab.total_tokens(),
-        n_positions=settings.context_size,
-        n_embd=args.hidden_dim,
-        n_layer=args.num_layers,
-        n_head=args.num_heads,
-        embd_pdrop=args.embed_pdrop,
-        resid_pdrop=args.resid_pdrop,
-        activation_function="gelu_new",
-        layer_norm_epsilon=1e-5,
-        scale_attn_weights=True,
-        scale_attn_by_inverse_layer_idx=True,
-        use_cache=False,
-        pos_emb="rope",
-        window_pattern="SSSL",
+    anticipation_settings_file = next(
+        tokenized_dataset_path.glob("settings_*.json"), None
     )
+    if not anticipation_settings_file:
+        raise RuntimeError("Unable to find settings")
+    anticipation_settings = AnticipationV2Settings.load_from_disk(
+        anticipation_settings_file
+    )
+
+    print(f"Saving outputs to: {args.output_dir}")
+
+    if args.num_train_steps > -1:
+        # TODO: warn
+        pass
+
+    depth = args.depth
+    flops = args.flops
+    target_param_data_ratio = args.target_param_data_ratio
+    if depth > -1 and (flops > -1 or target_param_data_ratio > -1):
+        model_config: GPT2ConfigLite = build_model_meta(
+            depth,
+            anticipation_settings=anticipation_settings,
+            # these dropouts are very important for us
+            embd_pdrop=args.embed_pdrop,
+            resid_pdrop=args.resid_pdrop,
+            aspect_ratio=args.aspect_ratio,
+            head_dim=args.head_dim,
+            window_pattern=args.window_pattern,
+            layer_norm_epsilon=args.layer_norm_epsilon,
+            pos_emb=args.pos_emb,
+        )
+        with torch.device("meta"):
+            model = GPT2LMHeadModelLite(model_config)
+            train_info = get_scaling_analysis_data(
+                model,
+                args.train_batch_size,
+                num_iterations=-1,
+                target_param_data_ratio=target_param_data_ratio,
+                target_flops=flops,
+            )
+            model_conf_json = asdict(model_config)
+            csv_row = {
+                **train_info,
+                **model_conf_json,
+            }
+            total_tokens = csv_row["total_tokens"]
+            dataset = PreTokenizedDataset(tokenized_dataset_path / "train.npy")
+            assert total_tokens <= dataset.num_tokens, (
+                f"Not enough tokens to meet FLOP or ratio budget. Need: {total_tokens}, Have: {dataset.num_tokens}"
+            )
+            del dataset
+
+            effective_num_iterations = csv_row["num_iterations"]
+            num_flops_per_token = csv_row["num_flops_per_token"]
+
+            # save the settings if rank0
+            save_to_path = Path(args.output_dir)
+            save_text(save_to_path, json.dumps(csv_row))
+    else:
+        model_config = GPT2ConfigLite(
+            vocab_size=anticipation_settings.vocab.total_tokens(),
+            n_positions=anticipation_settings.context_size,
+            n_embd=args.hidden_dim,
+            n_layer=args.num_layers,
+            n_head=args.num_heads,
+            embd_pdrop=args.embed_pdrop,
+            resid_pdrop=args.resid_pdrop,
+            # as of right now doesn't do anything, we always use gelu
+            activation_function="gelu_new",
+            layer_norm_epsilon=args.layer_norm_epsilon,
+            pos_emb=args.pos_emb,
+            window_pattern=args.window_pattern,
+            scale_attn_weights=True,
+            scale_attn_by_inverse_layer_idx=True,
+            use_cache=False,
+        )
+        num_flops_per_token = -1
+        effective_num_iterations = args.num_train_steps
+        csv_row = {}
+
     model = GPT2LightningModule(
         data_dir=tokenized_dataset_path,
-        settings=settings,
+        settings=anticipation_settings,
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
         train_batch_size=args.train_batch_size,
         eval_batch_size=args.eval_batch_size,
         pretrained_checkpoint=args.checkpoint_path,
+        num_flops_per_token=num_flops_per_token,
         config=model_config,
     )
 
@@ -562,10 +530,14 @@ def main(args: argparse.Namespace) -> None:
     logger_dict = {}
     if args.use_wandb:
         logger_dict["logger"] = WandbLogger(
-            project="gpt-anticipation-2.0",
+            project=args.wandb_project,
             name=f"run-{int(time.time())}",
             save_dir=args.output_dir,
-            config=vars(args),
+            config={
+                **vars(args),
+                **csv_row,
+            },
+            tags=[args.wandb_tag],
         )
 
     ddp_params = {}
@@ -574,9 +546,13 @@ def main(args: argparse.Namespace) -> None:
             find_unused_parameters=False, static_graph=False
         )
 
+    # ------
+    # clean up some stuff from setup
+    gc.collect()
+    # ------
     trainer = pl.Trainer(
-        max_steps=args.num_train_steps,
-        # always use gpu and then thrown an error if it's unavailable - that's preferrable
+        max_steps=effective_num_iterations,
+        # always use gpu and then thrown an error if it's unavailable - that's preferable
         # to defaulting to cpu imo
         accelerator="gpu",
         devices=args.gpus_per_node,
@@ -597,7 +573,7 @@ def main(args: argparse.Namespace) -> None:
         precision="bf16-mixed" if args.bf16 else 32,
         gradient_clip_val=args.max_grad_norm,
         accumulate_grad_batches=args.gradient_accumulation_steps,
-        log_every_n_steps=10,
+        log_every_n_steps=args.log_every_n_steps,
         val_check_interval=args.steps_per_eval,
         **logger_dict,
     )
@@ -620,6 +596,7 @@ def get_argparser() -> argparse.ArgumentParser:
         default=None,
         help="Initialize model weights from this checkpoint",
     )
+
     # Model parameters
     parser.add_argument(
         "--hidden_dim", type=int, default=768, help="Model hidden dimensions"
@@ -635,6 +612,23 @@ def get_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--resid_pdrop", type=float, default=0.1, help="Apply residual dropout"
+    )
+    parser.add_argument(
+        "--pos_emb",
+        type=str,
+        default="absolute",
+        choices=["absolute", "rope"],
+        help=(
+            "The positional embedding choice: either `absolute` (vanilla) or RoPE. (rope)"
+        ),
+    )
+    parser.add_argument(
+        "--layer_norm_epsilon", type=float, help="Layer Norm epsilon", default=1e-5
+    )
+    parser.add_argument(
+        "--window_pattern",
+        type=str,
+        help="Sliding window pattern for long/short attention. Use only S and L, S = partial, L = long/full context.",
     )
 
     # Optimization parameters
@@ -699,14 +693,65 @@ def get_argparser() -> argparse.ArgumentParser:
         "--gpus_per_node", type=int, default=1, help="Number of GPUs per node"
     )  # 4 gpus
 
+    # Logging Parameters
+    parser.add_argument(
+        "--log_every_n_steps",
+        type=int,
+        default=10,
+        help="Frequency for logging during training.",
+    )
     parser.add_argument(
         "--use_wandb", action="store_true", help="whether to use wandb logging"
     )
+    parser.add_argument(
+        "--wandb_tag", type=str, help="A tag to associate with this run"
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        help="The project to save this run ",
+        default="gpt-anticipation-2.0",
+    )
+
+    # Testing Parameters
     parser.add_argument(
         "--no_ddp",
         action="store_true",
         help="whether to ignore using DDP - just for testing really.",
     )
+
+    # Nanochat Scaling Parameters
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=-1,
+        help="The depth of the model, defaults to -1, which means model dimensions are chosen manually. If not -1, then model params are determined by `build_model_meta`. ",
+    )
+    parser.add_argument(
+        "--flops",
+        type=int,
+        default=-1,
+        help="The FLOP budget for training, defaults to -1, which does nothing. If not -1, then training parameters are fit accordingly for scaling laws analysis.",
+    )
+    parser.add_argument(
+        "--target_param_data_ratio",
+        type=float,
+        default=-1.0,
+        help="The ratio of params to tokens (D:N in chinchilla). defaults to -1, which does nothing. If not -1, then number of iterations are dynamically determined by this.",
+    )
+    parser.add_argument(
+        "--aspect_ratio",
+        type=int,
+        default=64,
+        help="model_dim = depth * aspect_ratio. Default is 64, same as nanochat",
+    )
+    parser.add_argument(
+        "--head_dim",
+        type=int,
+        default=128,
+        help="The dimension of head in MHA, only used for nanochat related stuff.",
+    )
+
     return parser
 
 
