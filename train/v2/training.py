@@ -2,6 +2,8 @@ import os
 import time
 import argparse
 from pathlib import Path
+import json
+from dataclasses import asdict
 
 import torch
 import torch.nn.functional as F
@@ -31,7 +33,79 @@ from train.v2.logging_utils import (
     SampleConfig,
     MaxStepProgressBar,
 )
+from train.v2.gpt2 import GPT, GPTConfig
+from train.v2.hf_gpt2_rewrite import GPT2LMHeadModelLite, GPT2ConfigLite
 
+def build_model_meta(
+    depth, vocab_size, aspect_raio, max_seq_len, head_dim, window_pattern = "L"
+) -> GPT:
+    """Build a model on meta device for a given depth (shapes/dtypes only, no data)."""
+    # Model dim is nudged up to nearest multiple of head_dim for clean division
+    # (FA3 requires head_dim divisible by 8, and this guarantees head_dim == args.head_dim exactly)
+    base_dim = depth * aspect_raio
+    model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim
+    num_heads = model_dim // head_dim
+    config = GPTConfig(
+        sequence_len=max_seq_len,
+        vocab_size=vocab_size,
+        n_layer=12,
+        n_head=12,
+        n_kv_head=12,
+        n_embd=768,
+        window_pattern="L",
+    )
+    with torch.device("meta"):
+        model_meta = GPT(config)
+    return model_meta
+
+
+def create_model_from_settings(
+    settings: AnticipationV2Settings,
+    depth: int,
+    head_dim: int,
+    aspect_ratio: int = 64,
+    window_pattern: str = "L",
+) -> GPT:
+    # 1) Build on meta device (only shapes/dtypes, no data)
+    model = build_model_meta(
+        depth=depth,
+        vocab_size=settings.vocab.total_tokens(),
+        aspect_raio=aspect_ratio,
+        max_seq_len=settings.context_size,
+        head_dim=head_dim,
+        window_pattern=window_pattern,
+    )
+    model_config = model.config
+    model_config_kwargs = asdict(model_config)
+    device = "cuda"
+    print(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
+
+    # 2) All tensors get storage on target device but with uninitialized (garbage) data
+    model.to_empty(device=device)
+
+    # 3) All tensors get initialized
+    model.init_weights()
+
+    # orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
+    model = torch.compile(
+        model, dynamic=False
+    )  # the inputs to model will never change shape so dynamic=False is safe
+    return model
+
+
+class CustomMLP(torch.nn.Module):
+    def __init__(self, n_embed, resid_pdrop):
+        super().__init__()
+        self.dropout = torch.nn.Dropout(resid_pdrop)
+        self.c_fc = torch.nn.Linear(n_embed, 4 * n_embed, bias=False)
+        self.c_proj = torch.nn.Linear(4 * n_embed, n_embed, bias=False)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = F.relu(x).square()
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
 
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
@@ -56,7 +130,24 @@ class GPT2LightningModule(pl.LightningModule):
             )
             rank_zero_info(f"Loaded pre-trained model from {pretrained_checkpoint}")
         else:
-            self.model = GPT2LMHeadModel(config)
+            # self.model = create_model_from_settings(
+            #     settings,
+            #     depth=12,
+            #     head_dim=64,
+            #     aspect_ratio=64,
+            #     window_pattern="L",
+            # )
+            # params = self.model.num_scaling_params()
+            # from pprint import pprint
+            # pprint(params)
+            #self.model = GPT2LMHeadModel(config)
+            self.model = GPT2LMHeadModelLite(config)
+            # for block in self.model.transformer.h:
+            #     block.mlp = CustomMLP(config.n_embd, config.resid_pdrop)
+            #
+            self.model = torch.compile(
+                self.model, dynamic=False
+            )  # the inputs to model will never change shape so dynamic=False is safe
 
         self.model.gradient_checkpointing_enable()
         self.model.config.bos_token_id = self.model.config.eos_token_id = 0
@@ -83,17 +174,22 @@ class GPT2LightningModule(pl.LightningModule):
         self.approx_bps = ApproxBPS()
 
     def forward(self, **inputs):
-        return self.model(**inputs)
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            return self.model(**inputs)
 
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
         labels = batch.pop("labels")
+        #logits = self(**batch)
         outputs = self(**batch)
+        # labels = batch.pop("labels")
+        # loss = self(idx=batch["input_ids"], targets=labels)
 
         # keep this upcast!
         # https://x.com/jwthickstun/status/1737134520141246938
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
+        #logits = logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log("train_loss", loss.detach(), prog_bar=True, logger=True)
         return loss
@@ -101,12 +197,16 @@ class GPT2LightningModule(pl.LightningModule):
     def validation_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
+        # logits = self(idx=batch["input_ids"])
+        # labels = batch.pop("labels")
         labels = batch.pop("labels")
         outputs = self(**batch)
+        #logits = self(**batch)
 
         # keep this upcast!
         # https://x.com/jwthickstun/status/1737134520141246938
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
+        #logits = logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log(
             "val_loss",
@@ -267,12 +367,13 @@ class GPT2LightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
+        special = ["resid_lambdas", "x0_lambdas"]
         optimizer_grouped_parameters = [
             {
                 "params": [
                     p
                     for n, p in self.model.named_parameters()
-                    if not any(nd in n for nd in no_decay)
+                    if (not any(nd in n for nd in no_decay) and not any(nd in n for nd in special))
                 ],
                 "weight_decay": self.hparams.weight_decay,
             },
@@ -284,11 +385,56 @@ class GPT2LightningModule(pl.LightningModule):
                 ],
                 "weight_decay": 0.0,
             },
+            {
+                "params": [self.model.transformer.resid_lambdas],
+                "lr": 0.5 * 0.01,
+                "weight_decay": 0.0,
+                "eps": 1e-10,
+            },
+            {
+                "params": [self.model.transformer.x0_lambdas],
+                "lr": 0.5,
+                "weight_decay": 0.0,
+                "betas": (0.96, 0.95),
+                "eps": 1e-10,
+            },
         ]
+        # optimizer_grouped_parameters = [
+        #     {
+        #         "params": list(self.model.lm_head.parameters()),
+        #         "weight_decay": self.hparams.weight_decay,
+        #     },
+        #     {
+        #         "params": list(self.model.transformer.wte.parameters()),
+        #         "weight_decay": self.hparams.weight_decay,
+        #     },
+        #     {
+        #         "params": list(self.model.transformer.h.parameters()),
+        #         "weight_decay": self.hparams.weight_decay,
+        #     },
+        #     {
+        #         "params": [self.model.resid_lambdas],
+        #         "weight_decay": self.hparams.weight_decay,
+        #     },
+        #     {
+        #         "params": [self.model.x0_lambdas],
+        #         "weight_decay": self.hparams.weight_decay,
+        #     },
+        #     # {
+        #     #     "params": [
+        #     #         p
+        #     #         for n, p in self.model.named_parameters()
+        #     #         if any(nd in n for nd in no_decay)
+        #     #     ],
+        #     #     "weight_decay": 0.0,
+        #     # },
+        # ]
+
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters,
             lr=self.hparams.learning_rate,
             betas=(0.9, 0.95),
+            fused=True
         )
 
         train_dataloader = self.train_dataloader()
@@ -355,9 +501,9 @@ class HuggingFaceCheckpoint(ModelCheckpoint):
         step_dir = os.path.join(self.dirpath, f"step-{trainer.global_step}")
 
         raw_model = pl_module.model if hasattr(pl_module, "model") else pl_module
-        raw_model.save_pretrained(
-            step_dir, safe_serialization=True, max_shard_size="2GB"
-        )
+        # raw_model.save_pretrained(
+        #     step_dir, safe_serialization=True, max_shard_size="2GB"
+        # )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -369,7 +515,7 @@ def main(args: argparse.Namespace) -> None:
     if not settings_file:
         raise RuntimeError("Unable to find settings")
     settings = AnticipationV2Settings.load_from_disk(settings_file)
-    model_config = GPT2Config(
+    model_config = GPT2ConfigLite(
         vocab_size=settings.vocab.total_tokens(),
         n_positions=settings.context_size,
         n_embd=args.hidden_dim,
@@ -382,6 +528,8 @@ def main(args: argparse.Namespace) -> None:
         scale_attn_weights=True,
         scale_attn_by_inverse_layer_idx=True,
         use_cache=False,
+        pos_emb="rope",
+        window_pattern="SSSL"
     )
     model = GPT2LightningModule(
         data_dir=tokenized_dataset_path,
