@@ -49,6 +49,7 @@ class GPT2ConfigLite:
     rope_theta: float = 10000.0
     rope_pct: float = 1.0  # fraction of head_dim to rotate
     window_pattern: str = "L"
+    embedding_and_lm_head_weight_tying: bool = True
 
     @classmethod
     def from_json(cls, path: str):
@@ -406,13 +407,15 @@ class GPT2ModelLite(nn.Module):
 
 
 class GPT2LMHeadModelLite(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: GPT2ConfigLite):
         super().__init__()
         self.config = config
         self.transformer = GPT2ModelLite(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # Tie weights like HF tie_weights: lm_head.weight points to wte.weight.
-        self.lm_head.weight = self.transformer.wte.weight
+
+        if config.embedding_and_lm_head_weight_tying:
+            # Tie weights like HF tie_weights: lm_head.weight points to wte.weight.
+            self.lm_head.weight = self.transformer.wte.weight
 
     def gradient_checkpointing_enable(self):
         self.transformer.gradient_checkpointing = True
@@ -461,6 +464,7 @@ def build_model_meta(
     scale_attn_weights: bool = True,
     scale_attn_by_inverse_layer_idx: bool = True,
     pos_emb: str = "rope",
+    embedding_and_lm_head_weight_tying: bool = True,
 ) -> GPT2ConfigLite:
     """
     From: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L125
@@ -493,6 +497,7 @@ def build_model_meta(
         use_cache=False,
         pos_emb=pos_emb,
         window_pattern=window_pattern,
+        embedding_and_lm_head_weight_tying=embedding_and_lm_head_weight_tying,
     )
 
 
@@ -500,12 +505,24 @@ def get_num_scaling_params(gpt: GPT2LMHeadModelLite) -> dict[str, int]:
     # https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/nanochat/gpt.py#L319
     # Count each group separately (mirrors the grouping in setup_optimizers)
     wte = sum(p.numel() for p in gpt.transformer.wte.parameters())
-    value_embeds = sum(p.numel() for p in gpt.value_embeds.parameters())
+    value_embeds = sum(p.numel() for p in gpt.transformer.value_embeds.parameters())
     lm_head = sum(p.numel() for p in gpt.lm_head.parameters())
     transformer_matrices = sum(p.numel() for p in gpt.transformer.h.parameters())
-    scalars = gpt.resid_lambdas.numel() + gpt.x0_lambdas.numel()
-    total = wte + value_embeds + lm_head + transformer_matrices + scalars
-    assert total == sum(p.numel() for p in gpt.parameters()), "Parameter count mismatch"
+    scalars = gpt.transformer.resid_lambdas.numel() + gpt.transformer.x0_lambdas.numel()
+
+    # these two are unique to us, nanochat removes these - we will keep for now. Have
+    # not yet ablated them to see if removing them improves for us
+    wpe = sum(p.numel() for p in gpt.transformer.wpe.parameters())
+    ln_f = sum(p.numel() for p in gpt.transformer.ln_f.parameters())
+
+    total = wte + wpe + value_embeds + lm_head + transformer_matrices + scalars + ln_f
+
+    if gpt.config.embedding_and_lm_head_weight_tying:
+        # if using weight tying the params are shared
+        total -= wte
+
+    actual = sum(p.numel() for p in gpt.parameters())
+    assert total == actual, f"Parameter count mismatch. Expected: {total:,}, Actual: {actual:,}."
     return {
         "wte": wte,
         "value_embeds": value_embeds,
@@ -538,12 +555,13 @@ def estimate_flops(gpt: GPT2LMHeadModelLite) -> int:
     nparams = sum(p.numel() for p in gpt.parameters())
 
     # Exclude non-matmul params: embeddings and per-layer scalars
-    value_embeds_numel = sum(ve.weight.numel() for ve in gpt.value_embeds.values())
+    value_embeds_numel = sum(ve.weight.numel() for ve in gpt.transformer.value_embeds.values())
     nparams_exclude = (
-        gpt.transformer.wte.weight.numel()
-        + value_embeds_numel
-        + gpt.resid_lambdas.numel()
-        + gpt.x0_lambdas.numel()
+        gpt.transformer.wte.weight.numel() +
+        gpt.transformer.wpe.weight.numel() +
+        value_embeds_numel +
+        gpt.transformer.resid_lambdas.numel() +
+        gpt.transformer.x0_lambdas.numel()
     )
     h = gpt.config.n_head
     q = gpt.config.n_embd // gpt.config.n_head
@@ -551,7 +569,7 @@ def estimate_flops(gpt: GPT2LMHeadModelLite) -> int:
 
     # Sum attention FLOPs per layer, accounting for sliding window
     attn_flops = 0
-    for window_size in gpt.window_sizes:
+    for window_size in gpt.transformer.window_sizes:
         window = window_size[0]  # (left, right) tuple, we use left
         effective_seq = t if window < 0 else min(window, t)
         attn_flops += 12 * h * q * effective_seq
@@ -654,11 +672,11 @@ def get_scaling_analysis_data(
 
     # the actual number of tokens we will train for
     total_tokens = total_batch_size * effective_num_iterations
-    print0(f"Total number of training tokens: {total_tokens:,}")
+    print0(f"Compute-Optimal number of training tokens: {total_tokens:,}")
 
     # e.g. Chinchilla was ~20
     print0(
-        f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}"
+        f"Tokens : Scaling params ratio: {total_batch_size * effective_num_iterations / num_scaling_params:.2f}"
     )
     print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 

@@ -24,7 +24,7 @@ from pytorch_lightning.callbacks import (
 from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_info
 
-from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
+from transformers import PretrainedConfig, GPT2LMHeadModel
 
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.util import save_text
@@ -453,6 +453,7 @@ def main(args: argparse.Namespace) -> None:
             window_pattern=args.window_pattern,
             layer_norm_epsilon=args.layer_norm_epsilon,
             pos_emb=args.pos_emb,
+            embedding_and_lm_head_weight_tying=not args.no_weight_tie,
         )
         with torch.device("meta"):
             model = GPT2LMHeadModelLite(model_config)
@@ -470,8 +471,15 @@ def main(args: argparse.Namespace) -> None:
             }
             total_tokens = csv_row["total_tokens"]
             dataset = PreTokenizedDataset(tokenized_dataset_path / "train.npy")
-            assert total_tokens <= dataset.num_tokens, (
-                f"Not enough tokens to meet FLOP or ratio budget. Need: {total_tokens}, Have: {dataset.num_tokens}"
+
+            # https://arxiv.org/abs/2305.16264v5
+            # TL;DR of 'scaling data constrained language models (2025)', a model can
+            # backprop over the same data up to 4 times more or less before reaching
+            # diminishing returns.
+            token_multiplier = 4
+            total_tokens_available = token_multiplier * dataset.num_tokens
+            assert total_tokens <= total_tokens_available, (
+                f"Not enough tokens to meet FLOP or ratio budget. Need: {total_tokens:,}, Have: {dataset.num_tokens:,}"
             )
             del dataset
 
@@ -479,7 +487,7 @@ def main(args: argparse.Namespace) -> None:
             num_flops_per_token = csv_row["num_flops_per_token"]
 
             # save the settings if rank0
-            save_to_path = Path(args.output_dir)
+            save_to_path = Path(args.output_dir) / "scaling_analysis_info.json"
             save_text(save_to_path, json.dumps(csv_row))
     else:
         model_config = GPT2ConfigLite(
@@ -498,6 +506,7 @@ def main(args: argparse.Namespace) -> None:
             scale_attn_weights=True,
             scale_attn_by_inverse_layer_idx=True,
             use_cache=False,
+            embedding_and_lm_head_weight_tying=not args.no_weight_tie,
         )
         num_flops_per_token = -1
         effective_num_iterations = args.num_train_steps
@@ -529,15 +538,27 @@ def main(args: argparse.Namespace) -> None:
 
     logger_dict = {}
     if args.use_wandb:
+        if args.wandb_tag:
+            tags = [str(args.wandb_tag).strip()]
+        else:
+            tags = []
+
+        if tags == ["scaling"]:
+            run_name = f"scaling-run-{int(time.time())}"
+        else:
+            run_name = f"run-{int(time.time())}"
+
         logger_dict["logger"] = WandbLogger(
             project=args.wandb_project,
-            name=f"run-{int(time.time())}",
+            name=run_name,
             save_dir=args.output_dir,
             config={
                 **vars(args),
+                # this is already saved to disk, but associate it with the run
+                # just for convenience
                 **csv_row,
             },
-            tags=[args.wandb_tag],
+            tags=tags,
         )
 
     ddp_params = {}
@@ -578,6 +599,9 @@ def main(args: argparse.Namespace) -> None:
         **logger_dict,
     )
     trainer.fit(model)
+
+    # ensure we run validation at the very end too
+    trainer.validate(model)
 
 
 def get_argparser() -> argparse.ArgumentParser:
@@ -629,6 +653,12 @@ def get_argparser() -> argparse.ArgumentParser:
         "--window_pattern",
         type=str,
         help="Sliding window pattern for long/short attention. Use only S and L, S = partial, L = long/full context.",
+        default="SSSL"
+    )
+    parser.add_argument(
+        "--no_weight_tie",
+        action="store_true",
+        help="whether apply weight tying to the GPT LM head and token embeddings."
     )
 
     # Optimization parameters
@@ -729,8 +759,8 @@ def get_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--flops",
-        type=int,
-        default=-1,
+        type=float,
+        default=-1.0,
         help="The FLOP budget for training, defaults to -1, which does nothing. If not -1, then training parameters are fit accordingly for scaling laws analysis.",
     )
     parser.add_argument(
