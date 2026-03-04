@@ -26,7 +26,6 @@ from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
 from anticipation.v2.config import AnticipationV2Settings
 
-
 class PreTokenizedDataset(Dataset):
     """
     Must be constructed with v2 sequence packing.
@@ -57,11 +56,48 @@ class PreTokenizedDataset(Dataset):
             "labels": labels,
         }
 
+class MixedDataset(Dataset):
+    def __init__(
+        self,
+        dataset_a: PreTokenizedDataset,
+        dataset_b: PreTokenizedDataset,
+        total_steps: int,
+        batch_size: int,
+        mix_fn,
+    ):
+        self.dataset_a = dataset_a
+        self.dataset_b = dataset_b
+        self.total_steps = total_steps
+        self.batch_size = batch_size
+        self.mix_fn = mix_fn
+        self.current_step =  torch.tensor(0, dtype=torch.long).share_memory_()
+
+    def set_step(self, step: int):
+        self.current_step.fill_(step)
+
+    def __len__(self):
+        # large enough to not run out during training
+        return self.total_steps * self.batch_size
+
+    def __getitem__(self, idx):
+        progress = self.current_step.item() / self.total_steps
+        ratio_a = self.mix_fn(progress)
+        if torch.rand(1).item() < ratio_a:
+            inner_idx = idx % len(self.dataset_a)
+            return self.dataset_a[inner_idx]
+        else:
+            inner_idx = idx % len(self.dataset_b)
+            return self.dataset_b[inner_idx]
+
 
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
         self,
         data_dir: Path,
+        data_dir_b: Path = None,
+        mode: str = "single",
+        total_steps: int = 100000,
+        mix_fn=None,
         learning_rate: float = 5e-5,
         warmup_steps: int = 0,
         weight_decay: float = 0.0,
@@ -71,8 +107,13 @@ class GPT2LightningModule(pl.LightningModule):
         config: PretrainedConfig = None,
     ):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["config", "mix_fn"])
         self.data_dir = data_dir
+
+        self.data_dir_b = data_dir_b
+        self.mode = mode
+        self.total_steps = total_steps
+        self.mix_fn = mix_fn
 
         if pretrained_checkpoint:
             self.model = GPT2LMHeadModel.from_pretrained(
@@ -89,28 +130,28 @@ class GPT2LightningModule(pl.LightningModule):
         return self.model(**inputs)
 
     def training_step(self, batch, batch_idx):
+        if self.mode == "mixed" and hasattr(self, "_mixed_dataset"):
+            self._mixed_dataset.set_step(self.global_step)
+            progress = self.global_step / self.total_steps
+            self.log("mix_progress", progress, prog_bar=True)
+            ratio_a = mixed_dataset_fn(progress)
+            self.log("ratio_transcripts", ratio_a, prog_bar=True)
+
         labels = batch.pop("labels")
         outputs = self(**batch)
-
-        logits = outputs.logits.float()  # upcast logits and compute loss in fp32
+        logits = outputs.logits.float()
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log("train_loss", loss.detach(), prog_bar=True, logger=True)
         return loss
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
         labels = batch.pop("labels")
         outputs = self(**batch)
-
-        logits = outputs.logits.float()  # upcast logits and compute loss in fp32
+        logits = outputs.logits.float()
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
-        self.log(
-            "val_loss",
-            loss.detach(),
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=True,
-        )
+        
+        name = "val_loss_transcripts" if dataloader_idx == 0 else "val_loss_lakh"
+        self.log(name, loss.detach(), on_epoch=True, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         return loss
 
     def configure_optimizers(self):
@@ -166,7 +207,20 @@ class GPT2LightningModule(pl.LightningModule):
     def train_dataloader(self) -> DataLoader:
         num_devices = max(1, self.trainer.num_devices)
         per_device_batch_size = self.hparams.train_batch_size // num_devices
-        dataset = PreTokenizedDataset(self.data_dir / "train.npy")
+        
+        if self.mode == "mixed":
+            if not hasattr(self, "_mixed_dataset"):
+                dataset_a = PreTokenizedDataset(self.data_dir / "train.npy")
+                dataset_b = PreTokenizedDataset(self.data_dir_b / "train.npy")
+                self._mixed_dataset = MixedDataset(
+                    dataset_a, dataset_b,
+                    self.total_steps, per_device_batch_size,
+                    self.mix_fn
+                )
+            dataset = self._mixed_dataset
+        else:
+            dataset = PreTokenizedDataset(self.data_dir / "train.npy")
+            
         return DataLoader(
             dataset,
             batch_size=per_device_batch_size,
@@ -175,17 +229,32 @@ class GPT2LightningModule(pl.LightningModule):
             pin_memory=True,
         )
 
-    def val_dataloader(self) -> DataLoader:
+    def val_dataloader(self):
         num_devices = max(1, self.trainer.num_devices)
         per_device_batch_size = self.hparams.train_batch_size // num_devices
-        dataset = PreTokenizedDataset(self.data_dir / "valid.npy")
-        return DataLoader(
-            dataset,
-            batch_size=per_device_batch_size,
-            num_workers=4,
-            shuffle=False,
-            pin_memory=True,
-        )
+        
+        loaders = [
+            DataLoader(
+                PreTokenizedDataset(self.data_dir / "valid.npy"),
+                batch_size=per_device_batch_size,
+                num_workers=4,
+                shuffle=False,
+                pin_memory=True,
+            )
+        ]
+        
+        if self.mode == "mixed" and self.data_dir_b is not None:
+            loaders.append(
+                DataLoader(
+                    PreTokenizedDataset(self.data_dir_b / "valid.npy"),
+                    batch_size=per_device_batch_size,
+                    num_workers=4,
+                    shuffle=False,
+                    pin_memory=True,
+                )
+            )
+        
+        return loaders
 
 
 class MaxStepProgressBar(TQDMProgressBar):
@@ -212,6 +281,12 @@ class MaxStepProgressBar(TQDMProgressBar):
         self.train_progress_bar.total = total
         self._persistent_bar.refresh()
 
+
+def mixed_dataset_fn(progress):
+    if progress < 0.65:
+        return 1.0  # 100% transcripts (or first dataset)
+    else:
+        return 0.0  # 100% lakh (or second dataset)
 
 class HuggingFaceCheckpoint(ModelCheckpoint):
     def __init__(self, config, *args, **kwargs):
@@ -257,6 +332,10 @@ def main(args: argparse.Namespace) -> None:
     )
     model = GPT2LightningModule(
         data_dir=tokenized_dataset_path,
+        data_dir_b=Path(args.data_dir_b) if args.data_dir_b else None,
+        mode=args.mode,
+        total_steps=args.num_train_steps,
+        mix_fn=mixed_dataset_fn if args.mode == "mixed" else None,
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
@@ -301,8 +380,9 @@ def main(args: argparse.Namespace) -> None:
         precision="bf16-mixed" if args.bf16 else 32,
         gradient_clip_val=args.max_grad_norm,
         accumulate_grad_batches=args.gradient_accumulation_steps,
-        log_every_n_steps=10,
+        log_every_n_steps=10, # PREVIOUSLY: was able to get working at 1
         val_check_interval=args.steps_per_eval,
+        limit_val_batches=1000,
         **logger_dict,
     )
     trainer.fit(model)
@@ -393,6 +473,9 @@ def get_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--use_wandb", action="store_true", help="whether to use wandb logging"
     )
+
+    parser.add_argument("--data_dir_b", type=str, default=None)
+    parser.add_argument("--mode", type=str, default="single", choices=["single", "mixed"])
     return parser
 
 

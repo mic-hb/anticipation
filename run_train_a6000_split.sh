@@ -10,9 +10,6 @@
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
 
-
-# --- set up conda and activate it ---
-# assuming conda binary lives here
 CONDA_ACTIVATE_PATH="/share/apps/software/anaconda3/etc/profile.d/conda.sh"
 if source "$CONDA_ACTIVATE_PATH" 2>/dev/null; then
   cd /home/ss3576/anticipation
@@ -22,21 +19,21 @@ else
   echo "conda startup script not found."
 fi
 
-
-#export TORCH_SHOW_CPP_STACKTRACES=1
 nvidia-smi
 
-PYTHONPATH=. torchrun --standalone --nproc_per_node=1 train/v2/training.py \
-    --output_dir output/checkpoints/5m_10song_lakh \
-    --data_dir data/tokenized_datasets/lmd_10songs_train/b82a7a2750e3c5836ffb9bf564720cd8 \
+PYTHONPATH=. torchrun --standalone --nproc_per_node=1 train/v2/training2.py \
+    --output_dir output/checkpoints/5m_mixed_transcripts_10song_lakh \
+    --data_dir data/tokenized_datasets/transcripts/87451b329323d36a658ac64ed9a8bb81 \
+    --data_dir_b data/tokenized_datasets/lmd_10songs_train_anotherset/b82a7a2750e3c5836ffb9bf564720cd8 \
+    --mode mixed \
     --hidden_dim 128 \
     --num_heads 4 \
     --num_layers 4 \
     --gpus_per_node 1 \
     --train_batch_size 64 \
     --gradient_accumulation_steps 2 \
-    --num_train_steps 5000 \
+    --num_train_steps 14000 \
     --steps_per_eval 10 \
-    --steps_per_checkpoint 100 \
+    --steps_per_checkpoint 50 \
     --bf16 \
     --use_wandb

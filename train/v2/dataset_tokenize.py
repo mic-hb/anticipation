@@ -230,13 +230,14 @@ def _tokenize_dataset_in_parallel(
                         ignored_files.append(ignored_file)
 
         # write all the ignored files to disk for awareness
-        field_names = list(ignored_files[0].keys())
-        with open(
-            save_all_dataset_files_to / "ignored_files.csv", "w", newline=""
-        ) as file:
-            writer = csv.DictWriter(file, fieldnames=field_names)  # noqa
-            writer.writeheader()
-            writer.writerows(ignored_files)
+        if ignored_files:
+            field_names = list(ignored_files[0].keys())
+            with open(
+                save_all_dataset_files_to / "ignored_files.csv", "w", newline=""
+            ) as file:
+                writer = csv.DictWriter(file, fieldnames=field_names)  # noqa
+                writer.writeheader()
+                writer.writerows(ignored_files)
 
         # write dataset stats
         stat_path = Path(save_all_dataset_files_to / "stats.json")
@@ -362,7 +363,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset_type",
         type=str,
         default="lakh",
-        choices=["lakh", "aria", "transcripts"],
+        choices=["lakh", "aria", "transcripts", "lakh_10songs_train", "lmd_valid_rest"],
         help=(
             "Which dataset to tokenize. These are expected to be in specific locations in the ./data/ folder"
         ),
@@ -391,6 +392,16 @@ if __name__ == "__main__":
             "settings": CONFIG_ROOT
             / "ar_only_local_midi_settings_b82a7a2750e3c5836ffb9bf564720cd8.json",
             "raw_data_enclosing_path": DATASET_ROOT / "aria-midi-v1-pruned-ext",
+        },
+        "lakh_10songs_train": {
+            "settings": CONFIG_ROOT
+            / "ar_only_local_midi_settings_b82a7a2750e3c5836ffb9bf564720cd8.json",
+            "raw_data_enclosing_path": DATASET_ROOT / "lmd_10songs_train_anotherset",
+        },
+        "lmd_valid_rest": {
+            "settings": CONFIG_ROOT
+            / "ar_only_local_midi_settings_b82a7a2750e3c5836ffb9bf564720cd8.json",
+            "raw_data_enclosing_path": DATASET_ROOT / "lmd_valid_rest",
         },
     }
     dataset_choice = configs[args.dataset_type]

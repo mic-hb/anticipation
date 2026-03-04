@@ -14,7 +14,7 @@ set -e
 # assuming conda binary lives here
 CONDA_ACTIVATE_PATH="/share/apps/software/anaconda3/etc/profile.d/conda.sh"
 if source "$CONDA_ACTIVATE_PATH" 2>/dev/null; then
-  cd /home/mf867/anticipation_isolated/anticipation
+  cd /home/ss3576/anticipation
   conda activate ./env
   echo "activated environment."
 else
