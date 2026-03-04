@@ -236,6 +236,7 @@ class GPT2AttentionLite(nn.Module):
             _to_add = gate.unsqueeze(-1) * ve
             _to_add = _to_add.permute(0, 2, 1, 3).contiguous()
             v = v + _to_add
+            v = v.to(q.dtype)
 
         if self.use_rope:
             rope_dim = int(self.rope_pct * self.head_dim)
@@ -252,6 +253,7 @@ class GPT2AttentionLite(nn.Module):
         q = q.permute(0, 2, 1, 3)
         k = k.permute(0, 2, 1, 3)
         v = v.permute(0, 2, 1, 3)
+        assert v.dtype == q.dtype == k.dtype, f"These must all be equal: v.dtype: {v.dtype}, q.dtype: {q.dtype}, k.dtype: {k.dtype}"
         y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         # B T H D -> B H T D
         y = y.permute(0, 2, 1, 3)
