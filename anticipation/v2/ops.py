@@ -271,9 +271,6 @@ def streaming_relativize_to_tick(
             )
 
             if is_control:
-                if not (to_add[0] >= settings.vocab.CONTROL_OFFSET):
-                    xxx = 10
-
                 # don't let the time be over-subtracted
                 assert to_add[0] >= settings.vocab.CONTROL_OFFSET, (
                     f"!({to_add[0]} >= {settings.vocab.CONTROL_OFFSET})"
