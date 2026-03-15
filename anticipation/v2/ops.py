@@ -14,7 +14,6 @@ from anticipation.v2.types import Token
 T = TypeVar("T")
 
 
-
 def min_time(
     tokens: list[Token],
     settings: AnticipationV2Settings,
