@@ -2,10 +2,10 @@
 These are utilities for testing / developing with the codebase.
 """
 
+from typing import Union
 from dataclasses import dataclass
 from enum import Enum
 import re
-from typing import Union
 
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import Token, MIDITick, MIDIProgramCode, MIDINote
@@ -128,6 +128,8 @@ def get_midi_instrument_name_from_midi_instrument_code(
         return "REST"
     elif instrument_midi_code == 130:
         return "TICK"
+    elif instrument_midi_code == 131:
+        return "ATICK"
     else:
         return "?"
 
@@ -170,7 +172,7 @@ class Event:
         dur_offset = v.ADUR_OFFSET if is_control else v.DUR_OFFSET
 
         if midi_note == "REST" or midi_note == v.TICK:
-            # TODO: consider, should REST be special code?
+            # REST appears only in v1 sequences
             note_instr = v.TICK
             note_offset = 0
             assert is_control is False
@@ -195,6 +197,15 @@ class Event:
         )
 
     @classmethod
+    def from_list_of_token_seq(
+        cls, seqs: list[list[Token]], settings: AnticipationV2Settings
+    ) -> list["Event"]:
+        return cls.from_token_seq(
+            [token for seq in seqs for token in seq],
+            settings,
+        )
+
+    @classmethod
     def from_token_seq(
         cls, raw_event_token_seq: list[Token], settings: AnticipationV2Settings
     ) -> list["Event"]:
@@ -203,19 +214,9 @@ class Event:
 
         i = 0
         events = []
-
-        # the function ops.min_time expects sequence to not contain any flag tokens
-        # prev_t = ops.min_time(
-        #     [
-        #         x
-        #         for x in raw_event_token_seq[i:]
-        #         if x not in (v.ANTICIPATE, v.AUTOREGRESS, v.SEPARATOR)
-        #     ],
-        #     seconds=False,
-        # )
-
         ticks_seen = 0
         prev_tick_abs_time = 0
+
         while i < len(raw_event_token_seq):
             if raw_event_token_seq[i] in (
                 settings.vocab.AUTOREGRESS,
@@ -237,6 +238,7 @@ class Event:
                         original_idx_in_token_seq=i,
                         special_code=special_code,
                         settings=settings,
+                        absolute_time=prev_tick_abs_time,
                     )
                 )
                 i += 1
@@ -251,7 +253,7 @@ class Event:
                         is_control=False,
                         special_code=EventSpecialCode.SEQ_SEPARATION_TOKENS,
                         original_idx_in_token_seq=i,
-                        absolute_time=settings.vocab.TIME_OFFSET + 1,
+                        absolute_time=prev_tick_abs_time,
                         settings=settings,
                     )
                 )
@@ -259,7 +261,7 @@ class Event:
                 continue
             elif raw_event_token_seq[i] == settings.vocab.TICK:
                 # tick token
-                tick_abs_time = ticks_seen * settings.tick_token_frequency_in_midi_ticks
+                tick_abs_time = ticks_seen * settings.tick_token_every_n_ticks
                 events.append(
                     Event(
                         time=settings.vocab.TIME_OFFSET,
@@ -314,13 +316,13 @@ class Event:
                     absolute_time=0,
                     settings=settings,
                 )
-                new_event.absolute_time = prev_tick_abs_time + new_event.midi_time()
-                events.append(new_event)
-
-                if events[-1].is_control:
-                    prev_t = t - settings.vocab.ATIME_OFFSET
+                if not new_event.is_control:
+                    new_event.absolute_time = prev_tick_abs_time + new_event.midi_time()
                 else:
-                    prev_t = t
+                    new_event.absolute_time = (
+                        prev_tick_abs_time + new_event.midi_time()
+                    ) + (settings.delta * settings.time_resolution)
+                events.append(new_event)
                 i += 3
 
         return events
@@ -366,17 +368,20 @@ class Event:
         return Note(self.midi_note())
 
     def as_tokens(self) -> tuple[Token, ...]:
-        if self.special_code == 1:
+        if self.special_code == EventSpecialCode.AUTOREGRESSIVE_TOKEN:
             return (self.settings.vocab.AUTOREGRESS,)
-        elif self.special_code == 2:
+        elif self.special_code == EventSpecialCode.ANTICIPATION_TOKEN:
             return (self.settings.vocab.ANTICIPATE,)
-        elif self.special_code == 3:
+        elif self.special_code == EventSpecialCode.SEQ_SEPARATION_TOKENS:
             return (self.settings.vocab.SEPARATOR,)
+        elif self.special_code == EventSpecialCode.TICK:
+            return (self.settings.vocab.TICK,)
         else:
+            # not a special token, a triple
             return self.time, self.duration, self.note_instr
 
     def is_rest(self) -> bool:
-        if self.settings.tick_token_frequency_in_midi_ticks == 0:
+        if self.settings.tick_token_every_n_ticks == 0:
             return self.note_instr == self.settings.vocab.TICK
         else:
             return False
@@ -385,9 +390,28 @@ class Event:
         return self.special_code == EventSpecialCode.TICK
 
     def is_note_event(self) -> bool:
+        # NB: a note just means it's a valid triple, it can
+        # also be a control
+        return self.special_code == EventSpecialCode.TYPICAL_EVENT
+
+    def is_anticipate(self) -> bool:
+        return self.special_code == EventSpecialCode.ANTICIPATION_TOKEN
+
+    def is_separator(self) -> bool:
+        return self.special_code == EventSpecialCode.SEQ_SEPARATION_TOKENS
+
+    def is_musically_equal(self, other) -> bool:
+        if not isinstance(other, Event):
+            return False
+
+        # equality without considering which token space this came from
+        # (event vs. control does not matter)
         return (
-            self.special_code == EventSpecialCode.TYPICAL_EVENT
-        ) and not self.is_control
+            self.midi_time() == other.midi_time()
+            and self.midi_duration() == other.midi_duration()
+            and self.midi_note() == other.midi_note()
+            and self.midi_instrument() == other.midi_instrument()
+        )
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, Event):
@@ -401,8 +425,8 @@ class Event:
             and self.settings.time_resolution == other.settings.time_resolution
             and self.settings.max_note_duration_in_seconds
             == other.settings.max_note_duration_in_seconds
-            and self.settings.tick_token_frequency_in_midi_ticks
-            == other.settings.tick_token_frequency_in_midi_ticks
+            and self.settings.tick_token_every_n_ticks
+            == other.settings.tick_token_every_n_ticks
             and
             # note properties
             self.time == other.time
@@ -421,3 +445,6 @@ class Event:
             self.note().to_name(),
             self.absolute_time,
         )
+
+    def __hash__(self) -> int:
+        return hash(repr(self))
