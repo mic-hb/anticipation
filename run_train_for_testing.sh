@@ -9,18 +9,49 @@ set -e
 #    --steps_per_eval 100 \
 #    --use_wandb
 
-PYTHONPATH=. python train/v2/training.py \
+#PYTHONPATH=.  torchrun --standalone --nproc_per_node=4 train/v2/training.py \
+#    --output_dir output/checkpoints/test_checkpoints \
+#    --data_dir data/tokenized_datasets/lmd_full/b82a7a2750e3c5836ffb9bf564720cd8 \
+#    --num_layers 12 \
+#    --gpus_per_node 4 \
+#    --train_batch_size 256 \
+#    --eval_batch_size 256 \
+#    --num_heads 12 \
+#    --hidden_dim 768 \
+#    --gradient_accumulation_steps 2 \
+#    --steps_per_eval 1000 \
+#    --save_midi_output_after_step 10000 \
+#    --num_events_to_generate_for_midi_inference 80 \
+#    --steps_per_checkpoint 100000 \
+#    --use_wandb
+
+#
+
+# Lakh alone has 1,790,841,856 tokens for AR only
+# Largest FLOP we can handle is 1e17
+# FLOPs:
+# 1e16
+# 2.15e16
+# 4.68e16
+# 1e17
+
+# DEPTHS:
+# 2, 4, 6, 8, 10, 12, 14
+PYTHONPATH=.  python train/v2/training.py \
     --output_dir output/checkpoints/test_checkpoints \
     --data_dir data/tokenized_datasets/lmd_full/b82a7a2750e3c5836ffb9bf564720cd8 \
-    --num_layers 1 \
     --gpus_per_node 1 \
-    --train_batch_size 32 \
-    --eval_batch_size 32 \
-    --num_heads 8 \
-    --hidden_dim 64 \
+    --train_batch_size 64 \
+    --eval_batch_size 64 \
+    --steps_per_eval 1000 \
+    --depth 18 \
+    --flops 1e17 \
     --gradient_accumulation_steps 1 \
-    --steps_per_eval 50 \
-    --save_midi_output_after_step 25 \
+    --save_midi_output_after_step 1000000 \
     --num_events_to_generate_for_midi_inference 80 \
+    --steps_per_checkpoint 100000 \
+    --window_pattern "SSSL" \
+    --pos_emb "rope" \
     --use_wandb \
-    --no_ddp
+    --wandb_project "gpt_empire"
+	

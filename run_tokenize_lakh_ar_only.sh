@@ -10,19 +10,43 @@
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
 
-# --- set up conda and activate it ---
-# assuming conda binary lives here
-CONDA_ACTIVATE_PATH="/share/apps/software/anaconda3/etc/profile.d/conda.sh"
-if source "$CONDA_ACTIVATE_PATH" 2>/dev/null; then
-  cd /home/mf867/anticipation_isolated/anticipation
-  conda activate ./env
-  echo "activated environment."
-else
-  echo "conda startup script not found."
+init_conda() {
+  # helper: source file if it exists
+  _try_source() {
+    local path="$1"
+    [[ -f "$path" ]] || return 1
+    # shellcheck disable=SC1090
+    source "$path"
+  }
+
+  # Prefer conda’s reported base, if conda is on PATH
+  if command -v conda >/dev/null 2>&1; then
+    local base
+    base="$(conda info --base 2>/dev/null || true)"
+    if [[ -n "${base:-}" ]] && _try_source "$base/etc/profile.d/conda.sh"; then
+      return 0
+    fi
+  fi
+
+  # Fallbacks
+  _try_source "$HOME/miniconda3/etc/profile.d/conda.sh" && return 0
+  _try_source "$HOME/anaconda3/etc/profile.d/conda.sh" && return 0
+
+  echo "Error: could not locate conda or conda.sh. Install conda or add it to PATH." >&2
+  return 1
+}
+
+if ! init_conda; then
+  exit 1
 fi
 
+conda activate ./env
+
 # we run out of space if we just write to tmp
-export CUSTOM_TMP_DIR=/scratch/$USER
-mkdir -p "$CUSTOM_TMP_DIR"
+if mkdir -p "/scratch/$USER"; then
+    export CUSTOM_TMP_DIR=/scratch/$USER
+else
+    echo "Warning: failed to create custom temp dir: $DIR" >&2
+fi
 
 PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type lakh --settings_json_name "ar_only_local_midi_settings_6fcc94c173552d9e87d57ecec95a1d97.json"

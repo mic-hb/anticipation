@@ -24,6 +24,12 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+def save_text(text_file_path: Path, my_text: str) -> None:
+    ddp_rank = int(os.environ.get("RANK", 0))
+    if ddp_rank == 0:
+        text_file_path.write_text(my_text, encoding="utf-8")
+
+
 @contextmanager
 def temporary_directory(
     env_var: str = "CUSTOM_TMP_DIR",
@@ -31,7 +37,7 @@ def temporary_directory(
     check_writable: bool = True,
 ) -> ContextManager[str]:
     root = os.environ.get(env_var)
-    if root is None:
+    if not root:
         # if the envar is not set, default to the regular behavior
         # the temporary folder is OS/environment dependent
         with tempfile.TemporaryDirectory() as td:

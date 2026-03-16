@@ -16,6 +16,12 @@ class PreTokenizedDataset(Dataset):
         self.data = np.load(path, mmap_mode="r")
         assert self.data.flags["C_CONTIGUOUS"]
 
+    @property
+    def num_tokens(self) -> int:
+        num_sequences = self.data.shape[0]
+        num_tokens_per_sequence = self.data.shape[1]
+        return num_sequences * num_tokens_per_sequence
+
     def __len__(self) -> int:
         return self.data.shape[0]
 
