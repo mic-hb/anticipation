@@ -40,7 +40,7 @@ def _check_anticipation_rule_for_controls_and_token_ranges(
 ) -> None:
     """This runs checks on forms and rules that should be true for all sequences."""
     assert isinstance(token_sequences, list)
-    assert len(token_sequences) >= 1
+    assert len(token_sequences) >= 1, "not enough sequences"
     # should be a list of lists of tokens
     assert isinstance(token_sequences[0], list)
 

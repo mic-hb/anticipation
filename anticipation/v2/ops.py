@@ -105,11 +105,12 @@ def translate(
     if seconds:
         dt = int(settings.time_resolution * dt)
 
-    new_tokens = []
+    # new_tokens = []
     for time, dur, note in zip(tokens[0::3], tokens[1::3], tokens[2::3]):
         # stop translating after EOT
         if note == settings.vocab.SEPARATOR:
-            new_tokens.extend([time, dur, note])
+            yield (time, dur, note)
+            # new_tokens.extend([time, dur, note])
             dt = 0
             continue
 
@@ -119,9 +120,10 @@ def translate(
             this_time = time - settings.vocab.ATIME_OFFSET
 
         assert 0 <= this_time + dt
-        new_tokens.extend([time + dt, dur, note])
+        yield (time + dt, dur, note)
+        # new_tokens.extend([time + dt, dur, note])
 
-    return new_tokens
+    # return new_tokens
 
 
 def add_rests(
@@ -297,11 +299,13 @@ def streaming_relativize_to_tick(
 def extract_instruments(
     all_events: list[Token], instruments: list[int], settings: AnticipationV2Settings
 ) -> tuple[list[Token], list[Token]]:
-    assert len(all_events) % 3 == 0, "bad length"
+    # assert len(all_events) % 3 == 0, "bad length"
 
     events = []
     controls = []
-    for time, dur, note in zip(all_events[0::3], all_events[1::3], all_events[2::3]):
+    # for time, dur, note in zip(all_events[0::3], all_events[1::3], all_events[2::3]):
+    for x in all_events:
+        time, dur, note = x
         assert note < settings.vocab.CONTROL_OFFSET  # shouldn't be in the sequence yet
         instr = (note - settings.vocab.NOTE_OFFSET) // 2**7
         if instr in instruments:

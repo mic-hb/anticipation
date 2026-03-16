@@ -236,6 +236,11 @@ class SpanV2TokenStream(TokenStream):
 
         # ignore the final time, it could be truncated
         all_times = all_times[:-1]
+        if len(all_times) == 0:
+            # not enough time in the token list to split
+            events = tokens
+            return events, []
+
         assert len(all_times) > 0
         delta = self._settings.delta * self._settings.time_resolution
 
@@ -377,6 +382,10 @@ class SequencePacker:
             self._settings.vocab.ANTICIPATE: 0,
         }
 
+        self._current_fragments = defaultdict(list)
+        self._current_len = 0
+        self._buf: list[Token] = []
+
     def add_tokenized_file(
         self,
         tokenized_file: TokenStream,
@@ -389,22 +398,18 @@ class SequencePacker:
             self._write_seq(seq)
 
     def _pack_and_iter_seq(self) -> Iterable[list[Token]]:
-        # starting state
-        current_fragments = defaultdict(list)
-        current_len = 0
         mutated_tokens = []
-        buf: list[Token] = []
 
         # go through each document
         doc: TokenStream
         for doc in self._iterator_queue:
             # new document, must be separated
-            current_fragments[doc].append((self._settings.vocab.SEPARATOR,))
-            current_len += 1
+            self._current_fragments[doc].append((self._settings.vocab.SEPARATOR,))
+            self._current_len += 1
 
             # ensure the control prefix is there
-            current_fragments[doc].append(doc.control_prefix)
-            current_len += len(doc.control_prefix)
+            self._current_fragments[doc].append(doc.control_prefix)
+            self._current_len += len(doc.control_prefix)
 
             # go through each logical grouping of tokens in the doc
             for tup in doc:
@@ -412,19 +417,19 @@ class SequencePacker:
                 # still iterating through the same document, but a new context has
                 # been created, so we must prefix it with the control - that's why
                 # we put it in buf instead of current_fragments
-                if current_len == 0:
-                    buf = [*doc.control_prefix]
-                    current_len += len(doc.control_prefix)
+                if self._current_len == 0:
+                    self._buf = [*doc.control_prefix]
+                    self._current_len += len(doc.control_prefix)
 
                 # each group must be associated with its parent document
                 # because the parent document might need to transform it
-                current_fragments[doc].append(tup)
-                current_len += len(tup)
+                self._current_fragments[doc].append(tup)
+                self._current_len += len(tup)
 
-                if current_len >= self._settings.context_size:
+                if self._current_len >= self._settings.context_size:
                     # several documents might be in the same context, apply
                     # their respective transformations to their subsequences
-                    for d, tokens in current_fragments.items():
+                    for d, tokens in self._current_fragments.items():
                         # apply transform...
                         # very unfortunate - the transform has internal state
                         # I am sorry :(
@@ -435,7 +440,7 @@ class SequencePacker:
                         assert len(mutated_tokens) == len(tokens)
 
                         # flatten and add to context
-                        buf.extend([x for b in mutated_tokens for x in b])
+                        self._buf.extend([x for b in mutated_tokens for x in b])
 
                         # take note of any issues or interesting behavior
                         # that happened during the transform
@@ -443,7 +448,7 @@ class SequencePacker:
                             self._num_times_span_had_insufficient_time += 1
 
                     # every sequence must be prefixed with a control
-                    my_seq = [*buf]
+                    my_seq = [*self._buf]
                     did_truncate = len(my_seq) > self._settings.context_size
                     truncated_part = my_seq[self._settings.context_size :]
                     my_seq = my_seq[: self._settings.context_size]
@@ -460,27 +465,29 @@ class SequencePacker:
                         to_add = v2_ops.get_truncated_token_groups_from_truncated_flat_token_sequence(
                             truncated_part, mutated_tokens
                         )
-                        buf = [*doc.control_prefix] + [x for b in to_add for x in b]
+                        self._buf = [*doc.control_prefix] + [
+                            x for b in to_add for x in b
+                        ]
                     else:
                         # nothing was cut off
-                        buf = []
+                        self._buf = []
 
                     # reset the state
-                    current_fragments = defaultdict(list)
-                    current_len = len(buf)
+                    self._current_fragments = defaultdict(list)
+                    self._current_len = len(self._buf)
 
         # reset, done with everything
         self._iterator_queue = []
 
         # any remaining tokens
-        self._num_tokens_left_in_buffer = current_len
+        self._num_tokens_left_in_buffer = self._current_len
 
         # if the settings request it and there are remaining tokens, push
         # them to the sink so we can inspect them
-        if self._settings.debug_flush_remaining_token_buffer and current_len > 0:
+        if self._settings.debug_flush_remaining_token_buffer and self._current_len > 0:
             # control_prefix is the same as whatever last
             # document's was
-            for d, tokens in current_fragments.items():
+            for d, tokens in self._current_fragments.items():
                 # apply transform
                 mutated_tokens, _transform_stats = d.transform(tokens)
 
@@ -488,14 +495,14 @@ class SequencePacker:
                 assert len(mutated_tokens) == len(tokens)
 
                 # flatten and add to context
-                buf.extend([x for b in mutated_tokens for x in b])
+                self._buf.extend([x for b in mutated_tokens for x in b])
 
                 # take note of any issues or interesting behavior
                 # that happened during the transform
                 if _transform_stats.get("insufficient_time"):
                     self._num_times_span_had_insufficient_time += 1
 
-            to_return = [*buf]
+            to_return = [*self._buf]
 
             # something is wrong if this is larger than the context
             assert len(to_return) <= self._settings.context_size
@@ -576,6 +583,7 @@ def tokenize(
     settings: AnticipationV2Settings,
     shard_id: int = -1,
     is_training_split: bool = True,
+    flush_seq_packer_every_k_files: int = 20,
 ) -> TokenizationStatSummary:
     """Tokenizes MIDI for v2 Anticipatory Training
 
@@ -594,6 +602,12 @@ def tokenize(
         will affect how MIDI events are tokenized.
       shard_id: Whether to show a tqdm progress bar. This is handled by
         dataset tokenization script. Defaults to not showing it.
+      is_training_split: True if we are tokenizing files in the training split,
+        false otherwise. In non-training splits, we do not add anticipation or
+        pitch augmentations.
+      flush_seq_packer_every_k_files: To prevent accumulation of memory,
+        the buffer of collected sequences will be written to disk every k
+        files tokenized. This is per file, not per augmentation of file.
 
     Returns:
       A dictionary of (reason ignored, number of times it happened) for
@@ -637,7 +651,7 @@ def tokenize(
         total_time_in_midi_ticks_before_augmentation += result.end_time_in_ticks
 
         # actually tokenize and pack the sequences
-        _make_sequences(result, buf, settings)
+        _make_sequences(result, buf, settings, is_training_split)
 
         if is_training_split:
             # transpose the original file, now that we know it passes criteria for including
@@ -654,10 +668,14 @@ def tokenize(
                         raise e
 
                 # using the transposed notes, do more augmentations
-                _make_sequences(result, buf, settings)
+                _make_sequences(result, buf, settings, is_training_split=False)
                 num_pitch_transpose_augmentations += 1
 
-    # write all the sequences to a target
+        if num_given_files % flush_seq_packer_every_k_files == 0:
+            # write every so often
+            buf.write_sequences()
+
+    # write all the sequences to if any remain
     buf.write_sequences()
 
     # close files if necessary
@@ -679,6 +697,7 @@ def _make_sequences(
     tokenized_midi: TokenizedMIDIFileResult,
     buf: SequencePacker,
     settings: AnticipationV2Settings,
+    is_training_split: bool,
 ) -> None:
     # 1. pure autoregressive sequence
     for _ in range(settings.num_autoregressive_seq_per_midi_file):
@@ -686,6 +705,10 @@ def _make_sequences(
             tokenized_midi.events, settings
         )
         buf.add_tokenized_file(token_iterator)
+
+    if not is_training_split:
+        # no augmentations
+        return
 
     # --- augmentations ---
     # 2. instrument anticipation

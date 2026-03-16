@@ -36,17 +36,17 @@ def temporary_directory(
         # the temporary folder is OS/environment dependent
         with tempfile.TemporaryDirectory() as td:
             yield td
+    else:
+        root_path = Path(root).expanduser().resolve()
 
-    root_path = Path(root).expanduser().resolve()
+        if require_exists and not root_path.exists():
+            raise RuntimeError(f"{env_var}={root_path} does not exist")
 
-    if require_exists and not root_path.exists():
-        raise RuntimeError(f"{env_var}={root_path} does not exist")
+        if check_writable and not os.access(root_path, os.W_OK):
+            raise RuntimeError(f"{env_var}={root_path} is not writable")
 
-    if check_writable and not os.access(root_path, os.W_OK):
-        raise RuntimeError(f"{env_var}={root_path} is not writable")
-
-    with tempfile.TemporaryDirectory(dir=root_path) as td:
-        yield td
+        with tempfile.TemporaryDirectory(dir=root_path) as td:
+            yield td
 
 
 def get_book_keeping_info() -> dict[str, Any]:
