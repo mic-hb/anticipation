@@ -198,7 +198,7 @@ class GPT2AttentionLite(nn.Module):
         self.ve_gate_channels = ve_gate_channels
         self.ve_gate = (
             nn.Linear(self.ve_gate_channels, self.num_heads, bias=False)
-            if has_ve(layer_idx, config.n_layer)
+            if (has_ve(layer_idx, config.n_layer) and 1 == 2)
             else None
         )
 
@@ -318,13 +318,16 @@ class GPT2ModelLite(nn.Module):
 
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.full((config.n_layer,), 0.1))
-        self.value_embeds = nn.ModuleDict(
-            {
-                str(i): nn.Embedding(config.vocab_size, config.n_embd)
-                for i in range(config.n_layer)
-                if has_ve(i, config.n_layer)
-            }
-        )
+        if 1 == 0:
+            # skip this for now
+            self.value_embeds = nn.ModuleDict(
+                {
+                    str(i): nn.Embedding(config.vocab_size, config.n_embd)
+                    for i in range(config.n_layer)
+                    if has_ve(i, config.n_layer)
+                }
+            )
+        self.value_embeds = {}
         self.reset_parameters()
 
     def _compute_window_sizes(self, config: GPT2ConfigLite):
@@ -507,7 +510,10 @@ def get_num_scaling_params(gpt: GPT2LMHeadModelLite) -> dict[str, int]:
     # https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/nanochat/gpt.py#L319
     # Count each group separately (mirrors the grouping in setup_optimizers)
     wte = sum(p.numel() for p in gpt.transformer.wte.parameters())
-    value_embeds = sum(p.numel() for p in gpt.transformer.value_embeds.parameters())
+    if gpt.transformer.value_embeds:
+        value_embeds = sum(p.numel() for p in gpt.transformer.value_embeds.parameters())
+    else:
+        value_embeds = 0
     lm_head = sum(p.numel() for p in gpt.lm_head.parameters())
     transformer_matrices = sum(p.numel() for p in gpt.transformer.h.parameters())
     scalars = gpt.transformer.resid_lambdas.numel() + gpt.transformer.x0_lambdas.numel()
@@ -557,7 +563,11 @@ def estimate_flops(gpt: GPT2LMHeadModelLite) -> int:
     nparams = sum(p.numel() for p in gpt.parameters())
 
     # Exclude non-matmul params: embeddings and per-layer scalars
-    value_embeds_numel = sum(ve.weight.numel() for ve in gpt.transformer.value_embeds.values())
+    if gpt.transformer.value_embeds:
+        value_embeds_numel = sum(ve.weight.numel() for ve in gpt.transformer.value_embeds.values())
+    else:
+        value_embeds_numel = 0
+
     nparams_exclude = (
         gpt.transformer.wte.weight.numel() +
         gpt.transformer.wpe.weight.numel() +

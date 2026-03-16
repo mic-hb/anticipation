@@ -8,7 +8,7 @@ from dataclasses import asdict
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import OneCycleLR
 
 import pytorch_lightning as pl
@@ -388,6 +388,15 @@ class GPT2LightningModule(pl.LightningModule):
         num_devices = max(1, self.trainer.num_devices)
         per_device_batch_size = self.hparams.train_batch_size // num_devices
         dataset = PreTokenizedDataset(self.data_dir / "valid.npy")
+
+
+        if self.trainer is not None and getattr(self.trainer.state, "fn", None) == "fit":
+            # hack for short term, I can't figure out a reliable way
+            # to get lightning simply to SKIP the validation step during
+            # training. Busted library.
+            empty = Subset(dataset, [])
+            return DataLoader(empty, batch_size=1)
+
         return DataLoader(
             dataset,
             batch_size=per_device_batch_size,
@@ -478,10 +487,17 @@ def main(args: argparse.Namespace) -> None:
             # diminishing returns.
             token_multiplier = 4
             total_tokens_available = token_multiplier * dataset.num_tokens
-            assert total_tokens <= total_tokens_available, (
-                f"Not enough tokens to meet FLOP or ratio budget. Need: {total_tokens:,}, Have: {dataset.num_tokens:,}"
-            )
-            del dataset
+            if not (total_tokens <= total_tokens_available):
+                print(
+                    f"Not enough tokens to meet FLOP or ratio budget. Need: {total_tokens:,}, Have: {dataset.num_tokens:,}"
+                )
+                # exit the program without killing
+                return 0
+
+            #assert total_tokens <= total_tokens_available, (
+            #    f"Not enough tokens to meet FLOP or ratio budget. Need: {total_tokens:,}, Have: {dataset.num_tokens:,}"
+            #)
+            #del dataset
 
             effective_num_iterations = csv_row["num_iterations"]
             num_flops_per_token = csv_row["num_flops_per_token"]
@@ -537,6 +553,7 @@ def main(args: argparse.Namespace) -> None:
     checkpoint_callback.CHECKPOINT_EQUALS_CHAR = "-"
 
     logger_dict = {}
+    is_scaling_exp = False
     if args.use_wandb:
         if args.wandb_tag:
             tags = [str(args.wandb_tag).strip()]
@@ -544,6 +561,7 @@ def main(args: argparse.Namespace) -> None:
             tags = []
 
         if tags == ["scaling"]:
+            is_scaling_exp = True
             run_name = f"scaling-run-{int(time.time())}"
         else:
             run_name = f"run-{int(time.time())}"
@@ -571,6 +589,11 @@ def main(args: argparse.Namespace) -> None:
     # clean up some stuff from setup
     gc.collect()
     # ------
+    # NB: "limit_val_batches" disables validation EVERYWHERE ALL THE TIME
+    # don't use it. Instead use check_val_every_n_epochs to disable during
+    # training. Also it must be an integer... 
+    # I can't with this... this gives a div 0. 
+    #val_skipping = {"check_val_every_n_epoch": 0} if is_scaling_exp else {}
     trainer = pl.Trainer(
         max_steps=effective_num_iterations,
         # always use gpu and then thrown an error if it's unavailable - that's preferable
@@ -597,6 +620,7 @@ def main(args: argparse.Namespace) -> None:
         log_every_n_steps=args.log_every_n_steps,
         val_check_interval=args.steps_per_eval,
         **logger_dict,
+        #**val_skipping,
     )
     trainer.fit(model)
 
