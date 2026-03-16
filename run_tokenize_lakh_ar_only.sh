@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=50GB
 #SBATCH -t 01:00:00
-#SBATCH -J tokenize_dataset_lakh
+#SBATCH -J tokenize_dataset_lakh_ar_only
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
@@ -49,4 +49,4 @@ else
     echo "Warning: failed to create custom temp dir: $DIR" >&2
 fi
 
-PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type lakh --settings_json_name "ar_only_local_midi_settings_b82a7a2750e3c5836ffb9bf564720cd8.json"
+PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type lakh --settings_json_name "ar_only_local_midi_settings_6fcc94c173552d9e87d57ecec95a1d97.json"

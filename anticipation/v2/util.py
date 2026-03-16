@@ -9,6 +9,20 @@ from pathlib import Path
 import tempfile
 from contextlib import contextmanager
 
+import random
+
+import numpy as np
+import torch
+
+
+def set_seed(seed: int):
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
 
 def save_text(text_file_path: Path, my_text: str) -> None:
     ddp_rank = int(os.environ.get("RANK", 0))
