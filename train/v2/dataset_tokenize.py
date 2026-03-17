@@ -1,4 +1,3 @@
-import os
 import argparse
 import csv
 import math
@@ -329,7 +328,28 @@ def get_splits(raw_data_enclosing_path: Path):
         raw_data_enclosing_path == LAKH_MIDI_FULL_PATH
         or raw_data_enclosing_path.parts[-1] == "lmd_full"
     ):
+        # LAKH MIDI
         return _get_lakh_midi_splits_and_configs(raw_data_enclosing_path)
+    elif raw_data_enclosing_path.parts[-1] == "giga_midi":
+        # GIGA MIDI
+        # get these files by running scripts/v2/giga_midi_to_files.py
+        return [
+            {
+                "name": "train",
+                "dataset_paths": [raw_data_enclosing_path / "train"],
+                "do_shuffle": True,
+            },
+            {
+                "name": "valid",
+                "dataset_paths": [raw_data_enclosing_path / "validation"],
+                "do_shuffle": False,
+            },
+            {
+                "name": "test",
+                "dataset_paths": [raw_data_enclosing_path / "test"],
+                "do_shuffle": False,
+            }
+        ]
     else:
         return [
             {
@@ -369,7 +389,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset_type",
         type=str,
         default="lakh",
-        choices=["lakh", "aria", "transcripts"],
+        choices=["lakh", "aria", "transcripts", "giga_midi"],
         help=(
             "Which dataset to tokenize. These are expected to be in specific locations in the ./data/ folder"
         ),
@@ -381,8 +401,8 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="name to settings file, not path - must be in ./config/...",
     )
-    args = parser.parse_args()
-    return args
+    _args = parser.parse_args()
+    return _args
 
 
 if __name__ == "__main__":
@@ -408,6 +428,10 @@ if __name__ == "__main__":
             # can use the same config as local lakh
             "settings": settings_file_path,
             "raw_data_enclosing_path": DATASET_ROOT / "aria-midi-v1-pruned-ext",
+        },
+        "giga_midi": {
+            "settings": settings_file_path,
+            "raw_data_enclosing_path": DATASET_ROOT / "giga_midi",
         },
     }
     dataset_choice = configs[args.dataset_type]
