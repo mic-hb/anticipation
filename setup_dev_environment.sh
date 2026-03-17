@@ -61,11 +61,11 @@ pip install pandas
 pip install ruff
 pip install plotly
 
-# run the tests
-sh run_tests.sh
-
 conda activate ./env
 conda install pytorch torchvision torchaudio --yes
 pip install lightning
+
+# run the tests
+sh run_tests.sh
 
 echo "SUCCESS. Activate your environment with conda activate ./env"
