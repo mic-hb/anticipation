@@ -389,8 +389,10 @@ class GPT2LightningModule(pl.LightningModule):
         per_device_batch_size = self.hparams.train_batch_size // num_devices
         dataset = PreTokenizedDataset(self.data_dir / "valid.npy")
 
-
-        if self.trainer is not None and getattr(self.trainer.state, "fn", None) == "fit":
+        if (
+            self.trainer is not None
+            and getattr(self.trainer.state, "fn", None) == "fit"
+        ):
             # hack for short term, I can't figure out a reliable way
             # to get lightning simply to SKIP the validation step during
             # training. Busted library.
@@ -494,10 +496,10 @@ def main(args: argparse.Namespace) -> None:
                 # exit the program without killing
                 return 0
 
-            #assert total_tokens <= total_tokens_available, (
+            # assert total_tokens <= total_tokens_available, (
             #    f"Not enough tokens to meet FLOP or ratio budget. Need: {total_tokens:,}, Have: {dataset.num_tokens:,}"
-            #)
-            #del dataset
+            # )
+            # del dataset
 
             effective_num_iterations = csv_row["num_iterations"]
             num_flops_per_token = csv_row["num_flops_per_token"]
@@ -591,9 +593,9 @@ def main(args: argparse.Namespace) -> None:
     # ------
     # NB: "limit_val_batches" disables validation EVERYWHERE ALL THE TIME
     # don't use it. Instead use check_val_every_n_epochs to disable during
-    # training. Also it must be an integer... 
-    # I can't with this... this gives a div 0. 
-    #val_skipping = {"check_val_every_n_epoch": 0} if is_scaling_exp else {}
+    # training. Also it must be an integer...
+    # I can't with this... this gives a div 0.
+    # val_skipping = {"check_val_every_n_epoch": 0} if is_scaling_exp else {}
     trainer = pl.Trainer(
         max_steps=effective_num_iterations,
         # always use gpu and then thrown an error if it's unavailable - that's preferable
@@ -620,7 +622,7 @@ def main(args: argparse.Namespace) -> None:
         log_every_n_steps=args.log_every_n_steps,
         val_check_interval=args.steps_per_eval,
         **logger_dict,
-        #**val_skipping,
+        # **val_skipping,
     )
     trainer.fit(model)
 
@@ -677,12 +679,12 @@ def get_argparser() -> argparse.ArgumentParser:
         "--window_pattern",
         type=str,
         help="Sliding window pattern for long/short attention. Use only S and L, S = partial, L = long/full context.",
-        default="SSSL"
+        default="SSSL",
     )
     parser.add_argument(
         "--no_weight_tie",
         action="store_true",
-        help="whether apply weight tying to the GPT LM head and token embeddings."
+        help="whether apply weight tying to the GPT LM head and token embeddings.",
     )
 
     # Optimization parameters

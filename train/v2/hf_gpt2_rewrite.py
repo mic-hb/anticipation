@@ -253,7 +253,9 @@ class GPT2AttentionLite(nn.Module):
         q = q.permute(0, 2, 1, 3)
         k = k.permute(0, 2, 1, 3)
         v = v.permute(0, 2, 1, 3)
-        assert v.dtype == q.dtype == k.dtype, f"These must all be equal: v.dtype: {v.dtype}, q.dtype: {q.dtype}, k.dtype: {k.dtype}"
+        assert v.dtype == q.dtype == k.dtype, (
+            f"These must all be equal: v.dtype: {v.dtype}, q.dtype: {q.dtype}, k.dtype: {k.dtype}"
+        )
         y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         # B T H D -> B H T D
         y = y.permute(0, 2, 1, 3)
@@ -530,7 +532,9 @@ def get_num_scaling_params(gpt: GPT2LMHeadModelLite) -> dict[str, int]:
         total -= wte
 
     actual = sum(p.numel() for p in gpt.parameters())
-    assert total == actual, f"Parameter count mismatch. Expected: {total:,}, Actual: {actual:,}."
+    assert total == actual, (
+        f"Parameter count mismatch. Expected: {total:,}, Actual: {actual:,}."
+    )
     return {
         "wte": wte,
         "value_embeds": value_embeds,
@@ -564,16 +568,18 @@ def estimate_flops(gpt: GPT2LMHeadModelLite) -> int:
 
     # Exclude non-matmul params: embeddings and per-layer scalars
     if gpt.transformer.value_embeds:
-        value_embeds_numel = sum(ve.weight.numel() for ve in gpt.transformer.value_embeds.values())
+        value_embeds_numel = sum(
+            ve.weight.numel() for ve in gpt.transformer.value_embeds.values()
+        )
     else:
         value_embeds_numel = 0
 
     nparams_exclude = (
-        gpt.transformer.wte.weight.numel() +
-        gpt.transformer.wpe.weight.numel() +
-        value_embeds_numel +
-        gpt.transformer.resid_lambdas.numel() +
-        gpt.transformer.x0_lambdas.numel()
+        gpt.transformer.wte.weight.numel()
+        + gpt.transformer.wpe.weight.numel()
+        + value_embeds_numel
+        + gpt.transformer.resid_lambdas.numel()
+        + gpt.transformer.x0_lambdas.numel()
     )
     h = gpt.config.n_head
     q = gpt.config.n_embd // gpt.config.n_head

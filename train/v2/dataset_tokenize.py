@@ -184,9 +184,6 @@ def _tokenize_dataset_in_parallel(
     put_shards_in_tmp: bool,
     split_confs: list[dict[str, Any]],
 ) -> dict[str, int]:
-    all_dataset_stats: dict[str, Union[int, float]] = {
-        x: 0 for x in TokenizationStatSummary.get_int_fields()
-    }
     with temporary_directory() as td:
         td_path = Path(td)
         if put_shards_in_tmp:
@@ -198,10 +195,22 @@ def _tokenize_dataset_in_parallel(
             shards_dir = save_all_dataset_files_to / "shards"
             shards_dir.mkdir(exist_ok=True)
 
+        # info for all splits
         ignored_files = []
+        all_dataset_stats: dict[str, Union[int, float]] = {
+            x: 0 for x in TokenizationStatSummary.get_int_fields()
+        }
+
         for conf in split_confs:
+            # info just for current split
+            curr_split_ignored_files = []
+            curr_split_dataset_stats: dict[str, Union[int, float]] = {
+                x: 0 for x in TokenizationStatSummary.get_int_fields()
+            }
+
+            split_name = conf["name"]
             # create shard dir
-            shards_dir_local = shards_dir / conf["name"]
+            shards_dir_local = shards_dir / split_name
             shards_dir_local.mkdir(exist_ok=True)
 
             # process shard
@@ -211,9 +220,9 @@ def _tokenize_dataset_in_parallel(
                 settings.num_workers_in_dataset_construction,
                 parent_work_dir=save_all_dataset_files_to,
                 shards_dir=shards_dir_local,
-                save_to=conf["name"],
+                save_to=split_name,
                 do_shuffle=conf["do_shuffle"],
-                is_training_split=(conf["name"] == "train"),
+                is_training_split=(split_name == "train"),
             )
 
             # gather any ignored file results
@@ -221,6 +230,7 @@ def _tokenize_dataset_in_parallel(
                 shard_path, dataset_stats = f
                 for k in all_dataset_stats:
                     all_dataset_stats[k] += getattr(dataset_stats, k)
+                    curr_split_dataset_stats[k] += getattr(dataset_stats, k)
 
                 # handle ignored files
                 for reason, files_list in dataset_stats.ignored_files.items():
@@ -233,7 +243,18 @@ def _tokenize_dataset_in_parallel(
                             # e.g. f9aad86bfb384b22875d40ef15be023d.mid
                             "file": str(file.relative_to(raw_data_enclosing_path)),
                         }
+                        curr_split_ignored_files.append(ignored_file)
                         ignored_files.append(ignored_file)
+
+            split_stat_path = Path(
+                save_all_dataset_files_to / f"stats_{split_name}.json"
+            )
+            curr_split_dataset_stats = _add_more_info_to_dataset_stats(
+                curr_split_dataset_stats, settings, curr_split_ignored_files
+            )
+            split_stat_path.write_text(
+                dumps(curr_split_dataset_stats, sort_keys=True, indent=4)
+            )
 
         # write all the ignored files to disk for awareness
         field_names = list(ignored_files[0].keys())
@@ -246,25 +267,34 @@ def _tokenize_dataset_in_parallel(
 
         # write dataset stats
         stat_path = Path(save_all_dataset_files_to / "stats.json")
-        all_dataset_stats["total_tokens"] = (
-            settings.context_size * all_dataset_stats["num_sequences"]
+        all_dataset_stats = _add_more_info_to_dataset_stats(
+            all_dataset_stats, settings, ignored_files
         )
-        all_dataset_stats["total_time_in_sec"] = (
-            all_dataset_stats["total_time_in_midi_ticks"] / settings.time_resolution
-        )
-        all_dataset_stats["total_time_in_minutes"] = (
-            all_dataset_stats["total_time_in_sec"] / 60
-        )
-        all_dataset_stats["total_time_in_sec_before_augmentation"] = (
-            all_dataset_stats["total_time_in_midi_ticks_before_augmentation"]
-            / settings.time_resolution
-        )
-        all_dataset_stats["total_time_in_minutes_before_augmentation"] = (
-            all_dataset_stats["total_time_in_sec_before_augmentation"] / 60
-        )
-        all_dataset_stats["total_ignored_files"] = len(ignored_files)
         stat_path.write_text(dumps(all_dataset_stats, sort_keys=True, indent=4))
 
+    return all_dataset_stats
+
+
+def _add_more_info_to_dataset_stats(
+    all_dataset_stats: dict, settings: AnticipationV2Settings, ignored_files: list[dict]
+) -> dict:
+    all_dataset_stats["total_tokens"] = (
+        settings.context_size * all_dataset_stats["num_sequences"]
+    )
+    all_dataset_stats["total_time_in_sec"] = (
+        all_dataset_stats["total_time_in_midi_ticks"] / settings.time_resolution
+    )
+    all_dataset_stats["total_time_in_minutes"] = (
+        all_dataset_stats["total_time_in_sec"] / 60
+    )
+    all_dataset_stats["total_time_in_sec_before_augmentation"] = (
+        all_dataset_stats["total_time_in_midi_ticks_before_augmentation"]
+        / settings.time_resolution
+    )
+    all_dataset_stats["total_time_in_minutes_before_augmentation"] = (
+        all_dataset_stats["total_time_in_sec_before_augmentation"] / 60
+    )
+    all_dataset_stats["total_ignored_files"] = len(ignored_files)
     return all_dataset_stats
 
 
@@ -348,7 +378,7 @@ def get_splits(raw_data_enclosing_path: Path):
                 "name": "test",
                 "dataset_paths": [raw_data_enclosing_path / "test"],
                 "do_shuffle": False,
-            }
+            },
         ]
     else:
         return [
