@@ -2,6 +2,7 @@ import gc
 import os
 import time
 import argparse
+from typing import Optional
 from pathlib import Path
 import json
 from dataclasses import asdict
@@ -55,22 +56,30 @@ class GPT2LightningModule(pl.LightningModule):
         train_batch_size: int = 32,
         eval_batch_size: int = 32,
         pretrained_checkpoint: str = None,
-        config: PretrainedConfig = None,
+        config: Optional[GPT2ConfigLite] = None,
+        no_cuda_graphs: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters()
         self.data_dir = data_dir
         self.num_flops_per_token = num_flops_per_token
+        self.no_cuda_graphs = no_cuda_graphs
 
         if pretrained_checkpoint:
-            self.model = GPT2LMHeadModel.from_pretrained(
+            self.model = GPT2LMHeadModelLite.from_pretrained(
                 pretrained_checkpoint, config=config
             )
             rank_zero_info(f"Loaded pre-trained model from {pretrained_checkpoint}")
         else:
-            # self.model = GPT2LMHeadModel(config)
             self.model = GPT2LMHeadModelLite(config)
-            self.model = torch.compile(self.model, dynamic=False)
+
+            if no_cuda_graphs:
+                # OOM can happen on GB
+                self.model = torch.compile(
+                    self.model, dynamic=False, mode="max-autotune-no-cudagraphs"
+                )
+            else:
+                self.model = torch.compile(self.model, dynamic=False)
 
         self.model.gradient_checkpointing_enable()
         self.model.config.bos_token_id = self.model.config.eos_token_id = 0
@@ -389,8 +398,10 @@ class GPT2LightningModule(pl.LightningModule):
         per_device_batch_size = self.hparams.train_batch_size // num_devices
         dataset = PreTokenizedDataset(self.data_dir / "valid.npy")
 
-
-        if self.trainer is not None and getattr(self.trainer.state, "fn", None) == "fit":
+        if (
+            self.trainer is not None
+            and getattr(self.trainer.state, "fn", None) == "fit"
+        ):
             # hack for short term, I can't figure out a reliable way
             # to get lightning simply to SKIP the validation step during
             # training. Busted library.
@@ -463,6 +474,7 @@ def main(args: argparse.Namespace) -> None:
             layer_norm_epsilon=args.layer_norm_epsilon,
             pos_emb=args.pos_emb,
             embedding_and_lm_head_weight_tying=not args.no_weight_tie,
+            use_value_embeds=args.use_value_embeds,
         )
         with torch.device("meta"):
             model = GPT2LMHeadModelLite(model_config)
@@ -494,10 +506,10 @@ def main(args: argparse.Namespace) -> None:
                 # exit the program without killing
                 return 0
 
-            #assert total_tokens <= total_tokens_available, (
+            # assert total_tokens <= total_tokens_available, (
             #    f"Not enough tokens to meet FLOP or ratio budget. Need: {total_tokens:,}, Have: {dataset.num_tokens:,}"
-            #)
-            #del dataset
+            # )
+            # del dataset
 
             effective_num_iterations = csv_row["num_iterations"]
             num_flops_per_token = csv_row["num_flops_per_token"]
@@ -523,6 +535,7 @@ def main(args: argparse.Namespace) -> None:
             scale_attn_by_inverse_layer_idx=True,
             use_cache=False,
             embedding_and_lm_head_weight_tying=not args.no_weight_tie,
+            use_value_embeds=args.use_value_embeds,
         )
         num_flops_per_token = -1
         effective_num_iterations = args.num_train_steps
@@ -539,6 +552,7 @@ def main(args: argparse.Namespace) -> None:
         pretrained_checkpoint=args.checkpoint_path,
         num_flops_per_token=num_flops_per_token,
         config=model_config,
+        no_cuda_graphs=args.no_cuda_graphs,
     )
 
     checkpoint_callback = HuggingFaceCheckpoint(
@@ -591,9 +605,9 @@ def main(args: argparse.Namespace) -> None:
     # ------
     # NB: "limit_val_batches" disables validation EVERYWHERE ALL THE TIME
     # don't use it. Instead use check_val_every_n_epochs to disable during
-    # training. Also it must be an integer... 
-    # I can't with this... this gives a div 0. 
-    #val_skipping = {"check_val_every_n_epoch": 0} if is_scaling_exp else {}
+    # training. Also it must be an integer...
+    # I can't with this... this gives a div 0.
+    # val_skipping = {"check_val_every_n_epoch": 0} if is_scaling_exp else {}
     trainer = pl.Trainer(
         max_steps=effective_num_iterations,
         # always use gpu and then thrown an error if it's unavailable - that's preferable
@@ -620,7 +634,7 @@ def main(args: argparse.Namespace) -> None:
         log_every_n_steps=args.log_every_n_steps,
         val_check_interval=args.steps_per_eval,
         **logger_dict,
-        #**val_skipping,
+        # **val_skipping,
     )
     trainer.fit(model)
 
@@ -677,12 +691,17 @@ def get_argparser() -> argparse.ArgumentParser:
         "--window_pattern",
         type=str,
         help="Sliding window pattern for long/short attention. Use only S and L, S = partial, L = long/full context.",
-        default="SSSL"
+        default="SSSL",
     )
     parser.add_argument(
         "--no_weight_tie",
         action="store_true",
-        help="whether apply weight tying to the GPT LM head and token embeddings."
+        help="whether apply weight tying to the GPT LM head and token embeddings.",
+    )
+    parser.add_argument(
+        "--use_value_embeds",
+        action="store_true",
+        help="Whether to use alternating value embeddings (nanochat design)",
     )
 
     # Optimization parameters
@@ -746,6 +765,11 @@ def get_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gpus_per_node", type=int, default=1, help="Number of GPUs per node"
     )  # 4 gpus
+    parser.add_argument(
+        "--no_cuda_graphs",
+        action="store_true",
+        help="Disable cuda graphs in torch compile.",
+    )
 
     # Logging Parameters
     parser.add_argument(

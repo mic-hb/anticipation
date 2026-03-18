@@ -50,6 +50,7 @@ class GPT2ConfigLite:
     rope_pct: float = 1.0  # fraction of head_dim to rotate
     window_pattern: str = "L"
     embedding_and_lm_head_weight_tying: bool = True
+    use_value_embeds: bool = True
 
     @classmethod
     def from_json(cls, path: str):
@@ -198,7 +199,7 @@ class GPT2AttentionLite(nn.Module):
         self.ve_gate_channels = ve_gate_channels
         self.ve_gate = (
             nn.Linear(self.ve_gate_channels, self.num_heads, bias=False)
-            if (has_ve(layer_idx, config.n_layer) and 1 == 2)
+            if (config.use_value_embeds and has_ve(layer_idx, config.n_layer))
             else None
         )
 
@@ -253,7 +254,9 @@ class GPT2AttentionLite(nn.Module):
         q = q.permute(0, 2, 1, 3)
         k = k.permute(0, 2, 1, 3)
         v = v.permute(0, 2, 1, 3)
-        assert v.dtype == q.dtype == k.dtype, f"These must all be equal: v.dtype: {v.dtype}, q.dtype: {q.dtype}, k.dtype: {k.dtype}"
+        assert v.dtype == q.dtype == k.dtype, (
+            f"These must all be equal: v.dtype: {v.dtype}, q.dtype: {q.dtype}, k.dtype: {k.dtype}"
+        )
         y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         # B T H D -> B H T D
         y = y.permute(0, 2, 1, 3)
@@ -303,11 +306,11 @@ def has_ve(layer_idx: int, n_layer: int) -> bool:
 
 
 class GPT2ModelLite(nn.Module):
-    def __init__(self, config: GPT2ConfigLite):
+    def __init__(self, config: GPT2ConfigLite) -> None:
         super().__init__()
         self.config = config
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
-        self.wpe = nn.Embedding(config.n_positions, config.n_embd)
+        # self.wpe = nn.Embedding(config.n_positions, config.n_embd)
         self.drop = nn.Dropout(config.embd_pdrop)
         self.h = nn.ModuleList(
             [GPT2BlockLite(config, layer_idx=i) for i in range(config.n_layer)]
@@ -318,8 +321,8 @@ class GPT2ModelLite(nn.Module):
 
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.full((config.n_layer,), 0.1))
-        if 1 == 0:
-            # skip this for now
+
+        if self.config.use_value_embeds:
             self.value_embeds = nn.ModuleDict(
                 {
                     str(i): nn.Embedding(config.vocab_size, config.n_embd)
@@ -327,7 +330,9 @@ class GPT2ModelLite(nn.Module):
                     if has_ve(i, config.n_layer)
                 }
             )
-        self.value_embeds = {}
+        else:
+            self.value_embeds = {}
+
         self.reset_parameters()
 
     def _compute_window_sizes(self, config: GPT2ConfigLite):
@@ -375,8 +380,8 @@ class GPT2ModelLite(nn.Module):
 
     def forward(self, input_ids, attention_mask=None):
         b, t = input_ids.shape
-        pos = torch.arange(0, t, device=input_ids.device).unsqueeze(0)
-        x = self.wte(input_ids) + self.wpe(pos)
+        # pos = torch.arange(0, t, device=input_ids.device).unsqueeze(0)
+        x = self.wte(input_ids)  # + self.wpe(pos)
         x = self.drop(x)
 
         # Convert attention_mask (B,T) with 1=keep, 0=mask to additive mask (B,1,1,T) with 0 / -10000.
@@ -412,7 +417,7 @@ class GPT2ModelLite(nn.Module):
 
 
 class GPT2LMHeadModelLite(nn.Module):
-    def __init__(self, config: GPT2ConfigLite):
+    def __init__(self, config: GPT2ConfigLite) -> None:
         super().__init__()
         self.config = config
         self.transformer = GPT2ModelLite(config)
@@ -470,6 +475,7 @@ def build_model_meta(
     scale_attn_by_inverse_layer_idx: bool = True,
     pos_emb: str = "rope",
     embedding_and_lm_head_weight_tying: bool = True,
+    use_value_embeds: bool = False,
 ) -> GPT2ConfigLite:
     """
     From: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L125
@@ -503,6 +509,7 @@ def build_model_meta(
         pos_emb=pos_emb,
         window_pattern=window_pattern,
         embedding_and_lm_head_weight_tying=embedding_and_lm_head_weight_tying,
+        use_value_embeds=use_value_embeds,
     )
 
 
@@ -514,23 +521,28 @@ def get_num_scaling_params(gpt: GPT2LMHeadModelLite) -> dict[str, int]:
         value_embeds = sum(p.numel() for p in gpt.transformer.value_embeds.parameters())
     else:
         value_embeds = 0
+
     lm_head = sum(p.numel() for p in gpt.lm_head.parameters())
     transformer_matrices = sum(p.numel() for p in gpt.transformer.h.parameters())
     scalars = gpt.transformer.resid_lambdas.numel() + gpt.transformer.x0_lambdas.numel()
 
     # these two are unique to us, nanochat removes these - we will keep for now. Have
     # not yet ablated them to see if removing them improves for us
-    wpe = sum(p.numel() for p in gpt.transformer.wpe.parameters())
+    # wpe = sum(p.numel() for p in gpt.transformer.wpe.parameters())
     ln_f = sum(p.numel() for p in gpt.transformer.ln_f.parameters())
 
-    total = wte + wpe + value_embeds + lm_head + transformer_matrices + scalars + ln_f
+    total = (
+        wte + value_embeds + lm_head + transformer_matrices + scalars + ln_f
+    )  # + wpe
 
     if gpt.config.embedding_and_lm_head_weight_tying:
         # if using weight tying the params are shared
         total -= wte
 
     actual = sum(p.numel() for p in gpt.parameters())
-    assert total == actual, f"Parameter count mismatch. Expected: {total:,}, Actual: {actual:,}."
+    assert total == actual, (
+        f"Parameter count mismatch. Expected: {total:,}, Actual: {actual:,}."
+    )
     return {
         "wte": wte,
         "value_embeds": value_embeds,
@@ -564,16 +576,18 @@ def estimate_flops(gpt: GPT2LMHeadModelLite) -> int:
 
     # Exclude non-matmul params: embeddings and per-layer scalars
     if gpt.transformer.value_embeds:
-        value_embeds_numel = sum(ve.weight.numel() for ve in gpt.transformer.value_embeds.values())
+        value_embeds_numel = sum(
+            ve.weight.numel() for ve in gpt.transformer.value_embeds.values()
+        )
     else:
         value_embeds_numel = 0
 
     nparams_exclude = (
-        gpt.transformer.wte.weight.numel() +
-        gpt.transformer.wpe.weight.numel() +
-        value_embeds_numel +
-        gpt.transformer.resid_lambdas.numel() +
-        gpt.transformer.x0_lambdas.numel()
+        gpt.transformer.wte.weight.numel()
+        # + gpt.transformer.wpe.weight.numel()
+        + value_embeds_numel
+        + gpt.transformer.resid_lambdas.numel()
+        + gpt.transformer.x0_lambdas.numel()
     )
     h = gpt.config.n_head
     q = gpt.config.n_embd // gpt.config.n_head
