@@ -584,7 +584,11 @@ def estimate_flops(gpt: GPT2LMHeadModelLite) -> int:
 
     nparams_exclude = (
         gpt.transformer.wte.weight.numel()
+<<<<<<< HEAD
         # + gpt.transformer.wpe.weight.numel()
+=======
+        + gpt.transformer.wpe.weight.numel()
+>>>>>>> refs/remotes/origin/vocab_adjustment
         + value_embeds_numel
         + gpt.transformer.resid_lambdas.numel()
         + gpt.transformer.x0_lambdas.numel()
