@@ -51,6 +51,7 @@ class GPT2ConfigLite:
     window_pattern: str = "L"
     embedding_and_lm_head_weight_tying: bool = True
     use_value_embeds: bool = True
+    do_torch_compile: bool = True
 
     @classmethod
     def from_json(cls, path: str):
@@ -401,12 +402,17 @@ class GPT2ModelLite(nn.Module):
                 else None
             )
 
-            if self.gradient_checkpointing and self.training:
-                # Explicitly set use_reentrant per PyTorch recommendation.
-                x = checkpoint(
-                    lambda _x: block(
+            if self.gradient_checkpointing:
+
+                def _custom_forward(
+                    _x, block=block, ve=ve, window_size=window_size, attn_bias=attn_bias
+                ):
+                    return block(
                         _x, ve=ve, window_size=window_size, attention_mask=attn_bias
-                    ),
+                    )
+
+                x = checkpoint(
+                    _custom_forward,
                     x,
                     use_reentrant=False,
                 )
@@ -476,6 +482,7 @@ def build_model_meta(
     pos_emb: str = "rope",
     embedding_and_lm_head_weight_tying: bool = True,
     use_value_embeds: bool = False,
+    do_torch_compile: bool = True,
 ) -> GPT2ConfigLite:
     """
     From: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L125
@@ -510,6 +517,7 @@ def build_model_meta(
         window_pattern=window_pattern,
         embedding_and_lm_head_weight_tying=embedding_and_lm_head_weight_tying,
         use_value_embeds=use_value_embeds,
+        do_torch_compile=do_torch_compile,
     )
 
 
@@ -584,7 +592,7 @@ def estimate_flops(gpt: GPT2LMHeadModelLite) -> int:
 
     nparams_exclude = (
         gpt.transformer.wte.weight.numel()
-        #+ gpt.transformer.wpe.weight.numel()
+        # + gpt.transformer.wpe.weight.numel()
         + value_embeds_numel
         + gpt.transformer.resid_lambdas.numel()
         + gpt.transformer.x0_lambdas.numel()

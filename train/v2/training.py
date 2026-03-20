@@ -49,6 +49,7 @@ class GPT2LightningModule(pl.LightningModule):
         self,
         data_dir: Path,
         settings: AnticipationV2Settings,
+        config: GPT2ConfigLite,
         num_flops_per_token: int,
         learning_rate: float = 5e-5,
         warmup_steps: int = 0,
@@ -56,14 +57,16 @@ class GPT2LightningModule(pl.LightningModule):
         train_batch_size: int = 32,
         eval_batch_size: int = 32,
         pretrained_checkpoint: str = None,
-        config: Optional[GPT2ConfigLite] = None,
         no_cuda_graphs: bool = False,
+        skip_all_validation_during_training: bool = False,
+        do_gradient_checkpointing: bool = True,
     ):
         super().__init__()
         self.save_hyperparameters()
         self.data_dir = data_dir
         self.num_flops_per_token = num_flops_per_token
         self.no_cuda_graphs = no_cuda_graphs
+        self.do_gradient_checkpointing = do_gradient_checkpointing
 
         if pretrained_checkpoint:
             self.model = GPT2LMHeadModelLite.from_pretrained(
@@ -72,20 +75,23 @@ class GPT2LightningModule(pl.LightningModule):
             rank_zero_info(f"Loaded pre-trained model from {pretrained_checkpoint}")
         else:
             self.model = GPT2LMHeadModelLite(config)
+            if config.do_torch_compile:
+                if no_cuda_graphs:
+                    # OOM can happen on GB
+                    self.model = torch.compile(
+                        self.model, dynamic=False, mode="max-autotune-no-cudagraphs"
+                    )
+                else:
+                    self.model = torch.compile(self.model, dynamic=False)
 
-            if no_cuda_graphs:
-                # OOM can happen on GB
-                self.model = torch.compile(
-                    self.model, dynamic=False, mode="max-autotune-no-cudagraphs"
-                )
-            else:
-                self.model = torch.compile(self.model, dynamic=False)
+        if self.do_gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
 
-        self.model.gradient_checkpointing_enable()
         self.model.config.bos_token_id = self.model.config.eos_token_id = 0
         self.anticipation_settings = settings
 
-        # --- validation split metrics ----
+        # --- validation metrics and settings ----
+        self.skip_all_validation_during_training = skip_all_validation_during_training
         self.ppl = TokenPerplexity()
 
         # all triples
@@ -194,7 +200,7 @@ class GPT2LightningModule(pl.LightningModule):
         num_ticks = tick_mask.sum()
 
         num_seconds_approx = (
-            num_ticks * self.anticipation_settings.tick_token_frequency_in_midi_ticks
+            num_ticks * self.anticipation_settings.tick_token_every_n_ticks
         ) / self.anticipation_settings.time_resolution
         self.approx_bps.update(
             loss_sum=total_loss_sum,
@@ -398,13 +404,13 @@ class GPT2LightningModule(pl.LightningModule):
         per_device_batch_size = self.hparams.train_batch_size // num_devices
         dataset = PreTokenizedDataset(self.data_dir / "valid.npy")
 
-        if (
+        if self.skip_all_validation_during_training and (
             self.trainer is not None
             and getattr(self.trainer.state, "fn", None) == "fit"
         ):
             # hack for short term, I can't figure out a reliable way
             # to get lightning simply to SKIP the validation step during
-            # training. Busted library.
+            # training.
             empty = Subset(dataset, [])
             return DataLoader(empty, batch_size=1)
 
@@ -475,6 +481,7 @@ def main(args: argparse.Namespace) -> None:
             pos_emb=args.pos_emb,
             embedding_and_lm_head_weight_tying=not args.no_weight_tie,
             use_value_embeds=args.use_value_embeds,
+            do_torch_compile=not args.no_torch_compile,
         )
         with torch.device("meta"):
             model = GPT2LMHeadModelLite(model_config)
@@ -536,6 +543,7 @@ def main(args: argparse.Namespace) -> None:
             use_cache=False,
             embedding_and_lm_head_weight_tying=not args.no_weight_tie,
             use_value_embeds=args.use_value_embeds,
+            do_torch_compile=not args.no_torch_compile,
         )
         num_flops_per_token = -1
         effective_num_iterations = args.num_train_steps
@@ -544,6 +552,7 @@ def main(args: argparse.Namespace) -> None:
     model = GPT2LightningModule(
         data_dir=tokenized_dataset_path,
         settings=anticipation_settings,
+        config=model_config,
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
@@ -551,8 +560,9 @@ def main(args: argparse.Namespace) -> None:
         eval_batch_size=args.eval_batch_size,
         pretrained_checkpoint=args.checkpoint_path,
         num_flops_per_token=num_flops_per_token,
-        config=model_config,
         no_cuda_graphs=args.no_cuda_graphs,
+        skip_all_validation_during_training=args.skip_all_validation_during_training,
+        do_gradient_checkpointing=not args.no_gradient_checkpointing,
     )
 
     checkpoint_callback = HuggingFaceCheckpoint(
@@ -640,6 +650,7 @@ def main(args: argparse.Namespace) -> None:
 
     # ensure we run validation at the very end too
     trainer.validate(model)
+    return None
 
 
 def get_argparser() -> argparse.ArgumentParser:
@@ -766,9 +777,24 @@ def get_argparser() -> argparse.ArgumentParser:
         "--gpus_per_node", type=int, default=1, help="Number of GPUs per node"
     )  # 4 gpus
     parser.add_argument(
+        "--no_torch_compile",
+        action="store_true",
+        help="Disable calling torch.compile on model instance",
+    )
+    parser.add_argument(
         "--no_cuda_graphs",
         action="store_true",
         help="Disable cuda graphs in torch compile.",
+    )
+    parser.add_argument(
+        "--skip_all_validation_during_training",
+        action="store_true",
+        help="Disable ALL validation steps during training, regardless of the steps_per_eval setting.",
+    )
+    parser.add_argument(
+        "--no_gradient_checkpointing",
+        action="store_true",
+        help="Disable gradient checkpointing",
     )
 
     # Logging Parameters
