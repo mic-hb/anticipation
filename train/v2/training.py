@@ -2,7 +2,6 @@ import gc
 import os
 import time
 import argparse
-from typing import Optional
 from pathlib import Path
 import json
 from dataclasses import asdict
@@ -24,8 +23,6 @@ from pytorch_lightning.callbacks import (
 )
 from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_info
-
-from transformers import PretrainedConfig, GPT2LMHeadModel
 
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.util import save_text
@@ -49,6 +46,7 @@ class GPT2LightningModule(pl.LightningModule):
         self,
         data_dir: Path,
         settings: AnticipationV2Settings,
+        config: GPT2ConfigLite,
         num_flops_per_token: int,
         learning_rate: float = 5e-5,
         warmup_steps: int = 0,
@@ -56,14 +54,25 @@ class GPT2LightningModule(pl.LightningModule):
         train_batch_size: int = 32,
         eval_batch_size: int = 32,
         pretrained_checkpoint: str = None,
-        config: Optional[GPT2ConfigLite] = None,
         no_cuda_graphs: bool = False,
+        skip_all_validation_during_training: bool = False,
+        do_gradient_checkpointing: bool = True,
     ):
         super().__init__()
         self.save_hyperparameters()
+
+        # these are saved by .save_hyperparameters, but I want to
+        # emphasize that they are indeed used
+        self.__learning_rate = learning_rate
+        self.__warmup_steps = warmup_steps
+        self.__weight_decay = weight_decay
+        self.__train_batch_size = train_batch_size
+        self.__eval_batch_size = eval_batch_size
+
         self.data_dir = data_dir
         self.num_flops_per_token = num_flops_per_token
         self.no_cuda_graphs = no_cuda_graphs
+        self.do_gradient_checkpointing = do_gradient_checkpointing
 
         if pretrained_checkpoint:
             self.model = GPT2LMHeadModelLite.from_pretrained(
@@ -72,20 +81,23 @@ class GPT2LightningModule(pl.LightningModule):
             rank_zero_info(f"Loaded pre-trained model from {pretrained_checkpoint}")
         else:
             self.model = GPT2LMHeadModelLite(config)
+            if config.do_torch_compile:
+                if no_cuda_graphs:
+                    # OOM can happen on GB
+                    self.model = torch.compile(
+                        self.model, dynamic=False, mode="max-autotune-no-cudagraphs"
+                    )
+                else:
+                    self.model = torch.compile(self.model, dynamic=False)
 
-            if no_cuda_graphs:
-                # OOM can happen on GB
-                self.model = torch.compile(
-                    self.model, dynamic=False, mode="max-autotune-no-cudagraphs"
-                )
-            else:
-                self.model = torch.compile(self.model, dynamic=False)
+        if self.do_gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
 
-        self.model.gradient_checkpointing_enable()
         self.model.config.bos_token_id = self.model.config.eos_token_id = 0
         self.anticipation_settings = settings
 
-        # --- validation split metrics ----
+        # --- validation metrics and settings ----
+        self.skip_all_validation_during_training = skip_all_validation_during_training
         self.ppl = TokenPerplexity()
 
         # all triples
@@ -194,7 +206,7 @@ class GPT2LightningModule(pl.LightningModule):
         num_ticks = tick_mask.sum()
 
         num_seconds_approx = (
-            num_ticks * self.anticipation_settings.tick_token_frequency_in_midi_ticks
+            num_ticks * self.anticipation_settings.tick_token_every_n_ticks
         ) / self.anticipation_settings.time_resolution
         self.approx_bps.update(
             loss_sum=total_loss_sum,
@@ -398,13 +410,13 @@ class GPT2LightningModule(pl.LightningModule):
         per_device_batch_size = self.hparams.train_batch_size // num_devices
         dataset = PreTokenizedDataset(self.data_dir / "valid.npy")
 
-        if (
+        if self.skip_all_validation_during_training and (
             self.trainer is not None
             and getattr(self.trainer.state, "fn", None) == "fit"
         ):
             # hack for short term, I can't figure out a reliable way
             # to get lightning simply to SKIP the validation step during
-            # training. Busted library.
+            # training.
             empty = Subset(dataset, [])
             return DataLoader(empty, batch_size=1)
 
@@ -430,12 +442,10 @@ class HuggingFaceCheckpoint(ModelCheckpoint):
             return
 
         step_dir = os.path.join(self.dirpath, f"step-{trainer.global_step}")
-
-        # TODO: don't forget to re-enabled this
         raw_model = pl_module.model if hasattr(pl_module, "model") else pl_module
-        # raw_model.save_pretrained(
-        #     step_dir, safe_serialization=True, max_shard_size="2GB"
-        # )
+        raw_model.save_pretrained(
+            step_dir, safe_serialization=True, max_shard_size="2GB"
+        )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -462,6 +472,7 @@ def main(args: argparse.Namespace) -> None:
     flops = args.flops
     target_param_data_ratio = args.target_param_data_ratio
     if depth > -1 and (flops > -1 or target_param_data_ratio > -1):
+        # doing a 'scaling law' kind of experiment
         model_config: GPT2ConfigLite = build_model_meta(
             depth,
             anticipation_settings=anticipation_settings,
@@ -475,6 +486,7 @@ def main(args: argparse.Namespace) -> None:
             pos_emb=args.pos_emb,
             embedding_and_lm_head_weight_tying=not args.no_weight_tie,
             use_value_embeds=args.use_value_embeds,
+            do_torch_compile=not args.no_torch_compile,
         )
         with torch.device("meta"):
             model = GPT2LMHeadModelLite(model_config)
@@ -496,20 +508,16 @@ def main(args: argparse.Namespace) -> None:
             # https://arxiv.org/abs/2305.16264v5
             # TL;DR of 'scaling data constrained language models (2025)', a model can
             # backprop over the same data up to 4 times more or less before reaching
-            # diminishing returns.
+            # diminishing returns, when it is roughly on the efficient frontier
             token_multiplier = 4
             total_tokens_available = token_multiplier * dataset.num_tokens
             if not (total_tokens <= total_tokens_available):
                 print(
-                    f"Not enough tokens to meet FLOP or ratio budget. Need: {total_tokens:,}, Have: {dataset.num_tokens:,}"
+                    f"Not enough tokens to meet FLOP or ratio budget. "
+                    f"Need: {total_tokens:,}, Have: {dataset.num_tokens:,}"
                 )
                 # exit the program without killing
-                return 0
-
-            # assert total_tokens <= total_tokens_available, (
-            #    f"Not enough tokens to meet FLOP or ratio budget. Need: {total_tokens:,}, Have: {dataset.num_tokens:,}"
-            # )
-            # del dataset
+                return None
 
             effective_num_iterations = csv_row["num_iterations"]
             num_flops_per_token = csv_row["num_flops_per_token"]
@@ -518,25 +526,32 @@ def main(args: argparse.Namespace) -> None:
             save_to_path = Path(args.output_dir) / "scaling_analysis_info.json"
             save_text(save_to_path, json.dumps(csv_row))
     else:
-        model_config = GPT2ConfigLite(
-            vocab_size=anticipation_settings.vocab.total_tokens(),
-            n_positions=anticipation_settings.context_size,
-            n_embd=args.hidden_dim,
-            n_layer=args.num_layers,
-            n_head=args.num_heads,
-            embd_pdrop=args.embed_pdrop,
-            resid_pdrop=args.resid_pdrop,
-            # as of right now doesn't do anything, we always use gelu
-            activation_function="gelu_new",
-            layer_norm_epsilon=args.layer_norm_epsilon,
-            pos_emb=args.pos_emb,
-            window_pattern=args.window_pattern,
-            scale_attn_weights=True,
-            scale_attn_by_inverse_layer_idx=True,
-            use_cache=False,
-            embedding_and_lm_head_weight_tying=not args.no_weight_tie,
-            use_value_embeds=args.use_value_embeds,
-        )
+        if args.checkpoint_path:
+            model_config = GPT2ConfigLite.from_json(
+                str(Path(args.checkpoint_path) / "config.json")
+            )
+        else:
+            model_config = GPT2ConfigLite(
+                vocab_size=anticipation_settings.vocab.total_tokens(),
+                n_positions=anticipation_settings.context_size,
+                n_embd=args.hidden_dim,
+                n_layer=args.num_layers,
+                n_head=args.num_heads,
+                embd_pdrop=args.embed_pdrop,
+                resid_pdrop=args.resid_pdrop,
+                # as of right now doesn't do anything, we always use gelu
+                activation_function="gelu_new",
+                layer_norm_epsilon=args.layer_norm_epsilon,
+                pos_emb=args.pos_emb,
+                window_pattern=args.window_pattern,
+                scale_attn_weights=True,
+                scale_attn_by_inverse_layer_idx=True,
+                use_cache=False,
+                embedding_and_lm_head_weight_tying=not args.no_weight_tie,
+                use_value_embeds=args.use_value_embeds,
+                do_torch_compile=not args.no_torch_compile,
+            )
+
         num_flops_per_token = -1
         effective_num_iterations = args.num_train_steps
         csv_row = {}
@@ -544,6 +559,7 @@ def main(args: argparse.Namespace) -> None:
     model = GPT2LightningModule(
         data_dir=tokenized_dataset_path,
         settings=anticipation_settings,
+        config=model_config,
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
@@ -551,8 +567,9 @@ def main(args: argparse.Namespace) -> None:
         eval_batch_size=args.eval_batch_size,
         pretrained_checkpoint=args.checkpoint_path,
         num_flops_per_token=num_flops_per_token,
-        config=model_config,
         no_cuda_graphs=args.no_cuda_graphs,
+        skip_all_validation_during_training=args.skip_all_validation_during_training,
+        do_gradient_checkpointing=not args.no_gradient_checkpointing,
     )
 
     checkpoint_callback = HuggingFaceCheckpoint(
@@ -567,7 +584,6 @@ def main(args: argparse.Namespace) -> None:
     checkpoint_callback.CHECKPOINT_EQUALS_CHAR = "-"
 
     logger_dict = {}
-    is_scaling_exp = False
     if args.use_wandb:
         if args.wandb_tag:
             tags = [str(args.wandb_tag).strip()]
@@ -575,7 +591,6 @@ def main(args: argparse.Namespace) -> None:
             tags = []
 
         if tags == ["scaling"]:
-            is_scaling_exp = True
             run_name = f"scaling-run-{int(time.time())}"
         else:
             run_name = f"run-{int(time.time())}"
@@ -599,15 +614,9 @@ def main(args: argparse.Namespace) -> None:
             find_unused_parameters=False, static_graph=False
         )
 
-    # ------
     # clean up some stuff from setup
     gc.collect()
-    # ------
-    # NB: "limit_val_batches" disables validation EVERYWHERE ALL THE TIME
-    # don't use it. Instead use check_val_every_n_epochs to disable during
-    # training. Also it must be an integer...
-    # I can't with this... this gives a div 0.
-    # val_skipping = {"check_val_every_n_epoch": 0} if is_scaling_exp else {}
+
     trainer = pl.Trainer(
         max_steps=effective_num_iterations,
         # always use gpu and then thrown an error if it's unavailable - that's preferable
@@ -634,12 +643,12 @@ def main(args: argparse.Namespace) -> None:
         log_every_n_steps=args.log_every_n_steps,
         val_check_interval=args.steps_per_eval,
         **logger_dict,
-        # **val_skipping,
     )
     trainer.fit(model)
 
     # ensure we run validation at the very end too
     trainer.validate(model)
+    return None
 
 
 def get_argparser() -> argparse.ArgumentParser:
@@ -766,9 +775,24 @@ def get_argparser() -> argparse.ArgumentParser:
         "--gpus_per_node", type=int, default=1, help="Number of GPUs per node"
     )  # 4 gpus
     parser.add_argument(
+        "--no_torch_compile",
+        action="store_true",
+        help="Disable calling torch.compile on model instance",
+    )
+    parser.add_argument(
         "--no_cuda_graphs",
         action="store_true",
         help="Disable cuda graphs in torch compile.",
+    )
+    parser.add_argument(
+        "--skip_all_validation_during_training",
+        action="store_true",
+        help="Disable ALL validation steps during training, regardless of the steps_per_eval setting.",
+    )
+    parser.add_argument(
+        "--no_gradient_checkpointing",
+        action="store_true",
+        help="Disable gradient checkpointing",
     )
 
     # Logging Parameters
@@ -834,7 +858,7 @@ def get_argparser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
-    ap = get_argparser()
-    args = ap.parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
-    main(args)
+    _args = get_argparser().parse_args()
+
+    os.makedirs(_args.output_dir, exist_ok=True)
+    main(_args)

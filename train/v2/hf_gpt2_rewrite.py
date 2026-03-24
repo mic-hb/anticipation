@@ -2,7 +2,9 @@ import os
 import json
 import math
 import re
-from dataclasses import dataclass
+from typing import Any, Optional
+from pathlib import Path
+from dataclasses import dataclass, asdict
 
 import torch
 from torch import nn
@@ -53,20 +55,19 @@ class GPT2ConfigLite:
     embedding_and_lm_head_weight_tying: bool = True
     use_value_embeds: bool = True
     mlp_style: str = "GPT2"
+    do_torch_compile: bool = True
 
     @classmethod
-    def from_json(cls, path: str):
+    def from_json(cls, path: str) -> "GPT2ConfigLite":
         d = json.loads(open(path, "r", encoding="utf-8").read())
-        # Normalize common aliases across versions
-        d.setdefault("n_positions", d.get("max_position_embeddings", 1024))
-        d.setdefault("n_embd", d.get("hidden_size", d.get("n_embd", 768)))
-        d.setdefault("n_layer", d.get("num_hidden_layers", d.get("n_layer", 12)))
-        d.setdefault("n_head", d.get("num_attention_heads", d.get("n_head", 12)))
         return cls(**{k: v for k, v in d.items() if hasattr(cls, k)})
 
     def __post_init__(self) -> None:
         # validation logic for parameters
         assert self.mlp_style in ("GPT2", "Llama")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 CONV1D_SUFFIXES = (
@@ -121,7 +122,7 @@ def save_hf_style_checkpoint(save_dir, model, config_dict):
     save_dir.mkdir(parents=True, exist_ok=True)
 
     (save_dir / "config.json").write_text(
-        json.dumps(config_dict, indent=2, sort_keys=True)
+        json.dumps(config_dict, indent=4, sort_keys=True)
     )
     torch.save(model.state_dict(), save_dir / "pytorch_model.bin")
 
@@ -430,12 +431,17 @@ class GPT2ModelLite(nn.Module):
                 else None
             )
 
-            if self.gradient_checkpointing and self.training:
-                # Explicitly set use_reentrant per PyTorch recommendation.
-                x = checkpoint(
-                    lambda _x: block(
+            if self.gradient_checkpointing:
+
+                def _custom_forward(
+                    _x, block=block, ve=ve, window_size=window_size, attn_bias=attn_bias
+                ):
+                    return block(
                         _x, ve=ve, window_size=window_size, attention_mask=attn_bias
-                    ),
+                    )
+
+                x = checkpoint(
+                    _custom_forward,
                     x,
                     use_reentrant=False,
                 )
@@ -487,7 +493,41 @@ class GPT2LMHeadModelLite(nn.Module):
 
     @property
     def device(self) -> torch.device:
-        return self.wte.weight.device
+        return self.transformer.wte.weight.device
+
+    def save_pretrained(
+        self, step_dir, safe_serialization: bool = True, max_shard_size: str = "2GB"
+    ) -> None:
+        save_hf_style_checkpoint(
+            save_dir=step_dir, model=self, config_dict=self.config.to_dict()
+        )
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        checkpoint_path: str,
+        config: Optional[GPT2ConfigLite] = None,
+        map_location: str | torch.device | dict | None = "cpu",
+    ) -> "GPT2LMHeadModelLite":
+        assert isinstance(checkpoint_path, str)
+        p = Path(checkpoint_path)
+        assert p.exists()
+        assert p.is_dir()
+
+        if config is None:
+            config_path = p / "config.json"
+            assert config_path.exists()
+            assert config_path.is_file()
+            config = GPT2ConfigLite.from_json(str(config_path.absolute()))
+
+        weights_path = p / "pytorch_model.bin"
+        assert weights_path.exists()
+        assert weights_path.is_file()
+
+        instance = cls(config=config)
+        sd = torch.load(weights_path, map_location=map_location, weights_only=True)
+        load_hf_state_dict_into_model(instance, sd)
+        return instance
 
 
 def build_model_meta(
@@ -505,6 +545,7 @@ def build_model_meta(
     pos_emb: str = "rope",
     embedding_and_lm_head_weight_tying: bool = True,
     use_value_embeds: bool = False,
+    do_torch_compile: bool = True,
 ) -> GPT2ConfigLite:
     """
     From: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L125
@@ -539,6 +580,7 @@ def build_model_meta(
         window_pattern=window_pattern,
         embedding_and_lm_head_weight_tying=embedding_and_lm_head_weight_tying,
         use_value_embeds=use_value_embeds,
+        do_torch_compile=do_torch_compile,
     )
 
 
