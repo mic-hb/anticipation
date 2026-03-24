@@ -247,6 +247,17 @@ def test_tokenize_v2_lakh_ar_local_midi_vocab(
         auto_open=False,
     )
 
+def test_tokenize_v2_lakh_ar_local_midi_vocab_4096(
+    lmd_0_example_1_midi_path: Path, local_midi_settings_anticipation_ctx_4096: AnticipationV2Settings
+) -> None:
+    in_memory_tokens = []
+    stats = v2_tokenize(
+        [lmd_0_example_1_midi_path], in_memory_tokens, local_midi_settings_anticipation_ctx_4096
+    )
+    assert not stats.ignored_files
+    _check_anticipation_rule_for_controls_and_token_ranges(
+        in_memory_tokens, local_midi_settings_anticipation_ctx_4096
+    )
 
 def test_tokenize_v2_lakh_instrument_for_visualization(
     lmd_0_example_1_midi_path: Path,

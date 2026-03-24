@@ -142,7 +142,7 @@ def _get_dataset_file_from_paths(
     return npy_out_path, records
 
 
-def _get_lakh_midi_splits_and_configs(
+def get_lakh_midi_splits_and_configs(
     lahk_midi_dataset_parent_path: Path,
 ) -> list[dict[str, Any]]:
     """

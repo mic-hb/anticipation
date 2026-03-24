@@ -6,6 +6,8 @@ from tqdm import tqdm
 
 from symusic import Score
 
+from train.v2.dataset_tokenize import get_lakh_midi_splits_and_configs
+
 DATASETS_PATH = Path(__file__).parent.parent.parent / "data"
 
 # see: https://huggingface.co/datasets/Metacreation/GigaMIDI
@@ -13,13 +15,19 @@ LAKH_MIDI_PATH = DATASETS_PATH / "lmd_full"
 GIGA_MIDI_ENCLOSING_PATH = DATASETS_PATH / "giga_midi"
 
 def extract_files() -> None:
-    all_lakh_midi_md5 = set()
+    # remove all the test split samples from the dataset, from any split
+    # we will use the test split of lakh to eval
+    exclude_lakh_midi_md5 = set()
     if LAKH_MIDI_PATH.exists() and LAKH_MIDI_PATH.is_dir():
-        all_files_mid = [x.stem for x in LAKH_MIDI_PATH.rglob("*.mid")]
-        all_files_midi = [x.stem for x in LAKH_MIDI_PATH.rglob("*.midi")]
-        all_lakh_midi_md5 = set(all_files_midi + all_files_mid)
-
-    assert len(all_lakh_midi_md5) == 178_561, "Lakh has incorrect number of MIDI files."
+        all_lakh_splits = get_lakh_midi_splits_and_configs(LAKH_MIDI_PATH)
+        # get all the md5 files from the lakh test split
+        lakh_test_split = [x for x in all_lakh_splits if x["name"] == "test"][0]
+        for p in lakh_test_split["dataset_paths"]:
+            all_files_mid = [x.stem for x in p.rglob("*.mid")]
+            all_files_midi = [x.stem for x in p.rglob("*.midi")]
+            exclude_lakh_midi_md5.update(all_files_midi + all_files_mid)
+    else:
+        raise RuntimeError("Lakh has not yet been downloaded. Execute the script `run_get_lakh.sh`.")
 
     splits = [
         "train", "validation", "test"
@@ -43,7 +51,7 @@ def extract_files() -> None:
         for i, sample in enumerate(iter_obj):
             sample: dict[str, Any]
             sample_md5 = sample["md5"]
-            if sample_md5 in all_lakh_midi_md5:
+            if sample_md5 in exclude_lakh_midi_md5:
                 num_skipped_in_lakh += 1
                 continue
 
@@ -83,10 +91,10 @@ if __name__ == "__main__":
     """
     From repo root, run:
 
-        PYTHONPATH=. python scripts/v2/giga_midi_to_files.py
+        PYTHONPATH=. python train/v2/giga_midi_to_files.py
 
     If not yet downloaded, one might need to run: `hf auth login` because the dataset
     requires huggingface authentication.
     """
-    check_giga_midi_uniqueness()
-    #extract_files()
+    #check_giga_midi_uniqueness()
+    extract_files()

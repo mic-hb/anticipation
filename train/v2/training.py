@@ -3,6 +3,7 @@ import os
 import time
 import argparse
 from pathlib import Path
+import logging
 import json
 from dataclasses import asdict
 
@@ -40,6 +41,19 @@ from train.v2.hf_gpt2_rewrite import (
     get_scaling_analysis_data,
 )
 
+class TipFilter(logging.Filter):
+    """
+    Credit to: https://github.com/Lightning-AI/pytorch-lightning/issues/21294#issuecomment-3410770397
+    """
+    def filter(self, record):
+        m = record.getMessage()
+        return (
+                "💡 Tip:" not in m
+        )
+
+
+
+logging.getLogger('lightning.pytorch.utilities.rank_zero').addFilter(TipFilter())
 
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
@@ -448,6 +462,8 @@ class HuggingFaceCheckpoint(ModelCheckpoint):
         )
 
 
+
+
 def main(args: argparse.Namespace) -> None:
     pl.seed_everything(args.seed)
     tokenized_dataset_path = Path(args.data_dir)
@@ -584,6 +600,7 @@ def main(args: argparse.Namespace) -> None:
     checkpoint_callback.CHECKPOINT_EQUALS_CHAR = "-"
 
     logger_dict = {}
+    logging.getLogger('pytorch_lightning.utilities.rank_zero').addFilter(TipFilter())
     if args.use_wandb:
         if args.wandb_tag:
             tags = [str(args.wandb_tag).strip()]
@@ -862,3 +879,4 @@ if __name__ == "__main__":
 
     os.makedirs(_args.output_dir, exist_ok=True)
     main(_args)
+

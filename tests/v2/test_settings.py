@@ -198,9 +198,3 @@ def test_realize_vocab_as_array() -> None:
     assert set(e_note) == set(c_note)
 
 
-def test_write_settings_file(
-    local_midi_settings_anticipation: AnticipationV2Settings,
-    local_midi_settings_ar_only: AnticipationV2Settings,
-) -> None:
-    local_midi_settings_anticipation.save_to_disk(Path(__file__).parent)
-    local_midi_settings_ar_only.save_to_disk(Path(__file__).parent)
