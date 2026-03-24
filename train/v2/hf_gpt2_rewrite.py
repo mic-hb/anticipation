@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from anticipation.v2.nanochat.flash_attention import flash_attn
@@ -51,6 +52,7 @@ class GPT2ConfigLite:
     window_pattern: str = "L"
     embedding_and_lm_head_weight_tying: bool = True
     use_value_embeds: bool = True
+    mlp_style: str = "GPT2"
 
     @classmethod
     def from_json(cls, path: str):
@@ -61,6 +63,10 @@ class GPT2ConfigLite:
         d.setdefault("n_layer", d.get("num_hidden_layers", d.get("n_layer", 12)))
         d.setdefault("n_head", d.get("num_attention_heads", d.get("n_head", 12)))
         return cls(**{k: v for k, v in d.items() if hasattr(cls, k)})
+
+    def __post_init__(self) -> None:
+        # validation logic for parameters
+        assert self.mlp_style in ("GPT2", "Llama")
 
 
 CONV1D_SUFFIXES = (
@@ -267,12 +273,13 @@ class GPT2AttentionLite(nn.Module):
         return y
 
 
-class GPT2MLPLite(nn.Module):
-    def __init__(self, config):
+class GPT2MLP(nn.Module):
+    def __init__(self, config: GPT2ConfigLite) -> None:
         super().__init__()
-        inner = config.n_inner or (4 * config.n_embd)
-        self.c_fc = Conv1D(inner, config.n_embd, init_std=config.initializer_range)
-        self.c_proj = Conv1D(config.n_embd, inner, init_std=config.initializer_range)
+        d_ff = config.n_inner or (4 * config.n_embd)
+        d_model = config.n_embd
+        self.c_fc = Conv1D(d_ff, d_model, init_std=config.initializer_range)
+        self.c_proj = Conv1D(d_model, d_ff, init_std=config.initializer_range)
         self.dropout = nn.Dropout(config.resid_pdrop)
 
     def forward(self, x):
@@ -284,13 +291,35 @@ class GPT2MLPLite(nn.Module):
         return self.dropout(x)
 
 
+class LlamaMLP(nn.Module):
+    def __init__(self, config: GPT2ConfigLite) -> None:
+        super().__init__()
+        d_ff = config.n_inner or (4 * config.n_embd)
+        d_model = config.n_embd
+        # gated MLP, with silu
+        self.gate_proj = Conv1D(d_ff, d_model, init_std=config.initializer_range)
+        self.up_proj = Conv1D(d_ff, d_model, init_std=config.initializer_range)
+        self.down_proj = Conv1D(d_model, d_ff, init_std=config.initializer_range)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = F.silu(self.gate_proj(x))
+        up = self.up_proj(x)
+        return self.down_proj(gate * up)
+
+
 class GPT2BlockLite(nn.Module):
-    def __init__(self, config, layer_idx: int):
+    def __init__(self, config: GPT2ConfigLite, layer_idx: int) -> None:
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.attn = GPT2AttentionLite(config, layer_idx=layer_idx)
         self.ln_2 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
-        self.mlp = GPT2MLPLite(config)
+
+        if config.mlp_style == "GPT2":
+            self.mlp = GPT2MLP(config)
+        elif config.mlp_style == "Llama":
+            self.mlp = LlamaMLP(config)
+        else:
+            raise ValueError(f"Unsupported MLP style, got: {self.config.mlp_style}")
 
     def forward(self, x, *, window_size, ve, attention_mask=None):
         x = x + self.attn(
@@ -584,7 +613,7 @@ def estimate_flops(gpt: GPT2LMHeadModelLite) -> int:
 
     nparams_exclude = (
         gpt.transformer.wte.weight.numel()
-        #+ gpt.transformer.wpe.weight.numel()
+        # + gpt.transformer.wpe.weight.numel()
         + value_embeds_numel
         + gpt.transformer.resid_lambdas.numel()
         + gpt.transformer.x0_lambdas.numel()

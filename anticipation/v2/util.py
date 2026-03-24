@@ -103,7 +103,7 @@ def get_git_info(path: Path = None) -> dict[str, str]:
         }
 
 
-def iter_files(root: Path, file_extensions: tuple[str, ...]) -> Iterator[Path]:
+def iter_files(root: Path, file_extensions: tuple[str, ...], follow_symlinks: bool = False) -> Iterator[Path]:
     """
     This ordering is NOT deterministic!
     """
@@ -116,11 +116,11 @@ def iter_files(root: Path, file_extensions: tuple[str, ...]) -> Iterator[Path]:
         try:
             with os.scandir(d) as it:
                 for entry in it:
-                    if entry.is_dir(follow_symlinks=False):
+                    if entry.is_dir(follow_symlinks=follow_symlinks):
                         stack.append(entry.path)
                         continue
 
-                    if entry.is_file(follow_symlinks=False):
+                    if entry.is_file(follow_symlinks=follow_symlinks):
                         _, ext = os.path.splitext(entry.name)
                         if ext.lower() in extensions_to_get:
                             yield Path(entry.path)

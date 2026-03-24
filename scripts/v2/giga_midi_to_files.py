@@ -6,25 +6,34 @@ from tqdm import tqdm
 
 from symusic import Score
 
-# see: https://huggingface.co/datasets/Metacreation/GigaMIDI
-GIGA_MIDI_ENCLOSING_PATH = (Path(__file__).parent.parent.parent / "data") / "giga_midi"
+DATASETS_PATH = Path(__file__).parent.parent.parent / "data"
 
-if __name__ == "__main__":
-    """
-    From repo root, run:
-    
-        PYTHONPATH=. python scripts/v2/giga_midi_to_files.py
-        
-    If not yet downloaded, one might need to run: `hf auth login` because the dataset
-    requires huggingface authentication. 
-    """
+# see: https://huggingface.co/datasets/Metacreation/GigaMIDI
+LAKH_MIDI_PATH = DATASETS_PATH / "lmd_full"
+GIGA_MIDI_ENCLOSING_PATH = DATASETS_PATH / "giga_midi"
+
+def extract_files() -> None:
+    all_lakh_midi_md5 = set()
+    if LAKH_MIDI_PATH.exists() and LAKH_MIDI_PATH.is_dir():
+        all_files_mid = [x.stem for x in LAKH_MIDI_PATH.rglob("*.mid")]
+        all_files_midi = [x.stem for x in LAKH_MIDI_PATH.rglob("*.midi")]
+        all_lakh_midi_md5 = set(all_files_midi + all_files_mid)
+
+    assert len(all_lakh_midi_md5) == 178_561, "Lakh has incorrect number of MIDI files."
+
     splits = [
         "train", "validation", "test"
     ]
 
-    GIGA_MIDI_ENCLOSING_PATH.mkdir(parents=True, exist_ok=True)
+    # exist NOT ok... if you run this multiple times, and your intention is to exclude
+    # Lakh files, then the Lakh files will still be in there unless you delete the
+    # original directory. Run this clean from nothing if possible.
+    GIGA_MIDI_ENCLOSING_PATH.mkdir(parents=True, exist_ok=False)
 
     for split in splits:
+        num_skipped_in_lakh = 0
+        num_ignored = 0
+
         # if dataset is gated, run `hf auth login`
         dataset = load_dataset("Metacreation/GigaMIDI", split=split)
         split_enclosing_path = (GIGA_MIDI_ENCLOSING_PATH / split)
@@ -33,11 +42,51 @@ if __name__ == "__main__":
         iter_obj = tqdm(dataset, mininterval=1.0, desc=f"Saving files in split: {split}")
         for i, sample in enumerate(iter_obj):
             sample: dict[str, Any]
-            sample_file_name = sample["md5"]
+            sample_md5 = sample["md5"]
+            if sample_md5 in all_lakh_midi_md5:
+                num_skipped_in_lakh += 1
+                continue
+
+            sample_file_name = sample_md5
             save_to = Path(split_enclosing_path/ f"{sample_file_name}.midi")
             try:
                 score = Score.from_midi(sample["music"], sanitize_data=True)
                 score.dump_midi(save_to)
             except RuntimeError:
                 # can't save this file for some reason...
+                num_ignored += 1
                 pass
+
+        print(f"Unable to open: {num_ignored:,}")
+        print(f"Ignored Lakh files: {num_skipped_in_lakh:,}")
+
+def check_giga_midi_uniqueness():
+    splits = [
+        "train", "validation", "test"
+    ]
+    total_files = 0
+    total_md5 = set()
+    for split in splits:
+        # if dataset is gated, run `hf auth login`
+        dataset = load_dataset("Metacreation/GigaMIDI", split=split)
+        total_files += len(dataset)
+        for s in dataset:
+            sample_md5 = s["md5"]
+            total_md5.add(sample_md5)
+
+    print("Total Files ?= Total Unique MD5s?")
+    print("Files: ", total_files)
+    print("MD5s: ", len(total_md5))
+
+
+if __name__ == "__main__":
+    """
+    From repo root, run:
+
+        PYTHONPATH=. python scripts/v2/giga_midi_to_files.py
+
+    If not yet downloaded, one might need to run: `hf auth login` because the dataset
+    requires huggingface authentication.
+    """
+    check_giga_midi_uniqueness()
+    #extract_files()
