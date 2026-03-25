@@ -177,7 +177,10 @@ class GPT2AttentionLite(nn.Module):
         assert self.head_dim * self.num_heads == self.embed_dim
 
         self.scale_attn_weights = config.scale_attn_weights
+
+        # doesn't actually do anything
         self.scale_attn_by_inverse_layer_idx = config.scale_attn_by_inverse_layer_idx
+
         self.layer_idx = layer_idx
 
         self.c_attn = Conv1D(
@@ -189,7 +192,6 @@ class GPT2AttentionLite(nn.Module):
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
 
-        # Optional legacy buffers (keep for checkpoint compatibility)
         max_pos = config.n_positions
         self.register_buffer(
             "bias",

@@ -57,20 +57,19 @@ PYTHONPATH=.  torchrun --standalone --nproc_per_node=1 train/v2/training.py \
     --output_dir output/checkpoints/test_checkpoints \
     --data_dir data/tokenized_datasets/giga_midi/6fb2094dfa7c0d16278dfaa4a401e3b8 \
     --gpus_per_node 1 \
-    --train_batch_size 64 \
-    --eval_batch_size 64 \
-    --gradient_accumulation_steps 1 \
-    --steps_per_eval 50 \
-    --steps_per_checkpoint 20 \
-    --num_train_steps 2000000 \
+    --train_batch_size 16 \
+    --eval_batch_size 16 \
+    --gradient_accumulation_steps 4 \
+    --steps_per_eval 50000 \
+    --steps_per_checkpoint 20000 \
     --save_midi_output_after_step 1000000 \
     --num_events_to_generate_for_midi_inference 80 \
-    --num_layers 2 \
+    --num_layers 3 \
     --no_weight_tie \
     --window_pattern "SSSL" \
     --pos_emb "rope" \
     --learning_rate 1e-03 \
-    --no_torch_compile \
-    --no_cuda_graphs \
+    --flops "1e17" \
+    --mlp_style "Llama" \
     --wandb_project "dgx_testing"
 

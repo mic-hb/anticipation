@@ -8,16 +8,13 @@ import json
 from dataclasses import asdict
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import OneCycleLR
 
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
-
-# keep this!!!
-torch.set_float32_matmul_precision("high")
-
 from pytorch_lightning.callbacks import (
     ModelCheckpoint,
     LearningRateMonitor,
@@ -27,6 +24,7 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.util import save_text
+
 from train.v2.custom_metrics import TokenPerplexity, ApproxBPS
 from train.v2.dataset_utils import PreTokenizedDataset
 from train.v2.logging_utils import (
@@ -39,7 +37,13 @@ from train.v2.hf_gpt2_rewrite import (
     GPT2ConfigLite,
     build_model_meta,
     get_scaling_analysis_data,
+    get_num_scaling_params,
+    estimate_flops,
+    print0
 )
+
+# keep this!!!
+torch.set_float32_matmul_precision("high")
 
 class TipFilter(logging.Filter):
     """
@@ -135,6 +139,18 @@ class GPT2LightningModule(pl.LightningModule):
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
             return self.model(**inputs)
 
+    def _count_local_tokens(self, batch) -> int:
+        input_ids = batch["input_ids"]
+        if "attention_mask" in batch and batch["attention_mask"] is not None:
+            return int(batch["attention_mask"].sum().item())
+        return int(input_ids.numel())
+
+    def _all_reduce_sum_int(self, value: int) -> int:
+        t = torch.tensor(value, device=self.device, dtype=torch.long)
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        return int(t.item())
+
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
@@ -147,22 +163,50 @@ class GPT2LightningModule(pl.LightningModule):
         # keep this upcast!
         # https://x.com/jwthickstun/status/1737134520141246938
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
-        # logits = logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log("train_loss", loss.detach(), prog_bar=True, logger=True)
 
         # things that are logged in nanochat training,
         # see: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L539
-        step = self.global_step
 
-        if self.num_flops_per_token != -1:
-            # DDP stuff is taken care of for us
-            num_tokens_per_step = (
-                self.hparams.train_batch_size * self.anticipation_settings.context_size
-            )
-            flops_per_step = self.num_flops_per_token * num_tokens_per_step
-            flops_so_far = step * flops_per_step
-            self.log("flops_so_far", flops_so_far, prog_bar=False, logger=True)
+        # NB: 
+        # in lightning 'global_step' corresponds to an optimizer step
+        # step = self.global_step
+        # 'training_step' runs each microbatch... so it increases even if gradient 
+        # accululation is not 1
+
+        """
+        local_tokens = self._count_local_tokens(batch)
+        global_tokens_this_microstep = self._all_reduce_sum_int(local_tokens)
+        self.total_tokens_seen_global += global_tokens_this_microstep
+        est_total_flops = self.total_tokens_seen_global * self.flops_per_token
+
+        self.log("train/local_tokens", 
+            float(local_tokens), on_step=True, on_epoch=False, sync_dist=False
+        )
+        self.log("train/global_tokens_per_microstep", 
+            float(global_tokens_this_microstep), on_step=True, on_epoch=False, sync_dist=False
+        )
+        self.log("train/total_tokens", 
+            float(self.total_tokens_seen_global), on_step=True, on_epoch=False, sync_dist=False
+        )
+        self.log("train/optimizer_steps", 
+            float(self.global_step), on_step=True, on_epoch=False, sync_dist=False
+        )
+        self.log("train/est_total_flops", 
+            float(est_total_flops), on_step=True, on_epoch=False, sync_dist=False
+        )
+        """
+
+
+        #if self.num_flops_per_token != -1:
+            ## DDP stuff is taken care of for us
+            #num_tokens_per_step = (
+                #self.hparams.train_batch_size * self.anticipation_settings.context_size
+            #)
+            #flops_per_step = self.num_flops_per_token * num_tokens_per_step
+            #flops_so_far = step * flops_per_step
+            #self.log("flops_so_far", flops_so_far, prog_bar=False, logger=True)
 
         return loss
 
@@ -461,7 +505,35 @@ class HuggingFaceCheckpoint(ModelCheckpoint):
             step_dir, safe_serialization=True, max_shard_size="2GB"
         )
 
+def compute_max_steps_from_flop_budget(
+    flop_budget: float,
+    flops_per_token: float,
+    seq_len: int,
+    per_gpu_batch_size: int,
+    num_gpus: int,
+    grad_accum_steps: int = 1,
+) -> int:
+    import math
 
+    if flop_budget <= 0:
+        raise ValueError("flop_budget must be > 0")
+    if flops_per_token <= 0:
+        raise ValueError("flops_per_token must be > 0")
+    if seq_len <= 0:
+        raise ValueError("seq_len must be > 0")
+    if per_gpu_batch_size <= 0:
+        raise ValueError("per_gpu_batch_size must be > 0")
+    if num_gpus <= 0:
+        raise ValueError("num_gpus must be > 0")
+    if grad_accum_steps <= 0:
+        raise ValueError("grad_accum_steps must be > 0")
+
+    tokens_per_update = (
+        seq_len * per_gpu_batch_size * num_gpus * grad_accum_steps
+    )
+    token_budget = flop_budget / flops_per_token
+    max_steps = math.floor(token_budget / tokens_per_update)
+    return max(1, max_steps)
 
 
 def main(args: argparse.Namespace) -> None:
@@ -503,6 +575,7 @@ def main(args: argparse.Namespace) -> None:
             embedding_and_lm_head_weight_tying=not args.no_weight_tie,
             use_value_embeds=args.use_value_embeds,
             do_torch_compile=not args.no_torch_compile,
+            mlp_style=args.mlp_style,
         )
         with torch.device("meta"):
             model = GPT2LMHeadModelLite(model_config)
@@ -566,11 +639,24 @@ def main(args: argparse.Namespace) -> None:
                 embedding_and_lm_head_weight_tying=not args.no_weight_tie,
                 use_value_embeds=args.use_value_embeds,
                 do_torch_compile=not args.no_torch_compile,
+                mlp_style=args.mlp_style,
             )
 
-        num_flops_per_token = -1
+        with torch.device("meta"):
+            model = GPT2LMHeadModelLite(model_config)
+            num_flops_per_token = estimate_flops(model)
+            param_counts_by_purpose = {
+                "num_params_" + x: y for x, y in get_num_scaling_params(model).items()
+            }
+            print0(json.dumps(param_counts_by_purpose, indent=4))
+            print0("Num flops per token:")
+            print0(str(num_flops_per_token))
+
+
         effective_num_iterations = args.num_train_steps
-        csv_row = {}
+        csv_row = {
+            "num_flops_per_token": num_flops_per_token
+        }
 
     model = GPT2LightningModule(
         data_dir=tokenized_dataset_path,
@@ -634,8 +720,21 @@ def main(args: argparse.Namespace) -> None:
     # clean up some stuff from setup
     gc.collect()
 
+    num_devices = max(1, args.gpus_per_node)
+    per_device_batch_size = args.train_batch_size // num_devices
+    max_steps = compute_max_steps_from_flop_budget(
+        flop_budget=args.flops,
+        flops_per_token=num_flops_per_token,
+        seq_len=model_config.n_positions,
+        per_gpu_batch_size=per_device_batch_size,
+        num_gpus=num_devices,
+        grad_accum_steps=args.gradient_accumulation_steps,
+    )
+    print0("Max steps")
+    print0(max_steps)
+
     trainer = pl.Trainer(
-        max_steps=effective_num_iterations,
+        max_steps=max_steps,
         # always use gpu and then thrown an error if it's unavailable - that's preferable
         # to defaulting to cpu imo
         accelerator="gpu",
@@ -708,6 +807,15 @@ def get_argparser() -> argparse.ArgumentParser:
         choices=["absolute", "rope"],
         help=(
             "The positional embedding choice: either `absolute` (vanilla) or RoPE. (rope)"
+        ),
+    )
+    parser.add_argument(
+        "--mlp_style",
+        type=str,
+        default="GPT2",
+        choices=["GPT2", "Llama"],
+        help=(
+            "The kind of MLP to use"
         ),
     )
     parser.add_argument(
