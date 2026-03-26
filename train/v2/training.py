@@ -1,63 +1,61 @@
+import argparse
 import gc
+import json
+import logging
 import os
 import time
-import argparse
-from pathlib import Path
-import logging
-import json
 from dataclasses import asdict
+from pathlib import Path
 
+import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
-from torch.optim.lr_scheduler import OneCycleLR
-
-import pytorch_lightning as pl
-from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.callbacks import (
-    ModelCheckpoint,
-    LearningRateMonitor,
-)
-from pytorch_lightning.strategies import DDPStrategy
-from pytorch_lightning.utilities import rank_zero_info
-
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.util import save_text
+from pytorch_lightning.callbacks import (
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.strategies import DDPStrategy
+from pytorch_lightning.utilities import rank_zero_info
+from torch.optim.lr_scheduler import OneCycleLR
+from torch.utils.data import DataLoader, Subset
 
-from train.v2.custom_metrics import TokenPerplexity, ApproxBPS
+from train.v2.custom_metrics import ApproxBPS, TokenPerplexity
 from train.v2.dataset_utils import PreTokenizedDataset
+from train.v2.hf_gpt2_rewrite import (
+    GPT2ConfigLite,
+    GPT2LMHeadModelLite,
+    build_model_meta,
+    estimate_flops,
+    get_num_scaling_params,
+    get_scaling_analysis_data,
+    print0,
+)
 from train.v2.logging_utils import (
     GenerateSamplesOnValEnd,
-    SampleConfig,
     MaxStepProgressBar,
-)
-from train.v2.hf_gpt2_rewrite import (
-    GPT2LMHeadModelLite,
-    GPT2ConfigLite,
-    build_model_meta,
-    get_scaling_analysis_data,
-    get_num_scaling_params,
-    estimate_flops,
-    print0
+    SampleConfig,
 )
 
 # keep this!!!
 torch.set_float32_matmul_precision("high")
 
+
 class TipFilter(logging.Filter):
     """
     Credit to: https://github.com/Lightning-AI/pytorch-lightning/issues/21294#issuecomment-3410770397
     """
+
     def filter(self, record):
         m = record.getMessage()
-        return (
-                "💡 Tip:" not in m
-        )
+        return "💡 Tip:" not in m
 
 
+logging.getLogger("lightning.pytorch.utilities.rank_zero").addFilter(TipFilter())
 
-logging.getLogger('lightning.pytorch.utilities.rank_zero').addFilter(TipFilter())
 
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
@@ -67,7 +65,7 @@ class GPT2LightningModule(pl.LightningModule):
         config: GPT2ConfigLite,
         num_flops_per_token: int,
         learning_rate: float = 5e-5,
-        warmup_steps: int = 0,
+        warmup_percent: float = 0.1,
         weight_decay: float = 0.0,
         train_batch_size: int = 32,
         eval_batch_size: int = 32,
@@ -82,10 +80,10 @@ class GPT2LightningModule(pl.LightningModule):
         # these are saved by .save_hyperparameters, but I want to
         # emphasize that they are indeed used
         self.__learning_rate = learning_rate
-        self.__warmup_steps = warmup_steps
         self.__weight_decay = weight_decay
         self.__train_batch_size = train_batch_size
         self.__eval_batch_size = eval_batch_size
+        self.__warmup_percent = warmup_percent
 
         self.data_dir = data_dir
         self.num_flops_per_token = num_flops_per_token
@@ -139,18 +137,6 @@ class GPT2LightningModule(pl.LightningModule):
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
             return self.model(**inputs)
 
-    def _count_local_tokens(self, batch) -> int:
-        input_ids = batch["input_ids"]
-        if "attention_mask" in batch and batch["attention_mask"] is not None:
-            return int(batch["attention_mask"].sum().item())
-        return int(input_ids.numel())
-
-    def _all_reduce_sum_int(self, value: int) -> int:
-        t = torch.tensor(value, device=self.device, dtype=torch.long)
-        if dist.is_available() and dist.is_initialized():
-            dist.all_reduce(t, op=dist.ReduceOp.SUM)
-        return int(t.item())
-
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
@@ -169,44 +155,20 @@ class GPT2LightningModule(pl.LightningModule):
         # things that are logged in nanochat training,
         # see: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L539
 
-        # NB: 
+        # NB:
         # in lightning 'global_step' corresponds to an optimizer step
         # step = self.global_step
-        # 'training_step' runs each microbatch... so it increases even if gradient 
+        # 'training_step' runs each microbatch... so it increases even if gradient
         # accululation is not 1
 
-        """
-        local_tokens = self._count_local_tokens(batch)
-        global_tokens_this_microstep = self._all_reduce_sum_int(local_tokens)
-        self.total_tokens_seen_global += global_tokens_this_microstep
-        est_total_flops = self.total_tokens_seen_global * self.flops_per_token
-
-        self.log("train/local_tokens", 
-            float(local_tokens), on_step=True, on_epoch=False, sync_dist=False
-        )
-        self.log("train/global_tokens_per_microstep", 
-            float(global_tokens_this_microstep), on_step=True, on_epoch=False, sync_dist=False
-        )
-        self.log("train/total_tokens", 
-            float(self.total_tokens_seen_global), on_step=True, on_epoch=False, sync_dist=False
-        )
-        self.log("train/optimizer_steps", 
-            float(self.global_step), on_step=True, on_epoch=False, sync_dist=False
-        )
-        self.log("train/est_total_flops", 
-            float(est_total_flops), on_step=True, on_epoch=False, sync_dist=False
-        )
-        """
-
-
-        #if self.num_flops_per_token != -1:
-            ## DDP stuff is taken care of for us
-            #num_tokens_per_step = (
-                #self.hparams.train_batch_size * self.anticipation_settings.context_size
-            #)
-            #flops_per_step = self.num_flops_per_token * num_tokens_per_step
-            #flops_so_far = step * flops_per_step
-            #self.log("flops_so_far", flops_so_far, prog_bar=False, logger=True)
+        # if self.num_flops_per_token != -1:
+        ## DDP stuff is taken care of for us
+        # num_tokens_per_step = (
+        # self.hparams.train_batch_size * self.anticipation_settings.context_size
+        # )
+        # flops_per_step = self.num_flops_per_token * num_tokens_per_step
+        # flops_so_far = step * flops_per_step
+        # self.log("flops_so_far", flops_so_far, prog_bar=False, logger=True)
 
         return loss
 
@@ -430,7 +392,7 @@ class GPT2LightningModule(pl.LightningModule):
         train_dataloader = self.train_dataloader()
         if hasattr(train_dataloader, "dataset"):
             dataset_size = len(train_dataloader.dataset)
-            pct_start = min(0.3, self.hparams.warmup_steps / self.trainer.max_steps)
+            pct_start = self.__warmup_percent
             scheduler = OneCycleLR(
                 optimizer,
                 max_lr=self.hparams.learning_rate,
@@ -499,11 +461,16 @@ class HuggingFaceCheckpoint(ModelCheckpoint):
         if (trainer.global_step % self._every_n_train_steps) != 0:
             return
 
+        if trainer.global_step == 0:
+            # don't save if we just started
+            return
+
         step_dir = os.path.join(self.dirpath, f"step-{trainer.global_step}")
         raw_model = pl_module.model if hasattr(pl_module, "model") else pl_module
         raw_model.save_pretrained(
             step_dir, safe_serialization=True, max_shard_size="2GB"
         )
+
 
 def compute_max_steps_from_flop_budget(
     flop_budget: float,
@@ -528,9 +495,7 @@ def compute_max_steps_from_flop_budget(
     if grad_accum_steps <= 0:
         raise ValueError("grad_accum_steps must be > 0")
 
-    tokens_per_update = (
-        seq_len * per_gpu_batch_size * num_gpus * grad_accum_steps
-    )
+    tokens_per_update = seq_len * per_gpu_batch_size * num_gpus * grad_accum_steps
     token_budget = flop_budget / flops_per_token
     max_steps = math.floor(token_budget / tokens_per_update)
     return max(1, max_steps)
@@ -575,7 +540,7 @@ def main(args: argparse.Namespace) -> None:
             embedding_and_lm_head_weight_tying=not args.no_weight_tie,
             use_value_embeds=args.use_value_embeds,
             do_torch_compile=not args.no_torch_compile,
-            mlp_style=args.mlp_style,
+            # mlp_style=args.mlp_style,
         )
         with torch.device("meta"):
             model = GPT2LMHeadModelLite(model_config)
@@ -624,6 +589,7 @@ def main(args: argparse.Namespace) -> None:
                 vocab_size=anticipation_settings.vocab.total_tokens(),
                 n_positions=anticipation_settings.context_size,
                 n_embd=args.hidden_dim,
+                n_inner=args.intermediate_dim,
                 n_layer=args.num_layers,
                 n_head=args.num_heads,
                 embd_pdrop=args.embed_pdrop,
@@ -652,18 +618,15 @@ def main(args: argparse.Namespace) -> None:
             print0("Num flops per token:")
             print0(str(num_flops_per_token))
 
-
         effective_num_iterations = args.num_train_steps
-        csv_row = {
-            "num_flops_per_token": num_flops_per_token
-        }
+        csv_row = {"num_flops_per_token": num_flops_per_token}
 
     model = GPT2LightningModule(
         data_dir=tokenized_dataset_path,
         settings=anticipation_settings,
         config=model_config,
         learning_rate=args.learning_rate,
-        warmup_steps=args.warmup_steps,
+        warmup_percent=args.warmup_percent,
         weight_decay=args.weight_decay,
         train_batch_size=args.train_batch_size,
         eval_batch_size=args.eval_batch_size,
@@ -680,13 +643,13 @@ def main(args: argparse.Namespace) -> None:
         filename="{step}",
         save_top_k=0,
         monitor=None,
-        save_last=False,
+        save_last=True,
         every_n_train_steps=args.steps_per_checkpoint,
     )
     checkpoint_callback.CHECKPOINT_EQUALS_CHAR = "-"
 
     logger_dict = {}
-    logging.getLogger('pytorch_lightning.utilities.rank_zero').addFilter(TipFilter())
+    logging.getLogger("pytorch_lightning.utilities.rank_zero").addFilter(TipFilter())
     if args.use_wandb:
         if args.wandb_tag:
             tags = [str(args.wandb_tag).strip()]
@@ -731,7 +694,7 @@ def main(args: argparse.Namespace) -> None:
         grad_accum_steps=args.gradient_accumulation_steps,
     )
     print0("Max steps")
-    print0(max_steps)
+    print0(str(max_steps))
 
     trainer = pl.Trainer(
         max_steps=max_steps,
@@ -789,6 +752,9 @@ def get_argparser() -> argparse.ArgumentParser:
         "--hidden_dim", type=int, default=768, help="Model hidden dimensions"
     )  # 768
     parser.add_argument(
+        "--intermediate_dim", type=int, default=1792, help="Inner dim of MLPs"
+    )
+    parser.add_argument(
         "--num_heads", type=int, default=12, help="Model number of attention heads"
     )  # 12
     parser.add_argument(
@@ -799,6 +765,12 @@ def get_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--resid_pdrop", type=float, default=0.1, help="Apply residual dropout"
+    )
+    parser.add_argument(
+        "--warmup_percent",
+        type=float,
+        default=0.01,
+        help="Percentage of maximum steps to use in the warmup for cosine schedule.",
     )
     parser.add_argument(
         "--pos_emb",
@@ -814,9 +786,7 @@ def get_argparser() -> argparse.ArgumentParser:
         type=str,
         default="GPT2",
         choices=["GPT2", "Llama"],
-        help=(
-            "The kind of MLP to use"
-        ),
+        help=("The kind of MLP to use"),
     )
     parser.add_argument(
         "--layer_norm_epsilon", type=float, help="Layer Norm epsilon", default=1e-5
@@ -851,9 +821,6 @@ def get_argparser() -> argparse.ArgumentParser:
     )  # keep 512 batch size
     parser.add_argument(
         "--eval_batch_size", type=int, default=128, help="Batch size for evaluation"
-    )
-    parser.add_argument(
-        "--warmup_steps", type=int, default=200, help="Number of warmup steps"
     )
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay")
     parser.add_argument(
@@ -987,4 +954,3 @@ if __name__ == "__main__":
 
     os.makedirs(_args.output_dir, exist_ok=True)
     main(_args)
-

@@ -1,18 +1,17 @@
-import os
 import json
 import math
+import os
 import re
-from typing import Any, Optional
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from typing import Any, Optional
 
 import torch
-from torch import nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
-
-from anticipation.v2.nanochat.flash_attention import flash_attn
 from anticipation.v2.config import AnticipationV2Settings
+from anticipation.v2.nanochat.flash_attention import flash_attn
+from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 
 def print0(s="", **kwargs):
@@ -32,9 +31,11 @@ class CausalLMOutputLite:
 class GPT2ConfigLite:
     vocab_size: int = 50257
     n_positions: int = 1024
+    # hidden size
     n_embd: int = 768
     n_layer: int = 12
     n_head: int = 12
+    # intermediate size, the size of MLP inner dim
     n_inner: int | None = None
     activation_function: str = "gelu_new"
     resid_pdrop: float = 0.1
@@ -117,6 +118,12 @@ def load_hf_state_dict_into_model(model, hf_sd, *, strict=False, **remap_kwargs)
 def save_hf_style_checkpoint(save_dir, model, config_dict):
     import json
     from pathlib import Path
+
+    import torch.distributed as dist
+
+    if dist.is_available() and dist.is_initialized():
+        if dist.get_rank() != 0:
+            return
 
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
