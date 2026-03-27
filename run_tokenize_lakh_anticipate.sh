@@ -4,8 +4,8 @@
 #SBATCH -n 1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=50GB
-#SBATCH -t 05:00:00
-#SBATCH -J tokenize_dataset_transcripts
+#SBATCH -t 02:00:00
+#SBATCH -J tokenize_dataset_lakh
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
@@ -21,9 +21,8 @@ else
   echo "conda startup script not found."
 fi
 
-
 # we run out of space if we just write to tmp
 export CUSTOM_TMP_DIR=/scratch/$USER
 mkdir -p "$CUSTOM_TMP_DIR"
 
-PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type transcripts --settings_json_name "ar_only_local_midi_no_instr_limit_settings_87451b329323d36a658ac64ed9a8bb81.json"
+PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type lakh --settings_json_name "settings_6fb2094dfa7c0d16278dfaa4a401e3b8.json"

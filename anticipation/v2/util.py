@@ -9,6 +9,26 @@ from pathlib import Path
 import tempfile
 from contextlib import contextmanager
 
+import random
+
+import numpy as np
+import torch
+
+
+def set_seed(seed: int):
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+
+def save_text(text_file_path: Path, my_text: str) -> None:
+    ddp_rank = int(os.environ.get("RANK", 0))
+    if ddp_rank == 0:
+        text_file_path.write_text(my_text, encoding="utf-8")
+
 
 @contextmanager
 def temporary_directory(
@@ -17,22 +37,22 @@ def temporary_directory(
     check_writable: bool = True,
 ) -> ContextManager[str]:
     root = os.environ.get(env_var)
-    if root is None:
+    if not root:
         # if the envar is not set, default to the regular behavior
         # the temporary folder is OS/environment dependent
         with tempfile.TemporaryDirectory() as td:
             yield td
+    else:
+        root_path = Path(root).expanduser().resolve()
 
-    root_path = Path(root).expanduser().resolve()
+        if require_exists and not root_path.exists():
+            raise RuntimeError(f"{env_var}={root_path} does not exist")
 
-    if require_exists and not root_path.exists():
-        raise RuntimeError(f"{env_var}={root_path} does not exist")
+        if check_writable and not os.access(root_path, os.W_OK):
+            raise RuntimeError(f"{env_var}={root_path} is not writable")
 
-    if check_writable and not os.access(root_path, os.W_OK):
-        raise RuntimeError(f"{env_var}={root_path} is not writable")
-
-    with tempfile.TemporaryDirectory(dir=root_path) as td:
-        yield td
+        with tempfile.TemporaryDirectory(dir=root_path) as td:
+            yield td
 
 
 def get_book_keeping_info() -> dict[str, Any]:
@@ -83,7 +103,9 @@ def get_git_info(path: Path = None) -> dict[str, str]:
         }
 
 
-def iter_files(root: Path, file_extensions: tuple[str, ...]) -> Iterator[Path]:
+def iter_files(
+    root: Path, file_extensions: tuple[str, ...], follow_symlinks: bool = False
+) -> Iterator[Path]:
     """
     This ordering is NOT deterministic!
     """
@@ -96,11 +118,11 @@ def iter_files(root: Path, file_extensions: tuple[str, ...]) -> Iterator[Path]:
         try:
             with os.scandir(d) as it:
                 for entry in it:
-                    if entry.is_dir(follow_symlinks=False):
+                    if entry.is_dir(follow_symlinks=follow_symlinks):
                         stack.append(entry.path)
                         continue
 
-                    if entry.is_file(follow_symlinks=False):
+                    if entry.is_file(follow_symlinks=follow_symlinks):
                         _, ext = os.path.splitext(entry.name)
                         if ext.lower() in extensions_to_get:
                             yield Path(entry.path)

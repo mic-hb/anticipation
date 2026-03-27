@@ -1,39 +1,38 @@
-import os
 import argparse
 import csv
 import math
-from pathlib import Path
-from typing import Iterable, Any, Union
+import multiprocessing as mp
 from functools import partial
 from json import dumps
-import multiprocessing as mp
+from pathlib import Path
+from typing import Any, Iterable, Union
 
 import numpy as np
-from tqdm.contrib.concurrent import process_map
-
 from anticipation.v2.config import (
-    AnticipationV2Settings,
     CONFIG_ROOT,
+    DATASET_ROOT,
     LAKH_MIDI_FULL_PATH,
     TOKENIZED_DATASETS_SAVE_TO_PATH,
-    DATASET_ROOT,
-)
-from anticipation.v2.tokenize import (
-    tokenize,
-    TokenizationStatSummary,
-)
-from anticipation.v2.util import (
-    iter_files,
-    get_book_keeping_info,
-    temporary_directory,
+    AnticipationV2Settings,
 )
 from anticipation.v2.io import TokenSequenceBinaryFile, consolidate_bins
+from anticipation.v2.tokenize import (
+    TokenizationStatSummary,
+    tokenize,
+)
+from anticipation.v2.util import (
+    get_book_keeping_info,
+    iter_files,
+    temporary_directory,
+)
+from tqdm.contrib.concurrent import process_map
 
 
 def _process_shard(
     shard_id_and_files_to_process: tuple[int, list[Path]],
     settings: AnticipationV2Settings,
     shards_container_path: Path,
+    is_training_split: bool,
 ) -> tuple[Path, TokenizationStatSummary]:
     shard_id, files_to_process = shard_id_and_files_to_process
     work_dir = shards_container_path / f"./{shard_id}"
@@ -47,6 +46,7 @@ def _process_shard(
         output=shard_artifact_path,
         settings=settings,
         shard_id=shard_id,
+        is_training_split=is_training_split,
     )
     return shard_artifact_path, tokenized_stats_summary
 
@@ -91,13 +91,17 @@ def _get_dataset_file_from_paths(
     shards_dir: Path,
     save_to: str,
     do_shuffle: bool,
+    is_training_split: bool,
 ) -> tuple[Path, list[tuple[Path, TokenizationStatSummary]]]:
     # get division of work
     shards = _get_dataset_shards(dataset_paths, num_workers)
 
     # this is where the tokenization code is actually called
     process_one_with_args = partial(
-        _process_shard, settings=settings, shards_container_path=shards_dir
+        _process_shard,
+        settings=settings,
+        shards_container_path=shards_dir,
+        is_training_split=is_training_split,
     )
 
     # run tokenization, keep note of where results are saved
@@ -137,7 +141,7 @@ def _get_dataset_file_from_paths(
     return npy_out_path, records
 
 
-def _get_lakh_midi_splits_and_configs(
+def get_lakh_midi_splits_and_configs(
     lahk_midi_dataset_parent_path: Path,
 ) -> list[dict[str, Any]]:
     """
@@ -178,10 +182,7 @@ def _tokenize_dataset_in_parallel(
     save_all_dataset_files_to: Path,
     put_shards_in_tmp: bool,
     split_confs: list[dict[str, Any]],
-) -> dict[str, int]:
-    all_dataset_stats: dict[str, Union[int, float]] = {
-        x: 0 for x in TokenizationStatSummary.get_int_fields()
-    }
+) -> dict[str, Any]:
     with temporary_directory() as td:
         td_path = Path(td)
         if put_shards_in_tmp:
@@ -193,10 +194,22 @@ def _tokenize_dataset_in_parallel(
             shards_dir = save_all_dataset_files_to / "shards"
             shards_dir.mkdir(exist_ok=True)
 
+        # info for all splits
         ignored_files = []
+        all_dataset_stats: dict[str, Union[int, float]] = {
+            x: 0 for x in TokenizationStatSummary.get_int_fields()
+        }
+
         for conf in split_confs:
+            # info just for current split
+            curr_split_ignored_files = []
+            curr_split_dataset_stats: dict[str, Union[int, float]] = {
+                x: 0 for x in TokenizationStatSummary.get_int_fields()
+            }
+
+            split_name = conf["name"]
             # create shard dir
-            shards_dir_local = shards_dir / conf["name"]
+            shards_dir_local = shards_dir / split_name
             shards_dir_local.mkdir(exist_ok=True)
 
             # process shard
@@ -206,8 +219,9 @@ def _tokenize_dataset_in_parallel(
                 settings.num_workers_in_dataset_construction,
                 parent_work_dir=save_all_dataset_files_to,
                 shards_dir=shards_dir_local,
-                save_to=conf["name"],
+                save_to=split_name,
                 do_shuffle=conf["do_shuffle"],
+                is_training_split=(split_name == "train"),
             )
 
             # gather any ignored file results
@@ -215,6 +229,7 @@ def _tokenize_dataset_in_parallel(
                 shard_path, dataset_stats = f
                 for k in all_dataset_stats:
                     all_dataset_stats[k] += getattr(dataset_stats, k)
+                    curr_split_dataset_stats[k] += getattr(dataset_stats, k)
 
                 # handle ignored files
                 for reason, files_list in dataset_stats.ignored_files.items():
@@ -227,7 +242,18 @@ def _tokenize_dataset_in_parallel(
                             # e.g. f9aad86bfb384b22875d40ef15be023d.mid
                             "file": str(file.relative_to(raw_data_enclosing_path)),
                         }
+                        curr_split_ignored_files.append(ignored_file)
                         ignored_files.append(ignored_file)
+
+            split_stat_path = Path(
+                save_all_dataset_files_to / f"stats_{split_name}.json"
+            )
+            curr_split_dataset_stats = _add_more_info_to_dataset_stats(
+                curr_split_dataset_stats, settings, curr_split_ignored_files
+            )
+            split_stat_path.write_text(
+                dumps(curr_split_dataset_stats, sort_keys=True, indent=4)
+            )
 
         # write all the ignored files to disk for awareness
         if ignored_files:
@@ -241,25 +267,34 @@ def _tokenize_dataset_in_parallel(
 
         # write dataset stats
         stat_path = Path(save_all_dataset_files_to / "stats.json")
-        all_dataset_stats["total_tokens"] = (
-            settings.context_size * all_dataset_stats["num_sequences"]
+        all_dataset_stats = _add_more_info_to_dataset_stats(
+            all_dataset_stats, settings, ignored_files
         )
-        all_dataset_stats["total_time_in_sec"] = (
-            all_dataset_stats["total_time_in_midi_ticks"] / settings.time_resolution
-        )
-        all_dataset_stats["total_time_in_minutes"] = (
-            all_dataset_stats["total_time_in_sec"] / 60
-        )
-        all_dataset_stats["total_time_in_sec_before_augmentation"] = (
-            all_dataset_stats["total_time_in_midi_ticks_before_augmentation"]
-            / settings.time_resolution
-        )
-        all_dataset_stats["total_time_in_minutes_before_augmentation"] = (
-            all_dataset_stats["total_time_in_sec_before_augmentation"] / 60
-        )
-        all_dataset_stats["total_ignored_files"] = len(ignored_files)
         stat_path.write_text(dumps(all_dataset_stats, sort_keys=True, indent=4))
 
+    return all_dataset_stats
+
+
+def _add_more_info_to_dataset_stats(
+    all_dataset_stats: dict, settings: AnticipationV2Settings, ignored_files: list[dict]
+) -> dict:
+    all_dataset_stats["total_tokens"] = (
+        settings.context_size * all_dataset_stats["num_sequences"]
+    )
+    all_dataset_stats["total_time_in_sec"] = (
+        all_dataset_stats["total_time_in_midi_ticks"] / settings.time_resolution
+    )
+    all_dataset_stats["total_time_in_minutes"] = (
+        all_dataset_stats["total_time_in_sec"] / 60
+    )
+    all_dataset_stats["total_time_in_sec_before_augmentation"] = (
+        all_dataset_stats["total_time_in_midi_ticks_before_augmentation"]
+        / settings.time_resolution
+    )
+    all_dataset_stats["total_time_in_minutes_before_augmentation"] = (
+        all_dataset_stats["total_time_in_sec_before_augmentation"] / 60
+    )
+    all_dataset_stats["total_ignored_files"] = len(ignored_files)
     return all_dataset_stats
 
 
@@ -318,12 +353,33 @@ def _write_book_keeping_info_and_get_dataset_enclosing_path(
     return work_dir
 
 
-def get_splits(raw_data_enclosing_path: Path):
+def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
     if (
         raw_data_enclosing_path == LAKH_MIDI_FULL_PATH
         or raw_data_enclosing_path.parts[-1] == "lmd_full"
     ):
-        return _get_lakh_midi_splits_and_configs(raw_data_enclosing_path)
+        # LAKH MIDI
+        return get_lakh_midi_splits_and_configs(raw_data_enclosing_path)
+    elif raw_data_enclosing_path.parts[-1] == "giga_midi":
+        # GIGA MIDI
+        # get these files by running scripts/v2/giga_midi_to_files.py
+        return [
+            {
+                "name": "train",
+                "dataset_paths": [raw_data_enclosing_path / "train"],
+                "do_shuffle": True,
+            },
+            {
+                "name": "valid",
+                "dataset_paths": [raw_data_enclosing_path / "validation"],
+                "do_shuffle": False,
+            },
+            {
+                "name": "test",
+                "dataset_paths": [raw_data_enclosing_path / "test"],
+                "do_shuffle": False,
+            },
+        ]
     else:
         return [
             {
@@ -363,35 +419,49 @@ def parse_args() -> argparse.Namespace:
         "--dataset_type",
         type=str,
         default="lakh",
-        choices=["lakh", "aria", "transcripts", "lakh_10songs_train", "lmd_valid_rest"],
+        choices=["lakh", "aria", "transcripts", "giga_midi", "lakh_10songs_train", "lmd_valid_rest"],
         help=(
             "Which dataset to tokenize. These are expected to be in specific locations in the ./data/ folder"
         ),
     )
-    args = parser.parse_args()
-    return args
+    parser.add_argument(
+        "--settings_json_name",
+        type=str,
+        default=None,
+        required=True,
+        help="name to settings file, not path - must be in ./config/...",
+    )
+    _args = parser.parse_args()
+    return _args
 
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     args = parse_args()
 
+    settings_file_name: str = args.settings_json_name
+    settings_file_path: Path = CONFIG_ROOT / settings_file_name
+    assert settings_file_path.exists()
+    assert settings_file_path.is_file()
+    assert settings_file_path.suffix == ".json"
+
     configs = {
         "lakh": {
-            "settings": CONFIG_ROOT
-            / "ar_only_local_midi_settings_b82a7a2750e3c5836ffb9bf564720cd8.json",
+            "settings": settings_file_path,
             "raw_data_enclosing_path": DATASET_ROOT / "lmd_full",
         },
         "transcripts": {
-            "settings": CONFIG_ROOT
-            / "ar_only_local_midi_no_instr_limit_settings_87451b329323d36a658ac64ed9a8bb81.json",
+            "settings": settings_file_path,
             "raw_data_enclosing_path": DATASET_ROOT / "transcripts",
         },
         "aria": {
             # can use the same config as local lakh
-            "settings": CONFIG_ROOT
-            / "ar_only_local_midi_settings_b82a7a2750e3c5836ffb9bf564720cd8.json",
+            "settings": settings_file_path,
             "raw_data_enclosing_path": DATASET_ROOT / "aria-midi-v1-pruned-ext",
+        },
+        "giga_midi": {
+            "settings": settings_file_path,
+            "raw_data_enclosing_path": DATASET_ROOT / "giga_midi",
         },
         "lakh_10songs_train": {
             "settings": CONFIG_ROOT
@@ -403,6 +473,7 @@ if __name__ == "__main__":
             / "ar_only_local_midi_settings_b82a7a2750e3c5836ffb9bf564720cd8.json",
             "raw_data_enclosing_path": DATASET_ROOT / "lmd_valid_rest",
         },
+
     }
     dataset_choice = configs[args.dataset_type]
     main(

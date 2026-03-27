@@ -3,13 +3,13 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=100GB
-#SBATCH -t 100:00:00
-#SBATCH -J train_ar_local_midi_v2
+#SBATCH --mem=128GB
+#SBATCH -t 120:00:00
+#SBATCH -J train_anticipation_4xa6000
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
-
+echo "Job ID is: $SLURM_JOB_ID"
 
 # --- set up conda and activate it ---
 # assuming conda binary lives here
@@ -22,21 +22,28 @@ else
   echo "conda startup script not found."
 fi
 
-
-#export TORCH_SHOW_CPP_STACKTRACES=1
-nvidia-smi
-
-PYTHONPATH=. torchrun --standalone --nproc_per_node=1 train/v2/training.py \
-    --output_dir output/checkpoints/5m_10song_lakh \
-    --data_dir data/tokenized_datasets/lmd_10songs_train/b82a7a2750e3c5836ffb9bf564720cd8 \
-    --hidden_dim 128 \
-    --num_heads 4 \
-    --num_layers 4 \
-    --gpus_per_node 1 \
+# adjust steps per eval (1000 x num GPUs)
+NUM_GPUS=4
+PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.py \
+    --output_dir "output/slurm_logs/${SLURM_JOB_ID}/checkpoints" \
+    --data_dir data/tokenized_datasets/giga_midi/6fb2094dfa7c0d16278dfaa4a401e3b8 \
+    --gpus_per_node $NUM_GPUS \
+    --eval_batch_size 64 \
     --train_batch_size 64 \
-    --gradient_accumulation_steps 2 \
-    --num_train_steps 5000 \
-    --steps_per_eval 10 \
-    --steps_per_checkpoint 100 \
-    --bf16 \
+    --gradient_accumulation_steps 8 \
+    --steps_per_eval 4000 \
+    --steps_per_checkpoint 20000 \
+    --save_midi_output_after_step 1000000 \
+    --num_events_to_generate_for_midi_inference 80 \
+    --warmup_percent 0.01 \
+    --num_layers 8 \
+    --hidden_dim 768 \
+    --intermediate_dim 3072 \
+    --num_heads 8 \
+    --no_weight_tie \
+    --window_pattern "L" \
+    --pos_emb "rope" \
+    --learning_rate 1e-03 \
+    --flops "2e20" \
+    --mlp_style "Llama" \
     --use_wandb

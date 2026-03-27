@@ -7,6 +7,7 @@ cd "$(dirname -- "$0")"
 # only formatting a few files so that we don't make a massive diff
 # filled with formatting noise
 PYTHONPATH=. ruff format ./anticipation/v2
+PYTHONPATH=. ruff format ./eval
 PYTHONPATH=. ruff format ./train/v2
 PYTHONPATH=. ruff format ./tests/v2
 PYTHONPATH=. ruff format ./tests/util
