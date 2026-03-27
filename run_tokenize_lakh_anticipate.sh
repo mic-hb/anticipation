@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=50GB
 #SBATCH -t 02:00:00
-#SBATCH -J tokenize_dataset_lakh_ar_only
+#SBATCH -J tokenize_dataset_lakh
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
@@ -25,4 +25,4 @@ fi
 export CUSTOM_TMP_DIR=/scratch/$USER
 mkdir -p "$CUSTOM_TMP_DIR"
 
-PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type lakh --settings_json_name "anticipate_local_midi_settings_52b9a7aa2d5d895d6e7d25740021e560.json"
+PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type lakh --settings_json_name "settings_6fb2094dfa7c0d16278dfaa4a401e3b8.json"

@@ -245,8 +245,11 @@ def local_midi_settings_anticipation(local_midi_vocab: Vocab) -> AnticipationV2S
         do_clip_overlapping_durations_in_midi_conversion=False,
     )
 
+
 @pytest.fixture
-def local_midi_settings_anticipation_ctx_4096(local_midi_vocab: Vocab) -> AnticipationV2Settings:
+def local_midi_settings_anticipation_ctx_4096(
+    local_midi_vocab: Vocab,
+) -> AnticipationV2Settings:
     return AnticipationV2Settings(
         num_autoregressive_seq_per_midi_file=1,
         num_span_anticipation_augmentations_per_midi_file=1,
@@ -255,7 +258,7 @@ def local_midi_settings_anticipation_ctx_4096(local_midi_vocab: Vocab) -> Antici
         tick_token_every_n_ticks=100,
         num_workers_in_dataset_construction=10,
         do_clip_overlapping_durations_in_midi_conversion=False,
-        context_size=4096
+        context_size=4096,
     )
 
 

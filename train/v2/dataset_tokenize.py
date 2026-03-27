@@ -1,32 +1,31 @@
 import argparse
 import csv
 import math
-from pathlib import Path
-from typing import Iterable, Any, Union
+import multiprocessing as mp
 from functools import partial
 from json import dumps
-import multiprocessing as mp
+from pathlib import Path
+from typing import Any, Iterable, Union
 
 import numpy as np
-from tqdm.contrib.concurrent import process_map
-
 from anticipation.v2.config import (
-    AnticipationV2Settings,
     CONFIG_ROOT,
+    DATASET_ROOT,
     LAKH_MIDI_FULL_PATH,
     TOKENIZED_DATASETS_SAVE_TO_PATH,
-    DATASET_ROOT,
-)
-from anticipation.v2.tokenize import (
-    tokenize,
-    TokenizationStatSummary,
-)
-from anticipation.v2.util import (
-    iter_files,
-    get_book_keeping_info,
-    temporary_directory,
+    AnticipationV2Settings,
 )
 from anticipation.v2.io import TokenSequenceBinaryFile, consolidate_bins
+from anticipation.v2.tokenize import (
+    TokenizationStatSummary,
+    tokenize,
+)
+from anticipation.v2.util import (
+    get_book_keeping_info,
+    iter_files,
+    temporary_directory,
+)
+from tqdm.contrib.concurrent import process_map
 
 
 def _process_shard(
@@ -183,7 +182,7 @@ def _tokenize_dataset_in_parallel(
     save_all_dataset_files_to: Path,
     put_shards_in_tmp: bool,
     split_confs: list[dict[str, Any]],
-) -> dict[str, int]:
+) -> dict[str, Any]:
     with temporary_directory() as td:
         td_path = Path(td)
         if put_shards_in_tmp:
@@ -353,13 +352,13 @@ def _write_book_keeping_info_and_get_dataset_enclosing_path(
     return work_dir
 
 
-def get_splits(raw_data_enclosing_path: Path):
+def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
     if (
         raw_data_enclosing_path == LAKH_MIDI_FULL_PATH
         or raw_data_enclosing_path.parts[-1] == "lmd_full"
     ):
         # LAKH MIDI
-        return _get_lakh_midi_splits_and_configs(raw_data_enclosing_path)
+        return get_lakh_midi_splits_and_configs(raw_data_enclosing_path)
     elif raw_data_enclosing_path.parts[-1] == "giga_midi":
         # GIGA MIDI
         # get these files by running scripts/v2/giga_midi_to_files.py

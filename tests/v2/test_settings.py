@@ -196,5 +196,3 @@ def test_realize_vocab_as_array() -> None:
     e_note = [str(x["info"]) for x in arr if x["kind"] == tt and not x["is_control"]]
     c_note = [str(x["info"]) for x in arr if x["kind"] == tt and x["is_control"]]
     assert set(e_note) == set(c_note)
-
-

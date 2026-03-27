@@ -1,4 +1,9 @@
-from anticipation.v2.config import AnticipationV2Settings, Vocab, make_vocab, CONFIG_ROOT
+from anticipation.v2.config import (
+    AnticipationV2Settings,
+    Vocab,
+    make_vocab,
+    CONFIG_ROOT,
+)
 
 
 if __name__ == "__main__":

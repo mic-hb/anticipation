@@ -14,6 +14,7 @@ DATASETS_PATH = Path(__file__).parent.parent.parent / "data"
 LAKH_MIDI_PATH = DATASETS_PATH / "lmd_full"
 GIGA_MIDI_ENCLOSING_PATH = DATASETS_PATH / "giga_midi"
 
+
 def extract_files() -> None:
     # remove all the test split samples from the dataset, from any split
     # we will use the test split of lakh to eval
@@ -27,11 +28,11 @@ def extract_files() -> None:
             all_files_midi = [x.stem for x in p.rglob("*.midi")]
             exclude_lakh_midi_md5.update(all_files_midi + all_files_mid)
     else:
-        raise RuntimeError("Lakh has not yet been downloaded. Execute the script `run_get_lakh.sh`.")
+        raise RuntimeError(
+            "Lakh has not yet been downloaded. Execute the script `run_get_lakh.sh`."
+        )
 
-    splits = [
-        "train", "validation", "test"
-    ]
+    splits = ["train", "validation", "test"]
 
     # exist NOT ok... if you run this multiple times, and your intention is to exclude
     # Lakh files, then the Lakh files will still be in there unless you delete the
@@ -44,10 +45,12 @@ def extract_files() -> None:
 
         # if dataset is gated, run `hf auth login`
         dataset = load_dataset("Metacreation/GigaMIDI", split=split)
-        split_enclosing_path = (GIGA_MIDI_ENCLOSING_PATH / split)
+        split_enclosing_path = GIGA_MIDI_ENCLOSING_PATH / split
         split_enclosing_path.mkdir(parents=True, exist_ok=True)
 
-        iter_obj = tqdm(dataset, mininterval=1.0, desc=f"Saving files in split: {split}")
+        iter_obj = tqdm(
+            dataset, mininterval=1.0, desc=f"Saving files in split: {split}"
+        )
         for i, sample in enumerate(iter_obj):
             sample: dict[str, Any]
             sample_md5 = sample["md5"]
@@ -56,7 +59,7 @@ def extract_files() -> None:
                 continue
 
             sample_file_name = sample_md5
-            save_to = Path(split_enclosing_path/ f"{sample_file_name}.midi")
+            save_to = Path(split_enclosing_path / f"{sample_file_name}.midi")
             try:
                 score = Score.from_midi(sample["music"], sanitize_data=True)
                 score.dump_midi(save_to)
@@ -68,10 +71,9 @@ def extract_files() -> None:
         print(f"Unable to open: {num_ignored:,}")
         print(f"Ignored Lakh files: {num_skipped_in_lakh:,}")
 
+
 def check_giga_midi_uniqueness():
-    splits = [
-        "train", "validation", "test"
-    ]
+    splits = ["train", "validation", "test"]
     total_files = 0
     total_md5 = set()
     for split in splits:
@@ -96,5 +98,5 @@ if __name__ == "__main__":
     If not yet downloaded, one might need to run: `hf auth login` because the dataset
     requires huggingface authentication.
     """
-    #check_giga_midi_uniqueness()
+    # check_giga_midi_uniqueness()
     extract_files()

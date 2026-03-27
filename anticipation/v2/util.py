@@ -103,7 +103,9 @@ def get_git_info(path: Path = None) -> dict[str, str]:
         }
 
 
-def iter_files(root: Path, file_extensions: tuple[str, ...], follow_symlinks: bool = False) -> Iterator[Path]:
+def iter_files(
+    root: Path, file_extensions: tuple[str, ...], follow_symlinks: bool = False
+) -> Iterator[Path]:
     """
     This ordering is NOT deterministic!
     """
