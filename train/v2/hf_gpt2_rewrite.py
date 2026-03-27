@@ -542,8 +542,8 @@ class GPT2LMHeadModelLite(nn.Module):
 def build_model_meta(
     depth: int,
     anticipation_settings: AnticipationV2Settings,
-    embd_pdrop,
-    resid_pdrop,
+    embd_pdrop: float = 0.1,
+    resid_pdrop: float = 0.1,
     aspect_ratio: int = 64,
     head_dim: int = 128,
     window_pattern: str = "SSSL",
@@ -558,14 +558,6 @@ def build_model_meta(
 ) -> GPT2ConfigLite:
     """
     From: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L125
-
-    :param anticipation_settings: AMT settings
-    :param depth: The number of transformer blocks in the model
-    :param aspect_ratio: model_dim = depth * aspect_ratio. Default is 64, same as nanochat
-    :param head_dim: The target head dimension for attention. Default 128, same as nanochat
-    :param window_pattern: S = half context, L = full context, e.g. SSSL = short short short long.
-        default is SSSL, same as nanochat
-    :return: model config that can be used to build GPT-2 style AMT.
     """
     base_dim = depth * aspect_ratio
     model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim

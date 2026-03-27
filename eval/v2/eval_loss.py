@@ -97,14 +97,13 @@ def log_loss(
         * np.log2(np.e)
         * (len(ce) / (560.98 * 3600))
     )
-
     return res
 
 
 def main() -> None:
     data_dir_giga = "data/tokenized_datasets/giga_midi/6fb2094dfa7c0d16278dfaa4a401e3b8"
     data_dir_lmd = "data/tokenized_datasets/lmd_full/6fb2094dfa7c0d16278dfaa4a401e3b8"
-    pretrained_checkpoint_path = "output/slurm_logs/791545/checkpoints/step-20000"
+    pretrained_checkpoint_path = "output/slurm_logs/791545/checkpoints/step-40000"
     dataset = PreTokenizedDataset(Path(data_dir_lmd) / "test.npy")
     model = GPT2LMHeadModelLite.from_pretrained(
         pretrained_checkpoint_path,
