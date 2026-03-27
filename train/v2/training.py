@@ -70,17 +70,17 @@ class MixedDataset(Dataset):
         self.total_steps = total_steps
         self.batch_size = batch_size
         self.mix_fn = mix_fn
-        self.current_step =  torch.tensor(0, dtype=torch.long).share_memory_()
+        self.current_step = 0
 
     def set_step(self, step: int):
-        self.current_step.fill_(step)
+        self.current_step = step
 
     def __len__(self):
         # large enough to not run out during training
         return self.total_steps * self.batch_size
 
     def __getitem__(self, idx):
-        progress = self.current_step.item() / self.total_steps
+        progress = self.current_step / self.total_steps
         ratio_a = self.mix_fn(progress)
         if torch.rand(1).item() < ratio_a:
             inner_idx = idx % len(self.dataset_a)
@@ -209,18 +209,17 @@ class GPT2LightningModule(pl.LightningModule):
         per_device_batch_size = self.hparams.train_batch_size // num_devices
         
         if self.mode == "mixed":
-            if not hasattr(self, "_mixed_dataset"):
-                dataset_a = PreTokenizedDataset(self.data_dir / "train.npy")
-                dataset_b = PreTokenizedDataset(self.data_dir_b / "train.npy")
-                self._mixed_dataset = MixedDataset(
-                    dataset_a, dataset_b,
-                    self.total_steps, per_device_batch_size,
-                    self.mix_fn
-                )
+            dataset_a = PreTokenizedDataset(self.data_dir / "train.npy")
+            dataset_b = PreTokenizedDataset(self.data_dir_b / "train.npy")
+            self._mixed_dataset = MixedDataset(
+                dataset_a, dataset_b,
+                self.total_steps, per_device_batch_size,
+                self.mix_fn
+            )
             dataset = self._mixed_dataset
         else:
             dataset = PreTokenizedDataset(self.data_dir / "train.npy")
-            
+        
         return DataLoader(
             dataset,
             batch_size=per_device_batch_size,
@@ -283,7 +282,7 @@ class MaxStepProgressBar(TQDMProgressBar):
 
 
 def mixed_dataset_fn(progress):
-    if progress < 0.65:
+    if progress < 0.9:
         return 1.0  # 100% transcripts (or first dataset)
     else:
         return 0.0  # 100% lakh (or second dataset)
@@ -380,7 +379,7 @@ def main(args: argparse.Namespace) -> None:
         precision="bf16-mixed" if args.bf16 else 32,
         gradient_clip_val=args.max_grad_norm,
         accumulate_grad_batches=args.gradient_accumulation_steps,
-        log_every_n_steps=10, # PREVIOUSLY: was able to get working at 1
+        log_every_n_steps=10,
         val_check_interval=args.steps_per_eval,
         limit_val_batches=1000,
         **logger_dict,
@@ -476,6 +475,7 @@ def get_argparser() -> argparse.ArgumentParser:
 
     parser.add_argument("--data_dir_b", type=str, default=None)
     parser.add_argument("--mode", type=str, default="single", choices=["single", "mixed"])
+    parser.add_argument("--limit_val_batches", type=float, default=1.0)
     return parser
 
 

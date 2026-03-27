@@ -24,7 +24,7 @@ nvidia-smi
 PYTHONPATH=. torchrun --standalone --nproc_per_node=1 train/v2/training2.py \
     --output_dir output/checkpoints/5m_mixed_transcripts_10song_lakh \
     --data_dir data/tokenized_datasets/transcripts/87451b329323d36a658ac64ed9a8bb81 \
-    --data_dir_b data/tokenized_datasets/lmd_10songs_train_anotherset/b82a7a2750e3c5836ffb9bf564720cd8 \
+    --data_dir_b data/tokenized_datasets/lmd_full/b82a7a2750e3c5836ffb9bf564720cd8 \
     --mode mixed \
     --hidden_dim 128 \
     --num_heads 4 \
@@ -32,8 +32,7 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=1 train/v2/training2.py \
     --gpus_per_node 1 \
     --train_batch_size 64 \
     --gradient_accumulation_steps 2 \
-    --num_train_steps 14000 \
-    --steps_per_eval 10 \
-    --steps_per_checkpoint 50 \
+    --num_train_steps 24000 \
+    --steps_per_eval 1000 \
     --bf16 \
     --use_wandb
