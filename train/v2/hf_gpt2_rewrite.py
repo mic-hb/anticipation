@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -12,6 +13,15 @@ from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.nanochat.flash_attention import flash_attn
 from torch import nn
 from torch.utils.checkpoint import checkpoint
+
+# this happens when gradient checkpointing is enabled AND we call torch.compile
+# on the module
+warnings.filterwarnings(
+    "ignore",
+    message=r".*Graph has recomputable ops but no backward region.*",
+    category=UserWarning,
+    module=r"torch\._functorch\._activation_checkpointing\.remat_using_tags_for_fwd_loss_bwd_graph_pass",
+)
 
 
 def print0(s="", **kwargs):

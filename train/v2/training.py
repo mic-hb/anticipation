@@ -6,25 +6,27 @@ import os
 import time
 from dataclasses import asdict
 from pathlib import Path
+import warnings
 
-import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import OneCycleLR
+from torch.utils.data import DataLoader, Subset
+
+import pytorch_lightning as pl
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.strategies import DDPStrategy
+from pytorch_lightning.utilities import rank_zero_info
+
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.util import save_text
 from pytorch_lightning.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
 )
-from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.strategies import DDPStrategy
-from pytorch_lightning.utilities import rank_zero_info
-from torch.optim.lr_scheduler import OneCycleLR
-from torch.utils.data import DataLoader, Subset
-
 from train.v2.custom_metrics import ApproxBPS, TokenPerplexity
-from train.v2.dataset_utils import PreTokenizedDataset
+from train.v2.dataset_utils import PreTokenizedDataset, ResumableDistributedBatchSampler
 from train.v2.hf_gpt2_rewrite import (
     GPT2ConfigLite,
     GPT2LMHeadModelLite,
@@ -57,6 +59,19 @@ class TipFilter(logging.Filter):
 logging.getLogger("lightning.pytorch.utilities.rank_zero").addFilter(TipFilter())
 
 
+class ResumableSamplerCallback(pl.Callback):
+    def on_train_epoch_start(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
+        dm = trainer.datamodule
+        if dm is None:
+            return
+
+        sampler = getattr(dm, "_train_batch_sampler", None)
+        if sampler is not None:
+            sampler.set_epoch(trainer.current_epoch)
+
+
 class GPT2LightningModule(pl.LightningModule):
     def __init__(
         self,
@@ -73,9 +88,15 @@ class GPT2LightningModule(pl.LightningModule):
         no_cuda_graphs: bool = False,
         skip_all_validation_during_training: bool = False,
         do_gradient_checkpointing: bool = True,
+        data_seed: int = 42,
     ):
         super().__init__()
         self.save_hyperparameters()
+        self._train_dataset = None
+        self._valid_dataset = None
+        self._train_batch_sampler = None
+        self._pending_train_sampler_state = None
+        self._data_seed = data_seed
 
         # these are saved by .save_hyperparameters, but I want to
         # emphasize that they are indeed used
@@ -101,10 +122,14 @@ class GPT2LightningModule(pl.LightningModule):
                 if no_cuda_graphs:
                     # OOM can happen on GB
                     self.model = torch.compile(
-                        self.model, dynamic=False, mode="max-autotune-no-cudagraphs"
+                        self.model,
+                        dynamic=False,
+                        mode="max-autotune-no-cudagraphs",
                     )
                 else:
-                    self.model = torch.compile(self.model, dynamic=False)
+                    self.model = torch.compile(
+                        self.model, dynamic=False, fullgraph=True
+                    )
 
         if self.do_gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
@@ -140,6 +165,9 @@ class GPT2LightningModule(pl.LightningModule):
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
+        print(self.current_epoch)
+        print(self.global_step)
+
         labels = batch.pop("labels")
         # logits = self(**batch)
         outputs = self(**batch)
@@ -413,30 +441,64 @@ class GPT2LightningModule(pl.LightningModule):
 
         return optimizer
 
-    def train_dataloader(self) -> DataLoader:
+    def _build_train_batch_sampler(self) -> ResumableDistributedBatchSampler:
+        if self._train_dataset is None:
+            raise RuntimeError("train dataset has not been initialized")
+
         num_devices = max(1, self.trainer.num_devices)
+        if self.hparams.train_batch_size % num_devices != 0:
+            raise ValueError(
+                f"train_batch_size={self.hparams.train_batch_size} must be divisible by "
+                f"num_devices={num_devices}"
+            )
+
         per_device_batch_size = self.hparams.train_batch_size // num_devices
-        dataset = PreTokenizedDataset(self.data_dir / "train.npy")
-        return DataLoader(
-            dataset,
+
+        sampler = ResumableDistributedBatchSampler(
+            dataset_size=len(self._train_dataset),
             batch_size=per_device_batch_size,
-            num_workers=4,
             shuffle=True,
+            seed=self.hparams.data_seed,
+            drop_last=True,
+        )
+
+        if self._pending_train_sampler_state is not None:
+            sampler.load_state_dict(self._pending_train_sampler_state)
+            self._pending_train_sampler_state = None
+
+        return sampler
+
+    def train_dataloader(self) -> DataLoader:
+        if self._train_dataset is None:
+            self._train_dataset = PreTokenizedDataset(self.data_dir / "train.npy")
+
+        if self._train_batch_sampler is None:
+            self._train_batch_sampler = self._build_train_batch_sampler()
+
+        return DataLoader(
+            self._train_dataset,
+            batch_sampler=self._train_batch_sampler,
+            # keep it this way, with num_workers=0. We don't do much computation in loading
+            # the samples, this way we prevent strange orderings in DDP.
+            # see: https://docs.pytorch.org/docs/stable/data.html?utm_source=chatgpt.com#multi-process-data-loading
+            num_workers=0,
             pin_memory=True,
+            persistent_workers=False,
         )
 
     def val_dataloader(self) -> DataLoader:
         num_devices = max(1, self.trainer.num_devices)
         per_device_batch_size = self.hparams.train_batch_size // num_devices
-        dataset = PreTokenizedDataset(self.data_dir / "valid.npy")
+
+        if self._valid_dataset is None:
+            self._valid_dataset = PreTokenizedDataset(self.data_dir / "valid.npy")
+
+        dataset = self._valid_dataset
 
         if self.skip_all_validation_during_training and (
             self.trainer is not None
             and getattr(self.trainer.state, "fn", None) == "fit"
         ):
-            # hack for short term, I can't figure out a reliable way
-            # to get lightning simply to SKIP the validation step during
-            # training.
             empty = Subset(dataset, [])
             return DataLoader(empty, batch_size=1)
 
@@ -448,6 +510,35 @@ class GPT2LightningModule(pl.LightningModule):
             pin_memory=True,
             persistent_workers=True,
         )
+
+    def on_save_checkpoint(self, checkpoint: dict) -> None:
+        if self._train_batch_sampler is not None:
+            checkpoint["train_batch_sampler_state"] = (
+                self._train_batch_sampler.state_dict()
+            )
+
+    def on_train_epoch_start(self) -> None:
+        if self._train_batch_sampler is not None:
+            self._train_batch_sampler.set_epoch(self.current_epoch)
+
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        sd = checkpoint["state_dict"]
+        new_sd = {}
+        for k, v in sd.items():
+            if k.startswith("model._orig_mod."):
+                # e.g., model._orig_mod.transformer.resid_lambdas -->
+                # model.transformer.resid_lambdas
+                new_k = k.replace("model._orig_mod.", "model.")
+            new_sd[new_k] = v
+        checkpoint["state_dict"] = new_sd
+        sampler_state = checkpoint.get("train_batch_sampler_state")
+        if sampler_state is None:
+            return
+
+        if self._train_batch_sampler is not None:
+            self._train_batch_sampler.load_state_dict(sampler_state)
+        else:
+            self._pending_train_sampler_state = sampler_state
 
 
 class HuggingFaceCheckpoint(ModelCheckpoint):
@@ -502,7 +593,9 @@ def compute_max_steps_from_flop_budget(
 
 
 def main(args: argparse.Namespace) -> None:
-    pl.seed_everything(args.seed)
+    seed = args.seed
+    # seeds everything except our data_seed, see constructor of GPT2LightningModule
+    pl.seed_everything(seed)
     tokenized_dataset_path = Path(args.data_dir)
     assert tokenized_dataset_path.exists()
     assert tokenized_dataset_path.is_dir()
@@ -635,6 +728,7 @@ def main(args: argparse.Namespace) -> None:
         no_cuda_graphs=args.no_cuda_graphs,
         skip_all_validation_during_training=args.skip_all_validation_during_training,
         do_gradient_checkpointing=not args.no_gradient_checkpointing,
+        data_seed=seed,
     )
 
     checkpoint_callback = HuggingFaceCheckpoint(
@@ -704,10 +798,12 @@ def main(args: argparse.Namespace) -> None:
         devices=args.gpus_per_node,
         num_nodes=args.num_nodes,
         **ddp_params,
+        use_distributed_sampler=False,
         callbacks=[
             checkpoint_callback,
             LearningRateMonitor(logging_interval="step"),
             MaxStepProgressBar(),
+            ResumableSamplerCallback(),
             GenerateSamplesOnValEnd(
                 SampleConfig(
                     start_after_step=args.save_midi_output_after_step,
@@ -723,7 +819,18 @@ def main(args: argparse.Namespace) -> None:
         val_check_interval=args.steps_per_eval,
         **logger_dict,
     )
-    trainer.fit(model)
+
+    if _args.checkpoint_path is not None:
+        checkpoint_dir = Path(_args.checkpoint_path)
+        assert checkpoint_dir.exists()
+        assert checkpoint_dir.is_dir()
+        pt_lightning_last_state = checkpoint_dir.parent / "last.ckpt"
+
+        # load all state from file
+        trainer.fit(model, ckpt_path=pt_lightning_last_state, weights_only=False)
+    else:
+        # nothing to load just start
+        trainer.fit(model)
 
     # ensure we run validation at the very end too
     trainer.validate(model)
