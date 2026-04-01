@@ -6,6 +6,7 @@ import os
 import time
 from dataclasses import asdict
 from pathlib import Path
+import math
 import warnings
 
 import torch
@@ -51,7 +52,7 @@ class TipFilter(logging.Filter):
     Credit to: https://github.com/Lightning-AI/pytorch-lightning/issues/21294#issuecomment-3410770397
     """
 
-    def filter(self, record):
+    def filter(self, record) -> bool:
         m = record.getMessage()
         return "💡 Tip:" not in m
 
@@ -65,6 +66,7 @@ class ResumableSamplerCallback(pl.Callback):
     ) -> None:
         dm = trainer.datamodule
         if dm is None:
+            rank_zero_info("Trainer has no datamodule.")
             return
 
         sampler = getattr(dm, "_train_batch_sampler", None)
@@ -84,22 +86,22 @@ class GPT2LightningModule(pl.LightningModule):
         weight_decay: float = 0.0,
         train_batch_size: int = 32,
         eval_batch_size: int = 32,
-        pretrained_checkpoint: str = None,
+        pretrained_checkpoint: str | None = None,
         no_cuda_graphs: bool = False,
         skip_all_validation_during_training: bool = False,
         do_gradient_checkpointing: bool = True,
         data_seed: int = 42,
-    ):
+    ) -> None:
         super().__init__()
         self.save_hyperparameters()
         self._train_dataset = None
         self._valid_dataset = None
         self._train_batch_sampler = None
         self._pending_train_sampler_state = None
-        self._data_seed = data_seed
 
         # these are saved by .save_hyperparameters, but I want to
         # emphasize that they are indeed used
+        self.__data_seed = data_seed
         self.__learning_rate = learning_rate
         self.__weight_decay = weight_decay
         self.__train_batch_size = train_batch_size
@@ -111,7 +113,9 @@ class GPT2LightningModule(pl.LightningModule):
         self.no_cuda_graphs = no_cuda_graphs
         self.do_gradient_checkpointing = do_gradient_checkpointing
 
-        if pretrained_checkpoint:
+        if pretrained_checkpoint is not None:
+            # I don't think we need to actually load this, because the state dict
+            # is replaced by a hook later
             self.model = GPT2LMHeadModelLite.from_pretrained(
                 pretrained_checkpoint, config=config
             )
@@ -159,15 +163,11 @@ class GPT2LightningModule(pl.LightningModule):
         self.approx_bps = ApproxBPS()
 
     def forward(self, **inputs):
-        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-            return self.model(**inputs)
+        return self.model(**inputs)
 
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
-        print(self.current_epoch)
-        print(self.global_step)
-
         labels = batch.pop("labels")
         # logits = self(**batch)
         outputs = self(**batch)
@@ -243,14 +243,14 @@ class GPT2LightningModule(pl.LightningModule):
         )
 
         # exclude the controls form overall perplexity
-        ppl_overall_mask: torch.Tensor = ~controls  # type: ignore
+        ppl_overall_mask: torch.Tensor = ~controls
         total_loss_sum = per_tok_ce[ppl_overall_mask].sum()
         total_tokens = ppl_overall_mask.sum()
         self.ppl.update(loss_sum=total_loss_sum, n_tokens=total_tokens)
         self.log("ppl", self.ppl, on_epoch=True, prog_bar=True, sync_dist=True)
 
         ticks = targets == v.TICK
-        tick_mask: torch.Tensor = ticks  # type: ignore
+        tick_mask: torch.Tensor = ticks
         num_ticks = tick_mask.sum()
 
         num_seconds_approx = (
@@ -270,7 +270,7 @@ class GPT2LightningModule(pl.LightningModule):
         )
 
         # events are everything that isn't a control and isn't a tick
-        events: torch.Tensor = (~controls) & (~ticks)  # type: ignore
+        events: torch.Tensor = (~controls) & (~ticks)
 
         # Event index within each sequence: 0,1,2,... for event positions
         # (non-event positions will have junk values, but we always AND with `events`)
@@ -414,7 +414,6 @@ class GPT2LightningModule(pl.LightningModule):
             optimizer_grouped_parameters,
             lr=self.hparams.learning_rate,
             betas=(0.9, 0.95),
-            fused=True,
         )
 
         train_dataloader = self.train_dataloader()
@@ -521,6 +520,24 @@ class GPT2LightningModule(pl.LightningModule):
         if self._train_batch_sampler is not None:
             self._train_batch_sampler.set_epoch(self.current_epoch)
 
+    def on_train_start(self):
+        # want to check the learning rate is resumed if a checkpoint
+        # was loaded from disk
+        opt = self.optimizers()
+        lrs = [g["lr"] for g in opt.param_groups]
+
+        # all rank zero info can only be given strings
+        rank_zero_info("\n=== LR RESUME CHECK ===")
+        rank_zero_info(f"global_step: {self.global_step}")
+        rank_zero_info(f"epoch: {self.current_epoch}")
+        rank_zero_info(f"optimizer LRs: {lrs}")
+        try:
+            sched = self.lr_schedulers()
+            rank_zero_info(f"scheduler last_lr: {sched.get_last_lr()}")
+        except Exception:
+            rank_zero_info("no scheduler or unavailable")
+        rank_zero_info("========================\n")
+
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         sd = checkpoint["state_dict"]
         new_sd = {}
@@ -528,8 +545,9 @@ class GPT2LightningModule(pl.LightningModule):
             if k.startswith("model._orig_mod."):
                 # e.g., model._orig_mod.transformer.resid_lambdas -->
                 # model.transformer.resid_lambdas
-                new_k = k.replace("model._orig_mod.", "model.")
-            new_sd[new_k] = v
+                k = k.replace("model._orig_mod.", "model.")
+            new_sd[k] = v
+
         checkpoint["state_dict"] = new_sd
         sampler_state = checkpoint.get("train_batch_sampler_state")
         if sampler_state is None:
@@ -542,11 +560,11 @@ class GPT2LightningModule(pl.LightningModule):
 
 
 class HuggingFaceCheckpoint(ModelCheckpoint):
-    def __init__(self, config, *args, **kwargs):
+    def __init__(self, config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.config = config
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
         super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
 
         if (trainer.global_step % self._every_n_train_steps) != 0:
@@ -556,7 +574,7 @@ class HuggingFaceCheckpoint(ModelCheckpoint):
             # don't save if we just started
             return
 
-        step_dir = os.path.join(self.dirpath, f"step-{trainer.global_step}")
+        step_dir = os.path.join(str(self.dirpath), f"step-{trainer.global_step}")
         raw_model = pl_module.model if hasattr(pl_module, "model") else pl_module
         raw_model.save_pretrained(
             step_dir, safe_serialization=True, max_shard_size="2GB"
@@ -571,8 +589,6 @@ def compute_max_steps_from_flop_budget(
     num_gpus: int,
     grad_accum_steps: int = 1,
 ) -> int:
-    import math
-
     if flop_budget <= 0:
         raise ValueError("flop_budget must be > 0")
     if flops_per_token <= 0:
@@ -610,10 +626,6 @@ def main(args: argparse.Namespace) -> None:
 
     print(f"Saving outputs to: {args.output_dir}")
 
-    if args.num_train_steps > -1:
-        # TODO: warn
-        pass
-
     depth = args.depth
     flops = args.flops
     target_param_data_ratio = args.target_param_data_ratio
@@ -633,7 +645,6 @@ def main(args: argparse.Namespace) -> None:
             embedding_and_lm_head_weight_tying=not args.no_weight_tie,
             use_value_embeds=args.use_value_embeds,
             do_torch_compile=not args.no_torch_compile,
-            # mlp_style=args.mlp_style,
         )
         with torch.device("meta"):
             model = GPT2LMHeadModelLite(model_config)
@@ -755,18 +766,42 @@ def main(args: argparse.Namespace) -> None:
         else:
             run_name = f"run-{int(time.time())}"
 
-        logger_dict["logger"] = WandbLogger(
-            project=args.wandb_project,
-            name=run_name,
-            save_dir=args.output_dir,
-            config={
-                **vars(args),
-                # this is already saved to disk, but associate it with the run
-                # just for convenience
-                **csv_row,
-            },
-            tags=tags,
-        )
+        if args.wandb_resume_from_run_id:
+            resume_from_run_id: str = args.wandb_resume_from_run_id
+            resume_from_step: int = args.wandb_resume_from_step
+            assert resume_from_step > 0, "Resume from step is unfilled or 0 - start a new run or provide a resume step."
+            resume_from = f"{resume_from_run_id}?_step={resume_from_step}"
+            import wandb
+            _run = wandb.init(
+                project=args.wandb_project,
+                name=run_name,
+                # UPDATE: both fork_from and resume_from are in private preview
+                # email: support@wandb.com
+                # to enable them on your account
+                fork_from=resume_from,
+                # this is in private preview, forking is the closest alternative for now
+                # it starts a new run from the step you specify
+                #resume_from=resume_from,
+            )
+            wandb_logger = WandbLogger(
+                experiment=_run,
+                save_dir=args.output_dir,
+            )
+        else:
+            wandb_logger = WandbLogger(
+                project=args.wandb_project,
+                name=run_name,
+                save_dir=args.output_dir,
+                config={
+                    **vars(args),
+                    # this is already saved to disk, but associate it with the run
+                    # just for convenience
+                    **csv_row,
+                },
+                tags=tags,
+            )
+
+        logger_dict["logger"] = wandb_logger
 
     ddp_params = {}
     if not args.no_ddp:
@@ -1012,6 +1047,18 @@ def get_argparser() -> argparse.ArgumentParser:
         type=str,
         help="The project to save this run ",
         default="gpt-anticipation-2.0",
+    )
+    parser.add_argument(
+        "--wandb_resume_from_run_id",
+        type=str,
+        help="The run ID to resume. It will be in the URL of the wandb website.",
+        default="",
+    )
+    parser.add_argument(
+        "--wandb_resume_from_step",
+        type=int,
+        help="The step from which to resume",
+        default=0,
     )
 
     # Testing Parameters

@@ -4,7 +4,7 @@
 #SBATCH -n 1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=128GB
-#SBATCH -t 48:00:00
+#SBATCH -t 70:00:00
 #SBATCH -J train_model
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
@@ -25,6 +25,7 @@ fi
 #export TORCH_SHOW_CPP_STACKTRACES=1
 
 PYTHONPATH=. torchrun --standalone --nproc_per_node=2 train/v2/training.py \
+    --checkpoint_path "output/slurm_logs/791545/checkpoints/step-40000" \
     --output_dir "output/slurm_logs/${SLURM_JOB_ID}/checkpoints" \
     --data_dir data/tokenized_datasets/giga_midi/6fb2094dfa7c0d16278dfaa4a401e3b8 \
     --gpus_per_node 2 \
@@ -32,7 +33,7 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=2 train/v2/training.py \
     --train_batch_size 128 \
     --gradient_accumulation_steps 4 \
     --steps_per_eval 1000 \
-    --steps_per_checkpoint 20000 \
+    --steps_per_checkpoint 5000 \
     --save_midi_output_after_step 1000000 \
     --num_events_to_generate_for_midi_inference 80 \
     --warmup_percent 0.01 \

@@ -24,17 +24,17 @@ set -e
 #     --learning_rate 1e-03 \
 #     --flops "2e20" \
 #     --mlp_style "Llama"
-#--checkpoint_path "/home/mf867/anticipation_isolated/anticipation/output/slurm_logs/791545/checkpoints/step-40000" \
+#--checkpoint_path "output/checkpoints/test_checkpoints/resume_test/step-15" \
 
 NUM_GPUS=2
 PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.py \
+    --checkpoint_path "/output/slurm_logs/791545/checkpoints/step-40000" \
     --output_dir output/checkpoints/test_checkpoints/resume_test \
-    --checkpoint_path "output/checkpoints/test_checkpoints/resume_test/step-15" \
     --data_dir data/tokenized_datasets/giga_midi/6fb2094dfa7c0d16278dfaa4a401e3b8 \
     --gpus_per_node $NUM_GPUS \
-    --train_batch_size 32 \
-    --eval_batch_size 32 \
-    --gradient_accumulation_steps 16 \
+    --train_batch_size 128 \
+    --eval_batch_size 128 \
+    --gradient_accumulation_steps 4 \
     --steps_per_eval 1000 \
     --steps_per_checkpoint 15 \
     --save_midi_output_after_step 1000000 \
@@ -48,5 +48,7 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.
     --window_pattern "L" \
     --pos_emb "rope" \
     --learning_rate 1e-03 \
+    --bf16 \
     --flops "2e20" \
-    --mlp_style "Llama"
+    --mlp_style "Llama" \
+    --use_wandb
