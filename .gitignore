@@ -10,3 +10,5 @@ __pycache__
 *.swp
 *.bin
 wandb
+scripts/v2/results
+eval/v2/results
