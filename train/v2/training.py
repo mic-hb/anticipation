@@ -163,7 +163,9 @@ class GPT2LightningModule(pl.LightningModule):
         self.approx_bps = ApproxBPS()
 
     def forward(self, **inputs):
-        return self.model(**inputs)
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            return self.model(**inputs)
+        #return self.model(**inputs)
 
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
@@ -210,7 +212,6 @@ class GPT2LightningModule(pl.LightningModule):
         # logits = self(**batch)
 
         # keep this upcast!
-        # https://x.com/jwthickstun/status/1737134520141246938
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
         # logits = logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
@@ -788,6 +789,43 @@ def main(args: argparse.Namespace) -> None:
                 save_dir=args.output_dir,
             )
         else:
+            # import wandb
+            # _run = wandb.init(
+            #     project=args.wandb_project,
+            #     name=run_name,
+
+            # )
+            # _run.define_metric("trainer/global_step", hidden=True)
+
+            # _run.define_metric("val_loss", step_metric="trainer/global_step")
+            # _run.define_metric("train_loss", step_metric="trainer/global_step")
+
+            # _run.define_metric("ppl", step_metric="trainer/global_step")
+
+            # _run.define_metric("tick_ppl", step_metric="trainer/global_step")
+            # _run.define_metric("event_ppl", step_metric="trainer/global_step")
+            # _run.define_metric("event_ppl_no_ticks", step_metric="trainer/global_step")
+            # _run.define_metric("onset_ppl", step_metric="trainer/global_step")
+            # _run.define_metric("onset_ppl_no_ticks", step_metric="trainer/global_step")
+            # _run.define_metric("dur_ppl", step_metric="trainer/global_step")
+            # _run.define_metric("dur_ppl_no_ticks", step_metric="trainer/global_step")
+            # _run.define_metric("note_instr_ppl", step_metric="trainer/global_step")
+            # _run.define_metric("note_instr_ppl_no_ticks", step_metric="trainer/global_step")
+
+            # _run.define_metric("approx_bps", step_metric="trainer/global_step")
+
+            # wandb_logger = WandbLogger(
+            #     project=args.wandb_project,
+            #     name=run_name,
+            #     save_dir=args.output_dir,
+            #     config={
+            #         **vars(args),
+            #         # this is already saved to disk, but associate it with the run
+            #         # just for convenience
+            #         **csv_row,
+            #     },
+            #     tags=tags,
+            # )
             wandb_logger = WandbLogger(
                 project=args.wandb_project,
                 name=run_name,

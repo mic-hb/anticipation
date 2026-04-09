@@ -3,6 +3,8 @@ import torch.nn.functional as F
 
 import mido
 
+from tqdm import tqdm
+
 from anticipation.v2.config import AnticipationV2Settings
 from anticipation.v2.types import Token
 from anticipation.v2.convert import compound_to_midi
@@ -29,13 +31,13 @@ def safe_logits(
     elif idx % 3 == 1:
         # ensure duration generated
         logits[
-            v.TIME_OFFSET : v.TIME_OFFSET + settings.tick_token_frequency_in_midi_ticks
+            v.TIME_OFFSET : v.TIME_OFFSET + settings.tick_token_every_n_ticks
         ] = -float("inf")
         logits[v.NOTE_OFFSET : v.NOTE_OFFSET + settings.max_note] = -float("inf")
     elif idx % 3 == 2:
         # ensure note generated
         logits[
-            v.TIME_OFFSET : v.TIME_OFFSET + settings.tick_token_frequency_in_midi_ticks
+            v.TIME_OFFSET : v.TIME_OFFSET + settings.tick_token_every_n_ticks
         ] = -float("inf")
         logits[v.DUR_OFFSET : v.DUR_OFFSET + settings.max_dur] = -float("inf")
 
@@ -70,7 +72,7 @@ def future_logits(
     """don't sample events in the past"""
     if curtime > 0:
         # curtime is the absolute time since inference started in ticks
-        rel_position = curtime % settings.tick_token_frequency_in_midi_ticks
+        rel_position = curtime % settings.tick_token_every_n_ticks
 
         # prevent generating events that should have come before... we sort by time
         # so this scenario won't appear in the training data
@@ -134,8 +136,10 @@ def add_token(
     unwrapped_tokens = [x for b in tmp for x in b]
 
     # not sure why this is 1017, but keeping it the same as v1
-    look_back_n_tokens = 1017
+    #look_back_n_tokens = 1017
+    look_back_n_tokens = settings.context_size - 20
     history = unwrapped_tokens[-1 * look_back_n_tokens :]  # Markov window
+
 
     with torch.no_grad():
         input_tokens = torch.tensor(z + history).unsqueeze(0).to(model.device)
@@ -156,11 +160,12 @@ def add_token(
                 logits = model(input_tokens).logits[0, -1]
 
                 # uses idx % 3 to determine what to mask
-                idx = input_tokens.shape[1] - 1
-                logits = safe_logits(logits, idx, settings)
+                #idx = input_tokens.shape[1] - 1
+                logits = safe_logits(logits, i, settings)
 
                 if i == 0:
-                    future_logits(logits, current_time, settings)
+                    #logits = future_logits(logits, current_time, settings)
+                    pass
                 elif i == 2:
                     # restrict the total number of instruments
                     logits = instr_logits(logits, tokens, settings)
@@ -184,7 +189,7 @@ def tick_tokens_to_abs_time(
     for event in generated_tokens:
         if len(event) == 1:
             # this is a tick, exclude them from the returned sequence
-            cur_time = ticks_seen * settings.tick_token_frequency_in_midi_ticks
+            cur_time = ticks_seen * settings.tick_token_every_n_ticks
             ticks_seen += 1
         else:
             # this is a triple
@@ -221,16 +226,18 @@ def generate_ar_simple(
         new_event: tuple[Token, ...] = add_token(
             model, z, tokens, top_p, current_time, settings
         )
+        print(i, new_event)
         if len(new_event) == 1:
             # this is a tick
-            current_time = ticks_seen * settings.tick_token_frequency_in_midi_ticks
+            current_time = ticks_seen * settings.tick_token_every_n_ticks
             ticks_seen += 1
         else:
             # this is a triple
             new_onset, new_dur, new_note_isntr = new_event
             new_token_rel_time = new_onset - settings.vocab.TIME_OFFSET
             current_time += new_token_rel_time
-            tokens.append(new_event)
+
+        tokens.append(new_event)
 
     # need to un-relativize
     tokens = tick_tokens_to_abs_time(tokens, settings)

@@ -32,7 +32,7 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=2 train/v2/training.py \
     --eval_batch_size 128 \
     --train_batch_size 128 \
     --gradient_accumulation_steps 4 \
-    --steps_per_eval 1000 \
+    --steps_per_eval 5000 \
     --steps_per_checkpoint 5000 \
     --save_midi_output_after_step 1000000 \
     --num_events_to_generate_for_midi_inference 80 \
