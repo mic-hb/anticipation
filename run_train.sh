@@ -35,6 +35,8 @@ export TEMP=$TMPDIR
 export TMP=$TMPDIR
 mkdir -p "$TMPDIR"
 
+export USE_FA4=False
+
 NUM_GPUS=2
 PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.py \
     --output_dir "output/slurm_logs/${SLURM_JOB_ID}/checkpoints" \
@@ -44,7 +46,7 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.
     --train_batch_size 128 \
     --gradient_accumulation_steps 4 \
     --steps_per_eval 10000 \
-    --steps_per_checkpoint 100 \
+    --steps_per_checkpoint 10000 \
     --save_midi_output_after_step 1000000 \
     --num_events_to_generate_for_midi_inference 80 \
     --warmup_percent 0.01 \
@@ -56,8 +58,7 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.
     --window_pattern "L" \
     --pos_emb "rope" \
     --learning_rate 1e-03 \
-    --no_gradient_checkpointing \
     --num_train_steps 100000 \
-    --mlp_style "Llama" \
-    --use_value_embeds \
+    --mlp_style "GPT2" \
+    --no_gradient_checkpointing \
     --use_wandb

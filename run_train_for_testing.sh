@@ -14,6 +14,8 @@ export TEMP=$TMPDIR
 export TMP=$TMPDIR
 mkdir -p "$TMPDIR"
 
+export USE_FA4=True
+
 NUM_GPUS=1
 PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.py \
     --output_dir output/checkpoints/test_checkpoints/baseline_test \
@@ -22,8 +24,8 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.
     --train_batch_size 16 \
     --eval_batch_size 16 \
     --gradient_accumulation_steps 8 \
-    --steps_per_eval 1000 \
-    --steps_per_checkpoint 15 \
+    --steps_per_eval 10000 \
+    --steps_per_checkpoint 10000 \
     --save_midi_output_after_step 1000000 \
     --num_events_to_generate_for_midi_inference 80 \
     --warmup_percent 0.01 \
@@ -37,5 +39,5 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.
     --learning_rate 1e-03 \
     --bf16 \
     --flops "2e20" \
-    --use_value_embeds \
+    --no_torch_compile \
     --mlp_style "Llama"

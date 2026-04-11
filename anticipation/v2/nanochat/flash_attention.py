@@ -13,9 +13,12 @@ Usage (drop-in replacement for FA3):
     # Inference (with KV cache)
     y = flash_attn.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, ...)
 """
+import os
 
 import torch
 import torch.nn.functional as F
+
+# pip install flash-attn-4==4.0.0b8
 
 
 # =============================================================================
@@ -40,12 +43,35 @@ def _load_flash_attention_3():
     except Exception:
         return None
 
+def _use_fa4():
+    if str(os.environ.get("USE_FA4", True)) == 'True':
+        if not torch.cuda.is_available():
+            return False
+        try:
+            from flash_attn.cute import flash_attn_func
+            return True
+        except Exception:
+            return False
+    else:
+        return False
+
+def _load_flash_attention_4():
+    if not torch.cuda.is_available():
+        return None
+    try:
+        from flash_attn import cute as fa4
+        return fa4
+    except Exception:
+        return None
+
 
 _fa3 = _load_flash_attention_3()
 HAS_FA3 = _fa3 is not None
 
 # Override for testing: set to 'fa3', 'sdpa', or None (auto)
 _override_impl = None
+
+_fa4 = _load_flash_attention_4()
 
 
 def _use_fa3():
@@ -118,6 +144,11 @@ def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
     Returns:
         Output tensor of shape (B, T, H, D)
     """
+    if _use_fa4():
+        # returns a tuple of output and pre-allocated log-sum-exp
+        # https://github.com/Dao-AILab/flash-attention/blob/14f3627d44687513adff00819ec894e54bf92cd7/flash_attn/cute/interface.py#L831
+        return _fa4.flash_attn_func(q, k, v, causal=causal, window_size=window_size)[0]
+
     if _use_fa3():
         return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
 
