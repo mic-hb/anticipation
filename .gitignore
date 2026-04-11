@@ -12,3 +12,5 @@ __pycache__
 wandb
 scripts/v2/results
 eval/v2/results
+data
+output
