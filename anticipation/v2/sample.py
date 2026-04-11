@@ -72,7 +72,7 @@ def future_logits(
     """don't sample events in the past"""
     if curtime > 0:
         # curtime is the absolute time since inference started in ticks
-        rel_position = curtime % settings.tick_token_every_n_ticks
+        rel_position = curtime % max(settings.tick_token_every_n_ticks, 1)
 
         # prevent generating events that should have come before... we sort by time
         # so this scenario won't appear in the training data
@@ -140,17 +140,46 @@ def add_token(
     look_back_n_tokens = settings.context_size - 20
     history = unwrapped_tokens[-1 * look_back_n_tokens :]  # Markov window
 
+    if settings.tick_token_every_n_ticks > 0:
+        with torch.no_grad():
+            input_tokens = torch.tensor(z + history).unsqueeze(0).to(model.device)
+            logits = model(input_tokens).logits[0, -1]
+            logits = nucleus(logits, top_p)
+            probs = F.softmax(logits, dim=-1)
+            token = int(torch.multinomial(probs, 1))
+            if token == settings.vocab.TICK:
+                # model decided to place a tick
+                return (token,)
+            else:
+                new_token = []
+                # model did not place a tick, go forward and generate a triple
+                for i in range(3):
+                    input_tokens = (
+                        torch.tensor(z + history + new_token).unsqueeze(0).to(model.device)
+                    )
+                    logits = model(input_tokens).logits[0, -1]
 
-    with torch.no_grad():
-        input_tokens = torch.tensor(z + history).unsqueeze(0).to(model.device)
-        logits = model(input_tokens).logits[0, -1]
-        logits = nucleus(logits, top_p)
-        probs = F.softmax(logits, dim=-1)
-        token = int(torch.multinomial(probs, 1))
-        if token == settings.vocab.TICK:
-            # model decided to place a tick
-            return (token,)
-        else:
+                    # uses idx % 3 to determine what to mask
+                    #idx = input_tokens.shape[1] - 1
+                    logits = safe_logits(logits, i, settings)
+
+                    if i == 0:
+                        #logits = future_logits(logits, current_time, settings)
+                        pass
+                    elif i == 2:
+                        # restrict the total number of instruments
+                        logits = instr_logits(logits, tokens, settings)
+
+                    logits = nucleus(logits, top_p)
+                    probs = F.softmax(logits, dim=-1)
+                    check_probs(probs)
+                    token = torch.multinomial(probs, 1)
+                    new_token.append(int(token))
+
+        return tuple(new_token)
+    else:
+        # v1 style, no ticks
+        with torch.no_grad():
             new_token = []
             # model did not place a tick, go forward and generate a triple
             for i in range(3):
@@ -164,8 +193,7 @@ def add_token(
                 logits = safe_logits(logits, i, settings)
 
                 if i == 0:
-                    #logits = future_logits(logits, current_time, settings)
-                    pass
+                    logits = future_logits(logits, current_time, settings)
                 elif i == 2:
                     # restrict the total number of instruments
                     logits = instr_logits(logits, tokens, settings)
@@ -176,7 +204,7 @@ def add_token(
                 token = torch.multinomial(probs, 1)
                 new_token.append(int(token))
 
-    return tuple(new_token)
+        return tuple(new_token)
 
 
 def tick_tokens_to_abs_time(

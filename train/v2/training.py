@@ -852,16 +852,19 @@ def main(args: argparse.Namespace) -> None:
 
     num_devices = max(1, args.gpus_per_node)
     per_device_batch_size = args.train_batch_size // num_devices
-    max_steps = compute_max_steps_from_flop_budget(
-        flop_budget=args.flops,
-        flops_per_token=num_flops_per_token,
-        seq_len=model_config.n_positions,
-        per_gpu_batch_size=per_device_batch_size,
-        num_gpus=num_devices,
-        grad_accum_steps=args.gradient_accumulation_steps,
-    )
-    print0("Max steps")
-    print0(str(max_steps))
+    if args.flops != -1:
+        max_steps = compute_max_steps_from_flop_budget(
+            flop_budget=args.flops,
+            flops_per_token=num_flops_per_token,
+            seq_len=model_config.n_positions,
+            per_gpu_batch_size=per_device_batch_size,
+            num_gpus=num_devices,
+            grad_accum_steps=args.gradient_accumulation_steps,
+        )
+        print0("Max steps")
+        print0(str(max_steps))
+    else:
+        max_steps = args.num_train_steps
 
     trainer = pl.Trainer(
         max_steps=max_steps,

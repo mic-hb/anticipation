@@ -26,7 +26,7 @@ fi
 NUM_GPUS=4
 PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.py \
     --output_dir "output/slurm_logs/${SLURM_JOB_ID}/checkpoints" \
-    --data_dir data/tokenized_datasets/giga_midi/6fb2094dfa7c0d16278dfaa4a401e3b8 \
+    --data_dir data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a \
     --gpus_per_node $NUM_GPUS \
     --eval_batch_size 64 \
     --train_batch_size 64 \
@@ -41,7 +41,7 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.
     --intermediate_dim 3072 \
     --num_heads 8 \
     --no_weight_tie \
-    --window_pattern "L" \
+    --window_pattern "SSSL" \
     --pos_emb "rope" \
     --learning_rate 1e-03 \
     --flops "2e20" \

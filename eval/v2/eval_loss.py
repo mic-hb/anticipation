@@ -173,12 +173,13 @@ def log_loss(
         yaxis_type="log",
     )
     stab_idx = find_stabilization_variance(avg_ppl.cpu().numpy())
-    fig.add_vline(
-        x=stab_idx,
-        line_dash="dash",
-        line_color="red",
-        annotation_text=f"stabilization @ {stab_idx}"
-    )
+    if stab_idx is not None:
+        fig.add_vline(
+            x=stab_idx,
+            line_dash="dash",
+            line_color="red",
+            annotation_text=f"stabilization @ {stab_idx}"
+        )
     fig.write_html(str(save_path))
     print(f"Saved plot to: {save_path.resolve()}")
 
@@ -230,23 +231,33 @@ def main() -> None:
     data_dir_giga = "data/tokenized_datasets/giga_midi/6fb2094dfa7c0d16278dfaa4a401e3b8"
     data_dir_lmd = "data/tokenized_datasets/lmd_full/6fb2094dfa7c0d16278dfaa4a401e3b8"
     pretrained_checkpoint_path = "output/slurm_logs/2632/checkpoints/step-100000"
-    dataset = PreTokenizedDataset(Path(data_dir_lmd) / "test.npy")
+
+    checkpoint_dir = "/home/mf867/anticipation_isolated/anticipation/output/slurm_logs/232666/checkpoints/step-20000"
+    checkpoint_dir = "/home/mf867/anticipation_isolated/anticipation/output/slurm_logs/263233/checkpoints/step-100000"
+    data_dir = "data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a"
+
+
+    dataset = PreTokenizedDataset(Path(data_dir) / "test.npy")
     model = GPT2LMHeadModelLite.from_pretrained(
-        pretrained_checkpoint_path,
+        checkpoint_dir,
     ).cuda()
+
+    settings_path_name = "settings_" + data_dir.split("/")[-1] + ".json"
+    print(settings_path_name)
     settings = AnticipationV2Settings.load_from_disk(
-        Path(data_dir_lmd) / "settings_6fb2094dfa7c0d16278dfaa4a401e3b8.json"
+        Path(data_dir) / settings_path_name
     )
 
     # same settings as in v1 baselines
     context_limit = 1024
-    cut_prefix = 99
+    #cut_prefix = 99
+    cut_prefix = 0
     subsample_ratio = 10
     res = log_loss(
         model, dataset, settings,
         subsample_ratio=subsample_ratio,
         context_limit=context_limit,
-        cut_prefix=cut_prefix
+        #cut_prefix=cut_prefix
     )
     #res_formatted = format_result_row(res)
     pprint(res)
