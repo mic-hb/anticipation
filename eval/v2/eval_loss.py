@@ -1,6 +1,9 @@
+import argparse
 from typing import Any, Optional
 from pathlib import Path
 from pprint import pprint
+from datetime import datetime, timezone
+import json
 
 import numpy as np
 import torch
@@ -8,26 +11,69 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 import plotly.graph_objects as go
+from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
-from anticipation.v2.config import AnticipationV2Settings
+from anticipation.v2.config import AnticipationV2Settings, REPO_ROOT
 from train.v2.dataset_utils import PreTokenizedDataset
 from train.v2.hf_gpt2_rewrite import GPT2LMHeadModelLite
+
 
 SAVE_RESULTS_TO = Path(__file__).parent / "results"
 SAVE_RESULTS_TO.mkdir(exist_ok=True)
 
 
+def get_time_as_string() -> str:
+    dt = datetime.now(timezone.utc)
+    # e.g. 2025_01_01_13_31_12
+    return dt.strftime("%Y_%m_%d_%H_%M_%S")
+
+def get_scaling_params_and_model_settings(gpt: GPT2LMHeadModel) -> dict[str, int]:
+    # https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/nanochat/gpt.py#L319
+    # Count each group separately (mirrors the grouping in setup_optimizers)
+    wte = sum(p.numel() for p in gpt.transformer.wte.parameters())
+    lm_head = sum(p.numel() for p in gpt.lm_head.parameters())
+    transformer_matrices = sum(p.numel() for p in gpt.transformer.h.parameters())
+
+    # these two are unique to us, nanochat removes these - we will keep for now. Have
+    # not yet ablated them to see if removing them improves for us
+    wpe = sum(p.numel() for p in gpt.transformer.wpe.parameters())
+    ln_f = sum(p.numel() for p in gpt.transformer.ln_f.parameters())
+
+    total = (
+        wte + lm_head + transformer_matrices + ln_f + wpe
+    )
+
+    # indeed using weight tie
+    # if using weight tying the params are shared
+    total -= wte
+
+    actual = sum(p.numel() for p in gpt.parameters())
+    assert total == actual, (
+        f"Parameter count mismatch. Expected: {total:,}, Actual: {actual:,}."
+    )
+
+    model_config = gpt.config
+    return {
+        "wte": wte,
+        "lm_head": lm_head,
+        "transformer_matrices": transformer_matrices,
+        "total": total,
+        **model_config.to_dict()
+    }
+
+
 def log_loss(
-    model: GPT2LMHeadModelLite,
+    model: GPT2LMHeadModel,
     dataset: PreTokenizedDataset,
     settings: AnticipationV2Settings,
+    save_artfacts_to_enclosing_folder: Path,
     subsample_ratio: int = 10,
     context_limit: Optional[int] = 1024,
     cut_prefix: int = 0,
 ):
     total_params = sum(p.numel() for p in model.parameters())
     model_id = settings.md5_hash()
-    save_path = SAVE_RESULTS_TO / f"{model_id}_ppl_plot.html"
+    #save_path = save_artfacts_to_enclosing_folder / f"ppl_plot.html"
 
     if context_limit is not None:
         assert settings.context_size % context_limit == 0
@@ -180,13 +226,43 @@ def log_loss(
             line_color="red",
             annotation_text=f"stabilization @ {stab_idx}"
         )
-    fig.write_html(str(save_path))
-    print(f"Saved plot to: {save_path.resolve()}")
+    fig.write_html(str(save_artfacts_to_enclosing_folder / "ppl_plot.html"))
 
-    save_path_tensor = SAVE_RESULTS_TO / f"{model_id}.pt"
-    torch.save(ce, save_path_tensor)
+    # save_path_tensor = SAVE_RESULTS_TO / f"{model_id}.pt"
+    # torch.save(ce, save_path_tensor)
 
-    return res
+    # remove np. types
+    res_casted = {}
+    for k, v in res.items():
+        if isinstance(v, np.float64):
+            v = float(v)
+
+        res_casted[k] = v
+
+    res_casted["time"] = get_time_as_string()
+    res_casted["checkpoint_folder"] = str(save_artfacts_to_enclosing_folder)
+    res_casted["checkpoint_folder_last_part"] = str(save_artfacts_to_enclosing_folder.parts[-1])
+
+
+    p = str(save_artfacts_to_enclosing_folder.parts[-1])
+    s_n, s_k = p.split("_")
+
+    # midtraining parameters
+    n = int(s_n)
+    k = int(s_k)
+    res_casted["n"] = n
+    res_casted["k"] = k
+
+    # get network parts and how many parameters they have
+    scaling_params = get_scaling_params_and_model_settings(model)
+
+    for k, v in scaling_params.items():
+        res_casted["model_property_" + k] = v
+
+    s = json.dumps(res_casted, sort_keys=False, indent=4)
+    (save_artfacts_to_enclosing_folder / "results.json").write_text(s)
+
+    return res_casted
 
 def find_stabilization_variance(y, window=50, var_threshold=5e-3):
     # sliding window over the context to see when variance drops below
@@ -227,6 +303,30 @@ def get_num_steps(pretrained_checkpoint_path: str, num_gpus: int = 1) -> int:
     pass
 
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Eval Loss"
+    )
+    # float
+    parser.add_argument(
+        "--subsample",
+        type=int,
+        default=10,
+        help="Subsample ratio"
+    )
+    # path
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default=None,
+        required=True,
+        help="Path to pretrained model's enclosing path",
+    )
+    args = parser.parse_args()
+    return args
+
+
 def main() -> None:
     data_dir_giga = "data/tokenized_datasets/giga_midi/6fb2094dfa7c0d16278dfaa4a401e3b8"
     data_dir_lmd = "data/tokenized_datasets/lmd_full/6fb2094dfa7c0d16278dfaa4a401e3b8"
@@ -234,13 +334,19 @@ def main() -> None:
 
     checkpoint_dir = "/home/mf867/anticipation_isolated/anticipation/output/slurm_logs/232666/checkpoints/step-20000"
     checkpoint_dir = "/home/mf867/anticipation_isolated/anticipation/output/slurm_logs/263233/checkpoints/step-100000"
+
+    checkpoint_dir = "/home/mf867/anticipation/output/checkpoints/midtraining_testing/8203_6659"
     data_dir = "data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a"
 
+    args = parse_args()
+    checkpoint_dir = args.checkpoint_dir
+    subsample = args.subsample
 
     dataset = PreTokenizedDataset(Path(data_dir) / "test.npy")
-    model = GPT2LMHeadModelLite.from_pretrained(
+    model = GPT2LMHeadModel.from_pretrained(
         checkpoint_dir,
     ).cuda()
+    model = model.eval()
 
     settings_path_name = "settings_" + data_dir.split("/")[-1] + ".json"
     print(settings_path_name)
@@ -250,16 +356,12 @@ def main() -> None:
 
     # same settings as in v1 baselines
     context_limit = 1024
-    #cut_prefix = 99
-    cut_prefix = 0
-    subsample_ratio = 10
     res = log_loss(
         model, dataset, settings,
-        subsample_ratio=subsample_ratio,
+        subsample_ratio=subsample,
         context_limit=context_limit,
-        #cut_prefix=cut_prefix
+        save_artfacts_to_enclosing_folder=Path(checkpoint_dir)
     )
-    #res_formatted = format_result_row(res)
     pprint(res)
 
 

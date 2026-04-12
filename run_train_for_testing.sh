@@ -14,17 +14,19 @@ export TEMP=$TMPDIR
 export TMP=$TMPDIR
 mkdir -p "$TMPDIR"
 
-export USE_FA4=True
-
+# ----
 NUM_GPUS=1
-PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.py \
+
+export USE_FA4=False
+
+PYTHONPATH=. python train/v2/training.py \
     --output_dir output/checkpoints/test_checkpoints/baseline_test \
-    --data_dir data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a \
+    --data_dir data/tokenized_datasets/transcripts/7f1aadd4f9603af995abc3428289f7ec \
     --gpus_per_node $NUM_GPUS \
     --train_batch_size 16 \
     --eval_batch_size 16 \
     --gradient_accumulation_steps 8 \
-    --steps_per_eval 10000 \
+    --steps_per_eval 1000 \
     --steps_per_checkpoint 10000 \
     --save_midi_output_after_step 1000000 \
     --num_events_to_generate_for_midi_inference 80 \
@@ -39,5 +41,29 @@ PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.
     --learning_rate 1e-03 \
     --bf16 \
     --flops "2e20" \
-    --no_torch_compile \
+    --mlp_style "Llama"
+
+
+PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training.py \
+    --output_dir output/checkpoints/test_checkpoints/baseline_test \
+    --data_dir data/tokenized_datasets/transcripts/7f1aadd4f9603af995abc3428289f7ec \
+    --gpus_per_node $NUM_GPUS \
+    --train_batch_size 16 \
+    --eval_batch_size 16 \
+    --gradient_accumulation_steps 8 \
+    --steps_per_eval 1000 \
+    --steps_per_checkpoint 10000 \
+    --save_midi_output_after_step 1000000 \
+    --num_events_to_generate_for_midi_inference 80 \
+    --warmup_percent 0.01 \
+    --num_layers 8 \
+    --hidden_dim 768 \
+    --intermediate_dim 3072 \
+    --num_heads 8 \
+    --no_weight_tie \
+    --window_pattern "L" \
+    --pos_emb "rope" \
+    --learning_rate 1e-03 \
+    --bf16 \
+    --flops "2e20" \
     --mlp_style "Llama"

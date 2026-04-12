@@ -308,6 +308,18 @@ class AnticipationV2Settings:
         )
         return settings
 
+    @classmethod
+    def from_dict(cls, settings_dict: dict[str, Any]) -> "AnticipationV2Settings":
+        augmentation_pitch_shifts = tuple(
+            settings_dict.pop("augmentation_pitch_shifts")
+        )
+        v_str = settings_dict.pop("vocab")
+        return AnticipationV2Settings(
+            vocab=Vocab(**v_str),
+            augmentation_pitch_shifts=augmentation_pitch_shifts,
+            **settings_dict,
+        )
+
     def _get_as_file(self) -> tuple[str, str]:
         """
         Return serialized string of settings and the md5 hash of its string representation.
@@ -343,15 +355,7 @@ class AnticipationV2Settings:
         assert md5 == get_md5_of_string(settings_str), "file integrity compromised."
 
         settings_parsed = loads(settings_str)
-        augmentation_pitch_shifts = tuple(
-            settings_parsed.pop("augmentation_pitch_shifts")
-        )
-        v_str = settings_parsed.pop("vocab")
-        return AnticipationV2Settings(
-            vocab=Vocab(**v_str),
-            augmentation_pitch_shifts=augmentation_pitch_shifts,
-            **settings_parsed,
-        )
+        return cls.from_dict(settings_parsed)
 
     def __post_init__(self) -> None:
         # this runs after the constructor

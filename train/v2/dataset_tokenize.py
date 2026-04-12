@@ -33,6 +33,7 @@ def _process_shard(
     settings: AnticipationV2Settings,
     shards_container_path: Path,
     is_training_split: bool,
+    v1_mode: bool,
 ) -> tuple[Path, TokenizationStatSummary]:
     shard_id, files_to_process = shard_id_and_files_to_process
     work_dir = shards_container_path / f"./{shard_id}"
@@ -47,6 +48,7 @@ def _process_shard(
         settings=settings,
         shard_id=shard_id,
         is_training_split=is_training_split,
+        v1_mode=v1_mode,
     )
     return shard_artifact_path, tokenized_stats_summary
 
@@ -92,6 +94,7 @@ def _get_dataset_file_from_paths(
     save_to: str,
     do_shuffle: bool,
     is_training_split: bool,
+    v1_mode: bool,
 ) -> tuple[Path, list[tuple[Path, TokenizationStatSummary]]]:
     # get division of work
     shards = _get_dataset_shards(dataset_paths, num_workers)
@@ -102,6 +105,7 @@ def _get_dataset_file_from_paths(
         settings=settings,
         shards_container_path=shards_dir,
         is_training_split=is_training_split,
+        v1_mode=v1_mode,
     )
 
     # run tokenization, keep note of where results are saved
@@ -182,6 +186,7 @@ def _tokenize_dataset_in_parallel(
     save_all_dataset_files_to: Path,
     put_shards_in_tmp: bool,
     split_confs: list[dict[str, Any]],
+    v1_mode: bool,
 ) -> dict[str, Any]:
     with temporary_directory() as td:
         td_path = Path(td)
@@ -222,6 +227,7 @@ def _tokenize_dataset_in_parallel(
                 save_to=split_name,
                 do_shuffle=conf["do_shuffle"],
                 is_training_split=(split_name == "train"),
+                v1_mode=v1_mode,
             )
 
             # gather any ignored file results
@@ -256,13 +262,14 @@ def _tokenize_dataset_in_parallel(
             )
 
         # write all the ignored files to disk for awareness
-        field_names = list(ignored_files[0].keys())
-        with open(
-            save_all_dataset_files_to / "ignored_files.csv", "w", newline=""
-        ) as file:
-            writer = csv.DictWriter(file, fieldnames=field_names)  # noqa
-            writer.writeheader()
-            writer.writerows(ignored_files)
+        if ignored_files:
+            field_names = list(ignored_files[0].keys())
+            with open(
+                save_all_dataset_files_to / "ignored_files.csv", "w", newline=""
+            ) as file:
+                writer = csv.DictWriter(file, fieldnames=field_names)  # noqa
+                writer.writeheader()
+                writer.writerows(ignored_files)
 
         # write dataset stats
         stat_path = Path(save_all_dataset_files_to / "stats.json")
@@ -390,7 +397,7 @@ def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
 
 
 def main(
-    settings_path: Path, put_shards_in_tmp: bool, raw_data_enclosing_path: Path
+    settings_path: Path, put_shards_in_tmp: bool, raw_data_enclosing_path: Path, v1_mode: bool = False,
 ) -> None:
     dataset_enclosing_path = raw_data_enclosing_path.parts[-1]
     put_tokenized_datasets_in_dir = (
@@ -409,6 +416,7 @@ def main(
         ),
         put_shards_in_tmp,
         get_splits(raw_data_enclosing_path),
+        v1_mode=v1_mode,
     )
 
 
@@ -430,6 +438,9 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="name to settings file, not path - must be in ./config/...",
     )
+    parser.add_argument(
+	    '--v1_mode', action='store_true', help='use v1 tokenization mode (AR only supported)'
+	)
     _args = parser.parse_args()
     return _args
 
@@ -438,8 +449,22 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     args = parse_args()
 
-    settings_file_name: str = args.settings_json_name
-    settings_file_path: Path = CONFIG_ROOT / settings_file_name
+    if args.v1_mode:
+        # v1 mode, use same settings
+        settings_file_name: str = "settings_b0d0dbce322fc3318387b6cc12cf096a.json"
+        settings_file_path: Path = (DATASET_ROOT / "tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a/settings_b0d0dbce322fc3318387b6cc12cf096a.json")
+        # vocab size: 55028
+        v1_lakh_settings = AnticipationV2Settings.load_from_disk(settings_file_path)
+        settings_props = v1_lakh_settings.to_dict()
+        settings_props["max_track_instruments"] = 10_000
+        settings_props["num_workers_in_dataset_construction"] = 16
+        override_settings = AnticipationV2Settings.from_dict(settings_props)
+        settings_file_path = override_settings.save_to_disk((DATASET_ROOT / "tokenized_datasets/transcripts"))
+        settings_file_name = str(settings_file_path.parts[-1])
+    else:
+        settings_file_name: str = args.settings_json_name
+        settings_file_path: Path = CONFIG_ROOT / settings_file_name
+
     assert settings_file_path.exists()
     assert settings_file_path.is_file()
     assert settings_file_path.suffix == ".json"
@@ -468,4 +493,5 @@ if __name__ == "__main__":
         settings_path=dataset_choice["settings"],
         put_shards_in_tmp=True,
         raw_data_enclosing_path=dataset_choice["raw_data_enclosing_path"],
+        v1_mode=args.v1_mode,
     )
