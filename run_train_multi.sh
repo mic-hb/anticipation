@@ -66,7 +66,7 @@ K=(
 
 # original eval script default is 10
 subsample_for_test=20
-num_layers=4
+num_layers=8
 
 for curr_k in "${K[@]}"; do
     for curr_n in "${N[@]}"; do

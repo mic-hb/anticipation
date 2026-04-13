@@ -64,6 +64,7 @@ if __name__ == "__main__":
     """
 
         PYTHONPATH=. python eval/v2/collect_multi_results.py --output_dir output/slurm_logs/319595/
+        PYTHONPATH=. python eval/v2/collect_multi_results.py --output_dir output/slurm_logs/323607/
 
     """
     args = parse_args()
