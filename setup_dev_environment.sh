@@ -66,6 +66,7 @@ conda install pytorch torchvision torchaudio --yes
 pip install lightning
 pip install wandb
 pip install transformers
+pip install datasets
 
 # run the tests
 sh run_tests.sh
