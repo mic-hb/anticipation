@@ -255,7 +255,7 @@ class TwoPhaseLMModule(L.LightningModule):
         assert self.dataset2 is not None
         if self.steps_ds1 == 0:
             # can also say not to use dataset 1 at all
-            return self.dataset_2
+            return self.dataset2
         else:
             return self.dataset1 if self.current_epoch == 0 else self.dataset2
 
