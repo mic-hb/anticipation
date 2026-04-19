@@ -36,6 +36,7 @@ def _maybe_tokenize(
     my_midi_file: Path,
     settings: AnticipationV2Settings,
     pitch_transpose: int = 0,
+    convert_all_instruments_to_code: Optional[int] = None,
 ) -> tuple[list[Token], int, Optional[MIDIFileIgnoredReason]]:
     try:
         # try to convert this file to compound 5-tuple representation
@@ -43,6 +44,7 @@ def _maybe_tokenize(
             my_midi_file,
             settings=settings,
             pitch_transpose=pitch_transpose,
+            convert_all_instruments_to_code=convert_all_instruments_to_code,
         )
     except SymusicRuntimeError as e:
         if "File header is not MThd" in str(e):
@@ -590,6 +592,7 @@ def tokenize(
     is_training_split: bool = True,
     flush_seq_packer_every_k_files: int = 20,
     v1_mode: bool = False,
+    convert_all_instruments_to_code: Optional[int] = None,
 ) -> TokenizationStatSummary:
     """Tokenizes MIDI for v2 Anticipatory Training
 
@@ -620,7 +623,7 @@ def tokenize(
       the given files. This will be empty if no files were ignored.
     """
     if v1_mode:
-        tokenize_v1_without_intermediates(midi_files, output, settings, idx=shard_id)
+        tokenize_v1_without_intermediates(midi_files, output, settings, idx=shard_id, convert_all_instruments_to_code=convert_all_instruments_to_code)
 
         # these are unpopulated in v1 mode
         return TokenizationStatSummary(
@@ -847,7 +850,7 @@ def _get_span_augmentation(
 
 
 
-def tokenize_v1_without_intermediates(datafiles, output, settings: AnticipationV2Settings, augment_factor: int=1, idx=0, do_span_augmentation: bool = False, do_random_augmentation: bool = False, do_instrument_augmentation: bool = False,):
+def tokenize_v1_without_intermediates(datafiles, output, settings: AnticipationV2Settings, augment_factor: int=1, idx=0, do_span_augmentation: bool = False, do_random_augmentation: bool = False, do_instrument_augmentation: bool = False, convert_all_instruments_to_code: Optional[int] = None):
     tokens = []
     all_truncations = 0
     seqcount = rest_count = 0
@@ -862,7 +865,7 @@ def tokenize_v1_without_intermediates(datafiles, output, settings: AnticipationV
 
     concatenated_tokens = []
     for j, filename in tqdm(list(enumerate(datafiles)), desc=f'#{idx}', position=idx+1, leave=True):
-        all_events, truncations, status = _maybe_tokenize(filename, settings)
+        all_events, truncations, status = _maybe_tokenize(filename, settings, convert_all_instruments_to_code=convert_all_instruments_to_code)
 
         if status is not None:
             continue

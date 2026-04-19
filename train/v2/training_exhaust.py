@@ -25,6 +25,12 @@ from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
 from train.v2.dataset_utils import PreTokenizedDataset
 
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message=".*does not have many workers.*",
+    module="lightning.pytorch.trainer.connectors.data_connector",
+)
 
 
 
@@ -558,6 +564,9 @@ def build_two_phase_module(
     base1 = PreTokenizedDataset(dataset1_path)
     base2 = PreTokenizedDataset(dataset2_path)
 
+    print("Total seq in ds1: ", len(base1))
+    print("Total seq in ds2: ", len(base2))
+
     effective_num_sequences_1 = subset_size_1 if subset_size_1 is not None else len(base1)
     effective_num_sequences_2 = subset_size_2 if subset_size_2 is not None else len(base2)
 
@@ -748,11 +757,12 @@ def do_training(args):
             MaxStepProgressBar(),
             OverfitStopper(
                 monitor="val_loss",
-                warmup_checks=20,
-                window_size=1,
-                # this is in terms of nats/tok
-                overfit_margin=0.05,
-                patience_checks=5,
+                # don't start monitoring overfit until we get to the second
+                # dataset
+                warmup_checks=lit_model.steps_ds1,
+                window_size=args.overfit_window_size,
+                overfit_margin=args.overfit_margin,
+                patience_checks=args.overfit_patience_checks,
             ),
         ],
         enable_progress_bar=True,
@@ -824,6 +834,10 @@ if __name__ == "__main__":
     parser.add_argument("--steps_per_eval", type=int, default=1000, help="Number of steps between validation evals")
     parser.add_argument("--steps_per_checkpoint", type=int, default=1000,
                         help="Number of steps between checkpoints")  # set back to 1000
+
+    parser.add_argument("--overfit_window_size", type=int, default=1, help="Number of validation samples to use in smoothed best val loss.")
+    parser.add_argument("--overfit_patience_checks", type=int, default=5, help="Number of consecutive bad val loss samples we can withstand before early stopping.")
+    parser.add_argument("--overfit_margin", type=float, default=0.05, help="Delta over best val after which considered a bad val loss.")
 
     # System parameters
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes")

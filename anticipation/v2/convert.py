@@ -1,3 +1,4 @@
+from typing import Optional
 from pathlib import Path
 from operator import itemgetter
 from collections import defaultdict
@@ -60,7 +61,7 @@ def compound_to_events(
 
 
 def midi_to_compound(
-    midifile: Path, settings: AnticipationV2Settings, pitch_transpose: int = 0
+    midifile: Path, settings: AnticipationV2Settings, pitch_transpose: int = 0, convert_all_instruments_to_code: Optional[int] = None,
 ) -> list[int]:
     time_resolution = settings.time_resolution
     try:
@@ -104,16 +105,32 @@ def midi_to_compound(
             # (abs_time, onset, duration, pitch, instrument, velocity)
             # in mido, tracks are 'merged' by converting each event to
             # absolute time in ticks, and then sorting by that absolute value
-            to_add = [
-                # need to sort by unquantized time for parity with v1
-                note.time,
-                # --- these are properties we keep for tokenization ---
-                on_set_time_in_ticks,
-                duration_time_in_ticks,
-                pitch,
-                instr,
-                velocity,
-            ]
+
+            if convert_all_instruments_to_code is None:
+                to_add = [
+                    # need to sort by unquantized time for parity with v1
+                    note.time,
+                    # --- these are properties we keep for tokenization ---
+                    on_set_time_in_ticks,
+                    duration_time_in_ticks,
+                    pitch,
+                    # use the original instrument
+                    instr,
+                    velocity,
+                ]
+            else:
+                to_add = [
+                    # need to sort by unquantized time for parity with v1
+                    note.time,
+                    # --- these are properties we keep for tokenization ---
+                    on_set_time_in_ticks,
+                    duration_time_in_ticks,
+                    pitch,
+                    # use the given instrument
+                    convert_all_instruments_to_code,
+                    velocity,
+                ]
+
             if not compounds or (to_add != compounds[-1]):
                 # I noticed that there are some MIDI files that, for some reason,
                 # have copies of the SAME event with all the same information...

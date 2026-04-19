@@ -8,7 +8,7 @@ import multiprocessing as mp
 from functools import partial
 from json import dumps
 from pathlib import Path
-from typing import Any, Iterable, Union
+from typing import Any, Iterable, Union, Optional
 
 import numpy as np
 from anticipation.v2.config import (
@@ -37,6 +37,7 @@ def _process_shard(
     shards_container_path: Path,
     is_training_split: bool,
     v1_mode: bool,
+    convert_all_instruments_to_code: Optional[int] = None,
 ) -> tuple[Path, TokenizationStatSummary]:
     shard_id, files_to_process = shard_id_and_files_to_process
     work_dir = shards_container_path / f"./{shard_id}"
@@ -52,6 +53,7 @@ def _process_shard(
         shard_id=shard_id,
         is_training_split=is_training_split,
         v1_mode=v1_mode,
+        convert_all_instruments_to_code=convert_all_instruments_to_code,
     )
     return shard_artifact_path, tokenized_stats_summary
 
@@ -98,6 +100,7 @@ def _get_dataset_file_from_paths(
     do_shuffle: bool,
     is_training_split: bool,
     v1_mode: bool,
+    convert_all_instruments_to_code: Optional[int] = None,
 ) -> tuple[Path, list[tuple[Path, TokenizationStatSummary]]]:
     # get division of work
     shards = _get_dataset_shards(dataset_paths, num_workers)
@@ -109,6 +112,7 @@ def _get_dataset_file_from_paths(
         shards_container_path=shards_dir,
         is_training_split=is_training_split,
         v1_mode=v1_mode,
+        convert_all_instruments_to_code=convert_all_instruments_to_code,
     )
 
     # run tokenization, keep note of where results are saved
@@ -231,6 +235,7 @@ def _tokenize_dataset_in_parallel(
                 do_shuffle=conf["do_shuffle"],
                 is_training_split=(split_name == "train"),
                 v1_mode=v1_mode,
+                convert_all_instruments_to_code=conf.get("convert_all_instruments_to_code", None),
             )
 
             # gather any ignored file results
@@ -485,16 +490,20 @@ def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
                 "name": "train",
                 "dataset_paths": [splits_path / "train"],
                 "do_shuffle": True,
+                # piano
+                "convert_all_instruments_to_code": 0,
             },
             {
                 "name": "valid",
                 "dataset_paths": [splits_path / "validation"],
                 "do_shuffle": True,
+                "convert_all_instruments_to_code": 0,
             },
             {
                 "name": "test",
                 "dataset_paths": [splits_path / "test"],
                 "do_shuffle": False,
+                "convert_all_instruments_to_code": 0,
             },
         ]
     else:

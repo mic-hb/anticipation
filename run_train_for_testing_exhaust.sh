@@ -30,10 +30,6 @@ NUM_GPUS=1
 
 # 10240
 N=(
-    20480
-    40960
-    81920
-    163840
     327680
 )
 
@@ -43,7 +39,6 @@ K=(
 )
 NUM_LAYERS=(
     2
-    4
 )
 # always train on transcripts for 1 epoch only
 DS_1_NUM_EPOCHS=1
@@ -53,6 +48,11 @@ BASELINE_DS_2_NUM_EPOCHS=1000
 STEPS_PER_VAL_REPORT=64
 BS=128
 ACCUM=4
+
+ARIA_TRAIN=data/tokenized_datasets/aria-midi-v1-pruned-ext/b82a7a2750e3c5836ffb9bf564720cd8/train.npy
+MAESTRO_TRAIN=data/tokenized_datasets/maestro-v3.0.0/7f1aadd4f9603af995abc3428289f7ec/train.npy
+MAESTRO_VALID=data/tokenized_datasets/maestro-v3.0.0/7f1aadd4f9603af995abc3428289f7ec/valid.npy
+MAESTRO_TEST=data/tokenized_datasets/maestro-v3.0.0/7f1aadd4f9603af995abc3428289f7ec/test.npy
 
 for curr_layers in "${NUM_LAYERS[@]}"; do
     for curr_k in "${K[@]}"; do
@@ -83,13 +83,13 @@ for curr_layers in "${NUM_LAYERS[@]}"; do
 
             # run training
             PYTHONPATH=. python train/v2/training_exhaust.py \
-                --dataset1_path data/tokenized_datasets/transcripts/7f1aadd4f9603af995abc3428289f7ec/train.npy \
+                --dataset1_path $ARIA_TRAIN \
                 --epochs_ds1 $DS_1_NUM_EPOCHS \
                 --n_ds1 $curr_n \
-                --dataset2_path data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a/train.npy \
+                --dataset2_path $MAESTRO_TRAIN \
                 --epochs_ds2 $DS_2_NUM_EPOCHS \
                 --k_ds2 $curr_k \
-                --val_dataset_path data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a/valid.npy \
+                --val_dataset_path $MAESTRO_VALID \
                 --train_batch_size $BS \
                 --val_batch_size $BS \
                 --gradient_accumulation_steps $ACCUM \
@@ -97,8 +97,8 @@ for curr_layers in "${NUM_LAYERS[@]}"; do
                 --gpus_per_node $NUM_GPUS \
                 --steps_per_eval $STEPS_PER_VAL_REPORT \
                 --warmup_steps 20 \
-                --steps_per_checkpoint 1000 \
-                --wandb_project "amt_exhaustion_break" \
+                --steps_per_checkpoint 10000 \
+                --wandb_project "amt_exhaustion_break_aria_maestro" \
                 --use_wandb \
                 --num_layers $curr_layers
         done
