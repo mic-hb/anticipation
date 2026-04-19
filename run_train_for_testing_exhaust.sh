@@ -20,6 +20,9 @@ mkdir -p "$TMPDIR"
 NUM_GPUS=1
 export USE_FA4=False
 
+# in seconds, default is 90
+export WANDB_INIT_TIMEOUT=600
+
 # original global batch size is 512
 # set to, for 1 gpu:
 # batch_size 128
@@ -32,16 +35,16 @@ export USE_FA4=False
 # 10240
 N=(
     0
-    2560
-    5120
-    10240
-    20480
-    40960
-    81920
-    163840
-    327680
-    655360
-    1310720
+    # 2560
+    # 5120
+    # 10240
+    # 20480
+    # 40960
+    # 81920
+    # 163840
+    # 327680
+    # 655360
+    # 1310720
     #2560000
 )
 
@@ -50,7 +53,12 @@ K=(
     2560
 )
 NUM_LAYERS=(
-    2
+    # 4
+    # 6
+    # 8
+    # 10
+    # 12
+    16
 )
 # always train on transcripts for 1 epoch only
 DS_1_NUM_EPOCHS=1
@@ -58,8 +66,10 @@ DS_1_NUM_EPOCHS=1
 # train for this many epochs on Lakh / target clean dataset for the baseline
 BASELINE_DS_2_NUM_EPOCHS=1000
 STEPS_PER_VAL_REPORT=64
-BS=128
+BS=64
 ACCUM=4
+HEAD_DIM=64
+ASPECT_RATIO=64
 
 ARIA_TRAIN=data/tokenized_datasets/aria-midi-v1-pruned-ext/b82a7a2750e3c5836ffb9bf564720cd8/train.npy
 MAESTRO_TRAIN=data/tokenized_datasets/maestro-v3.0.0/7f1aadd4f9603af995abc3428289f7ec/train.npy
@@ -111,11 +121,14 @@ for curr_layers in "${NUM_LAYERS[@]}"; do
                 --steps_per_eval $STEPS_PER_VAL_REPORT \
                 --steps_per_checkpoint 10000 \
                 --overfit_margin 0.05 \
-                --wandb_project "amt_exhaustion_break_aria_maestro" \
-                --use_wandb \
                 --do_torch_compile \
+                --aspect_ratio $ASPECT_RATIO \
+                --head_dim $HEAD_DIM \
+                --num_layers $curr_layers \
                 --pos_emb rope \
-                --num_layers $curr_layers
+                --do_gradient_checkpointing \
+                --wandb_project "amt_exhaustion_break_aria_maestro" \
+                --use_wandb
         done
     done
 done

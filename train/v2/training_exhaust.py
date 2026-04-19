@@ -686,6 +686,21 @@ def build_two_phase_module(
         do_gradient_checkpointing=do_gradient_checkpointing
     )
 
+def get_scaling_dimensions_for_model(depth: int, aspect_ratio: int, head_dim: int):
+    """
+    From: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L125
+    """
+    # Model dim is nudged up to nearest multiple of head_dim for clean division
+    # (FA3 requires head_dim divisible by 8, and this guarantees head_dim == args.head_dim exactly)
+    base_dim = depth * aspect_ratio
+    model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim
+    num_heads = model_dim // head_dim
+    return {
+        "num_heads": num_heads,
+        "num_transformer_blocks": depth,
+        "n_embed": model_dim,
+    }
+
 def do_training(args):
     num_devices = args.gpus_per_node
     batch_size = args.train_batch_size
@@ -720,14 +735,15 @@ def do_training(args):
     #     use_cache=False,
     # )
     # model = GPT2LMHeadModel(model_config)
-
+    #
+    model_dimensions = get_scaling_dimensions_for_model(depth=args.num_layers, aspect_ratio=args.aspect_ratio, head_dim=args.head_dim)
     model_config = GPT2ConfigLite(
         vocab_size=vocab_size,
         n_positions=seq_len,
-        n_embd=args.hidden_dim,
+        n_embd=model_dimensions["n_embed"],
         #n_inner=args.intermediate_dim,
-        n_layer=args.num_layers,
-        n_head=args.num_heads,
+        n_layer=model_dimensions["num_transformer_blocks"],
+        n_head=model_dimensions["num_heads"],
         embd_pdrop=args.embed_pdrop,
         resid_pdrop=args.resid_pdrop,
         # as of right now doesn't do anything, we always use gelu
@@ -744,6 +760,7 @@ def do_training(args):
         mlp_style="GPT2",
     )
     model = GPT2LMHeadModelLite(model_config)
+    scaling_params = get_num_scaling_params(model)
 
     checkpoint_callback = HuggingFaceCheckpoint(
         config=model.config,
@@ -825,10 +842,10 @@ def do_training(args):
                 save_dir=args.output_dir,
                 config={
                     **vars(args),
+                    **{f"scaling_param__{x}": y for x, y in scaling_params.items()},
                 },
                 tags=tags,
             )
-
         logger_dict["logger"] = wandb_logger
 
     #print("Steps in ds1: ", lit_model.steps_ds1)
@@ -888,9 +905,14 @@ if __name__ == "__main__":
     parser.add_argument("--dataset2_subset_seed", type=int, default=5678, help="Dataset 1 subset seed")
 
     # Model
-    parser.add_argument("--hidden_dim", type=int, default=768, help="Model hidden dimensions")  # 768
-    parser.add_argument("--num_heads", type=int, default=12, help="Model number of attention heads")  # 12
-    parser.add_argument("--num_layers", type=int, default=12, help="Model number of layers")  # 12
+    parser.add_argument("--head_dim", type=int, default=64, help="The number of dimensions per attention head")
+    parser.add_argument("--num_layers", type=int, default=12, help="Model number of layers")
+    parser.add_argument(
+        "--aspect_ratio",
+        type=int,
+        default=64,
+        help="model_dim = depth * aspect_ratio. Default is 64, same as nanochat",
+    )
     parser.add_argument("--embed_pdrop", type=float, default=0.1, help="Apply embedding dropout")
     parser.add_argument("--resid_pdrop", type=float, default=0.1, help="Apply residual dropout")
     parser.add_argument(

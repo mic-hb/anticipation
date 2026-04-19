@@ -358,8 +358,14 @@ class GPT2ModelLite(nn.Module):
     def __init__(self, config: GPT2ConfigLite) -> None:
         super().__init__()
         self.config = config
+        self.use_rope = config.pos_emb == "rope"
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
-        # self.wpe = nn.Embedding(config.n_positions, config.n_embd)
+
+        if self.use_rope:
+            self.wpe = nn.Embedding(config.n_positions, config.n_embd)
+        else:
+            self.wpe = None
+
         self.drop = nn.Dropout(config.embd_pdrop)
         self.h = nn.ModuleList(
             [GPT2BlockLite(config, layer_idx=i) for i in range(config.n_layer)]
@@ -367,9 +373,6 @@ class GPT2ModelLite(nn.Module):
         self.ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.gradient_checkpointing = False
         self.window_sizes = self._compute_window_sizes(config)
-
-        self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
-        self.x0_lambdas = nn.Parameter(torch.full((config.n_layer,), 0.1))
 
         if self.config.use_value_embeds:
             self.value_embeds = nn.ModuleDict(
@@ -429,8 +432,12 @@ class GPT2ModelLite(nn.Module):
 
     def forward(self, input_ids, attention_mask=None):
         b, t = input_ids.shape
-        # pos = torch.arange(0, t, device=input_ids.device).unsqueeze(0)
-        x = self.wte(input_ids)  # + self.wpe(pos)
+        if self.use_rope:
+            pos = torch.arange(0, t, device=input_ids.device).unsqueeze(0)
+            x = self.wte(input_ids) + self.wpe(pos)
+        else:
+            x = self.wte(input_ids)
+
         x = self.drop(x)
 
         # Convert attention_mask (B,T) with 1=keep, 0=mask to additive mask (B,1,1,T) with 0 / -10000.
@@ -439,11 +446,11 @@ class GPT2ModelLite(nn.Module):
             m = attention_mask[:, None, None, :].to(dtype=x.dtype)
             attn_bias = (1.0 - m) * -10000.0
 
-        x0 = x
-        block: GPT2BlockLite
+        #x0 = x
+        #block: GPT2BlockLite
         for i, block in enumerate(self.h):
             window_size = self.window_sizes[i]
-            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+            #x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = (
                 self.value_embeds[str(i)](input_ids)
                 if str(i) in self.value_embeds
@@ -599,27 +606,24 @@ def get_num_scaling_params(gpt: GPT2LMHeadModelLite) -> dict[str, int]:
     # https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/nanochat/gpt.py#L319
     # Count each group separately (mirrors the grouping in setup_optimizers)
     wte = sum(p.numel() for p in gpt.transformer.wte.parameters())
+
+    wpe = 0
+    if gpt.transformer.wpe is not None:
+        # not using rope
+        wpe = sum(p.numel() for p in gpt.transformer.wpe.parameters())
+
     if gpt.transformer.value_embeds:
         value_embeds = sum(p.numel() for p in gpt.transformer.value_embeds.parameters())
     else:
         value_embeds = 0
 
     lm_head = sum(p.numel() for p in gpt.lm_head.parameters())
+    lm_head_unique = 0 if gpt.config.embedding_and_lm_head_weight_tying else lm_head
     transformer_matrices = sum(p.numel() for p in gpt.transformer.h.parameters())
-    scalars = gpt.transformer.resid_lambdas.numel() + gpt.transformer.x0_lambdas.numel()
-
-    # these two are unique to us, nanochat removes these - we will keep for now. Have
-    # not yet ablated them to see if removing them improves for us
-    # wpe = sum(p.numel() for p in gpt.transformer.wpe.parameters())
     ln_f = sum(p.numel() for p in gpt.transformer.ln_f.parameters())
-
     total = (
-        wte + value_embeds + lm_head + transformer_matrices + scalars + ln_f
-    )  # + wpe
-
-    if gpt.config.embedding_and_lm_head_weight_tying:
-        # if using weight tying the params are shared
-        total -= wte
+        wte + wpe + value_embeds + transformer_matrices + ln_f + lm_head_unique
+    )
 
     actual = sum(p.numel() for p in gpt.parameters())
     assert total == actual, (
@@ -627,10 +631,12 @@ def get_num_scaling_params(gpt: GPT2LMHeadModelLite) -> dict[str, int]:
     )
     return {
         "wte": wte,
+        "wpe": wpe,
         "value_embeds": value_embeds,
-        "lm_head": lm_head,
+        "ln_f": ln_f,
+        # depends on whether we do weight tieing
+        "lm_head_unique": lm_head_unique,
         "transformer_matrices": transformer_matrices,
-        "scalars": scalars,
         "total": total,
     }
 
