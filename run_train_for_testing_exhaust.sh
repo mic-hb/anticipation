@@ -18,6 +18,7 @@ mkdir -p "$TMPDIR"
 
 # ----
 NUM_GPUS=1
+export USE_FA4=False
 
 # original global batch size is 512
 # set to, for 1 gpu:
@@ -30,7 +31,18 @@ NUM_GPUS=1
 
 # 10240
 N=(
+    0
+    2560
+    5120
+    10240
+    20480
+    40960
+    81920
+    163840
     327680
+    655360
+    1310720
+    #2560000
 )
 
 # started at 1280
@@ -94,12 +106,15 @@ for curr_layers in "${NUM_LAYERS[@]}"; do
                 --val_batch_size $BS \
                 --gradient_accumulation_steps $ACCUM \
                 --output_dir $output_dir \
+                --warmup_steps 20 \
                 --gpus_per_node $NUM_GPUS \
                 --steps_per_eval $STEPS_PER_VAL_REPORT \
-                --warmup_steps 20 \
                 --steps_per_checkpoint 10000 \
+                --overfit_margin 0.05 \
                 --wandb_project "amt_exhaustion_break_aria_maestro" \
                 --use_wandb \
+                --do_torch_compile \
+                --pos_emb rope \
                 --num_layers $curr_layers
         done
     done

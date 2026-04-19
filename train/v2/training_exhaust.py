@@ -1,6 +1,7 @@
 import os
 import time
 import argparse
+import logging
 import math
 import warnings
 from pathlib import Path
@@ -24,6 +25,15 @@ from lightning.pytorch.loggers import WandbLogger
 from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
 from train.v2.dataset_utils import PreTokenizedDataset
+from train.v2.hf_gpt2_rewrite import (
+    GPT2ConfigLite,
+    GPT2LMHeadModelLite,
+    build_model_meta,
+    estimate_flops,
+    get_num_scaling_params,
+    get_scaling_analysis_data,
+    print0,
+)
 
 import warnings
 warnings.filterwarnings(
@@ -31,7 +41,67 @@ warnings.filterwarnings(
     message=".*does not have many workers.*",
     module="lightning.pytorch.trainer.connectors.data_connector",
 )
+# keep this!!!
+torch.set_float32_matmul_precision("high")
 
+
+class TipFilter(logging.Filter):
+    """
+    Credit to: https://github.com/Lightning-AI/pytorch-lightning/issues/21294#issuecomment-3410770397
+    """
+
+    def filter(self, record) -> bool:
+        m = record.getMessage()
+        return "💡 Tip:" not in m
+
+
+logging.getLogger("lightning.pytorch.utilities.rank_zero").addFilter(TipFilter())
+
+class MaxStepProgressBar(TQDMProgressBar):
+    def __init__(self):
+        super().__init__()
+        self._persistent_bar = None
+
+    def init_train_tqdm(self):
+        if self._persistent_bar is None:
+            bar = super().init_train_tqdm()
+            bar.set_description("Training Progress")
+            self._persistent_bar = bar
+
+        return self._persistent_bar
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        if self._persistent_bar is not None:
+            self._persistent_bar.set_description("Training Progress")
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        current = trainer.global_step
+        total = trainer.max_steps
+        self.train_progress_bar.n = current
+        self.train_progress_bar.total = total
+        self._persistent_bar.refresh()
+
+
+class HuggingFaceCheckpoint(ModelCheckpoint):
+    def __init__(self, config, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.config = config
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+        super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
+
+        if (trainer.global_step % self._every_n_train_steps) != 0:
+            return
+
+        if trainer.global_step == 0:
+            # don't save if we just started
+            return
+
+        step_dir = os.path.join(str(self.dirpath), f"step-{trainer.global_step}")
+        raw_model = pl_module.model if hasattr(pl_module, "model") else pl_module
+        raw_model.save_pretrained(
+            step_dir, safe_serialization=True, max_shard_size="2GB"
+        )
 
 
 class OverfitStopper(Callback):
@@ -95,6 +165,8 @@ class OverfitStopper(Callback):
         if self.ignore_sanity_checks and trainer.sanity_checking:
             return
 
+        assert isinstance(pl_module, TwoPhaseLMModule)
+
         metric = trainer.callback_metrics.get(self.monitor)
         if metric is None:
             raise RuntimeError(
@@ -103,8 +175,6 @@ class OverfitStopper(Callback):
             )
 
         val = float(metric.detach().cpu() if isinstance(metric, torch.Tensor) else metric)
-
-        self.num_checks += 1
         self.recent_vals.append(val)
 
         if val < self.best_val:
@@ -112,7 +182,6 @@ class OverfitStopper(Callback):
 
         smoothed = sum(self.recent_vals) / len(self.recent_vals)
 
-        # These are allowed here.
         pl_module.log("overfit/best_val", self.best_val, on_step=False, on_epoch=True, sync_dist=True)
         pl_module.log("overfit/smoothed_val", smoothed, on_step=False, on_epoch=True, sync_dist=True)
         pl_module.log(
@@ -123,7 +192,28 @@ class OverfitStopper(Callback):
             sync_dist=True,
         )
 
-        if self.num_checks <= self.warmup_checks:
+        pl_module.log(
+            "overfit/num_checks",
+            self.num_checks,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+
+        if not pl_module.phase_2:
+            # too early to check for overfit, stop
+            pl_module.log(
+                "overfit/bad_check_streak",
+                float(self.bad_check_streak),
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+            )
+            return
+
+        # we are in phase 2, now start counting checks
+        self.num_checks += 1
+        if (self.num_checks <= self.warmup_checks):
             pl_module.log(
                 "overfit/bad_check_streak",
                 float(self.bad_check_streak),
@@ -164,52 +254,6 @@ class OverfitStopper(Callback):
                     f"> best {self.best_val:.6f} + margin {self.overfit_margin:.6f} "
                     f"for {self.bad_check_streak} consecutive validation checks."
                 )
-
-class MaxStepProgressBar(TQDMProgressBar):
-    def __init__(self):
-        super().__init__()
-        self._persistent_bar = None
-
-    def init_train_tqdm(self):
-        if self._persistent_bar is None:
-            bar = super().init_train_tqdm()
-            bar.set_description("Training Progress")
-            self._persistent_bar = bar
-
-        return self._persistent_bar
-
-    def on_train_epoch_start(self, trainer, pl_module):
-        if self._persistent_bar is not None:
-            self._persistent_bar.set_description("Training Progress")
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        current = trainer.global_step
-        total = trainer.max_steps
-        self.train_progress_bar.n = current
-        self.train_progress_bar.total = total
-        self._persistent_bar.refresh()
-
-
-class HuggingFaceCheckpoint(ModelCheckpoint):
-    def __init__(self, config, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.config = config
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
-        super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
-
-        if (trainer.global_step % self._every_n_train_steps) != 0:
-            return
-
-        if trainer.global_step == 0:
-            # don't save if we just started
-            return
-
-        step_dir = os.path.join(str(self.dirpath), f"step-{trainer.global_step}")
-        raw_model = pl_module.model if hasattr(pl_module, "model") else pl_module
-        raw_model.save_pretrained(
-            step_dir, safe_serialization=True, max_shard_size="2GB"
-        )
 
 
 class FixedRandomSubsetDataset(Dataset):
@@ -333,15 +377,21 @@ class TwoPhaseLMModule(L.LightningModule):
         subset_seed_1: int | None = None,
         subset_seed_2: int | None = None,
         warmup_steps: int = 0,
+        do_gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         self.model = model
         self.model.config.bos_token_id = self.model.config.eos_token_id = 0
 
-        # self.model = torch.compile(
-        #     self.model, dynamic=False, fullgraph=True
-        # )
-        self.model.gradient_checkpointing_enable()
+        if model.config.do_torch_compile:
+            self.model = torch.compile(
+                self.model, dynamic=False, fullgraph=True
+            )
+
+        self.do_gradient_checkpointing = do_gradient_checkpointing
+
+        if self.do_gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
 
         self.dataset1_path = Path(dataset1_path)
         self.dataset2_path = Path(dataset2_path)
@@ -361,6 +411,7 @@ class TwoPhaseLMModule(L.LightningModule):
         # use this to determined when the cut-off point is
         self.steps_ds1 = steps_ds1
         self._switch_logged = False
+        self.phase_2 = False
 
         self.subset_size_1 = subset_size_1
         self.subset_size_2 = subset_size_2
@@ -471,6 +522,7 @@ class TwoPhaseLMModule(L.LightningModule):
 
         if not self._switch_logged and self.global_step >= self.steps_ds1:
             self._switch_logged = True
+            self.phase_2 = True
 
         return loss
 
@@ -560,6 +612,7 @@ def build_two_phase_module(
     warmup_steps: int = 0,
     num_epochs_dataset_1: int = 1,
     num_epochs_dataset_2: int = 4,
+    do_gradient_checkpointing: bool = False,
 ) -> TwoPhaseLMModule:
     base1 = PreTokenizedDataset(dataset1_path)
     base2 = PreTokenizedDataset(dataset2_path)
@@ -629,7 +682,8 @@ def build_two_phase_module(
         subset_size_2=subset_size_2,
         subset_seed_1=subset_seed_1,
         subset_seed_2=subset_seed_2,
-        warmup_steps=warmup_steps
+        warmup_steps=warmup_steps,
+        do_gradient_checkpointing=do_gradient_checkpointing
     )
 
 def do_training(args):
@@ -643,21 +697,54 @@ def do_training(args):
 
     L.seed_everything(args.seed)
 
-    model_config = GPT2Config(
-        vocab_size=55028,
-        n_positions=args.seq_len,
+    ds_1 = PreTokenizedDataset(Path(args.dataset1_path))
+    ds_2 = PreTokenizedDataset(Path(args.dataset2_path))
+    assert ds_1.seq_len == ds_2.seq_len
+    seq_len = ds_1.seq_len
+    del ds_1
+    del ds_2
+    vocab_size = 55028
+
+    # model_config = GPT2Config(
+    #     vocab_size=vocab_size,
+    #     n_positions=seq_len,
+    #     n_embd=args.hidden_dim,
+    #     n_layer=args.num_layers,
+    #     n_head=args.num_heads,
+    #     embd_pdrop=args.embed_pdrop,
+    #     resid_pdrop=args.resid_pdrop,
+    #     activation_function="gelu_new",
+    #     layer_norm_epsilon=1e-5,
+    #     scale_attn_weights=True,
+    #     scale_attn_by_inverse_layer_idx=True,
+    #     use_cache=False,
+    # )
+    # model = GPT2LMHeadModel(model_config)
+
+    model_config = GPT2ConfigLite(
+        vocab_size=vocab_size,
+        n_positions=seq_len,
         n_embd=args.hidden_dim,
+        #n_inner=args.intermediate_dim,
         n_layer=args.num_layers,
         n_head=args.num_heads,
         embd_pdrop=args.embed_pdrop,
         resid_pdrop=args.resid_pdrop,
+        # as of right now doesn't do anything, we always use gelu
         activation_function="gelu_new",
         layer_norm_epsilon=1e-5,
+        pos_emb=args.pos_emb,
+        window_pattern="L",
         scale_attn_weights=True,
         scale_attn_by_inverse_layer_idx=True,
         use_cache=False,
+        embedding_and_lm_head_weight_tying=True,
+        use_value_embeds=False,
+        do_torch_compile=args.do_torch_compile,
+        mlp_style="GPT2",
     )
-    model = GPT2LMHeadModel(model_config)
+    model = GPT2LMHeadModelLite(model_config)
+
     checkpoint_callback = HuggingFaceCheckpoint(
         config=model.config,
         dirpath=args.output_dir,
@@ -744,6 +831,7 @@ def do_training(args):
 
         logger_dict["logger"] = wandb_logger
 
+    #print("Steps in ds1: ", lit_model.steps_ds1)
     trainer = L.Trainer(
         accelerator="gpu",
         devices=num_devices,
@@ -757,9 +845,7 @@ def do_training(args):
             MaxStepProgressBar(),
             OverfitStopper(
                 monitor="val_loss",
-                # don't start monitoring overfit until we get to the second
-                # dataset
-                warmup_checks=lit_model.steps_ds1,
+                warmup_checks=args.overfit_warmup_checks,
                 window_size=args.overfit_window_size,
                 overfit_margin=args.overfit_margin,
                 patience_checks=args.overfit_patience_checks,
@@ -790,36 +876,34 @@ def do_training(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GPT-2 training script using PyTorch Lightning")
 
-    # new for midtraining
+    # Midtraining and Dataset
     parser.add_argument("--dataset1_path", type=str, help="Dataset 1 (n, transcripts) numpy file")
     parser.add_argument("--dataset2_path", type=str, help="Dataset 1 (k, lakh) numpy file")
     parser.add_argument("--val_dataset_path", type=str, help="Lakh validation numpy file")
-
     parser.add_argument("--n_ds1", type=int, default=10, help="Number of sequences from transcripts")
     parser.add_argument("--k_ds2", type=int, default=10, help="Number of sequences from Lakh train")
-
     parser.add_argument("--epochs_ds1", type=int, default=1, help="Number of epochs for dataset 1")
     parser.add_argument("--epochs_ds2", type=int, default=4, help="Number of epochs for dataset 2")
-
     parser.add_argument("--dataset1_subset_seed", type=int, default=1234, help="Dataset 1 subset seed")
     parser.add_argument("--dataset2_subset_seed", type=int, default=5678, help="Dataset 1 subset seed")
 
-    # --- existed before ---
-    parser.add_argument("--output_dir", type=str, help="Output directory for checkpoints")
-    parser.add_argument("--checkpoint_path", type=str, default=None,
-                        help="Initialize model weights from this checkpoint (not supported)")
-
-    # Dataset parameters
-    parser.add_argument("--seq_len", type=int, default=1024, help="Dataset sequence length")
-
-    # Model parameters
+    # Model
     parser.add_argument("--hidden_dim", type=int, default=768, help="Model hidden dimensions")  # 768
     parser.add_argument("--num_heads", type=int, default=12, help="Model number of attention heads")  # 12
     parser.add_argument("--num_layers", type=int, default=12, help="Model number of layers")  # 12
     parser.add_argument("--embed_pdrop", type=float, default=0.1, help="Apply embedding dropout")
     parser.add_argument("--resid_pdrop", type=float, default=0.1, help="Apply residual dropout")
+    parser.add_argument(
+        "--pos_emb",
+        type=str,
+        default="absolute",
+        choices=["absolute", "rope"],
+        help=(
+            "The positional embedding choice: either `absolute` (vanilla) or RoPE. (rope)"
+        ),
+    )
 
-    # Optimization parameters
+    # Optimization
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--train_batch_size", type=int, default=512,
@@ -830,20 +914,34 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay")
     parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
+
+    parser.add_argument("--overfit_window_size", type=int, default=1, help="Number of validation samples to use in smoothed best val loss.")
+    parser.add_argument("--overfit_warmup_checks", type=int, default=10, help="Do not start counting bad val loss until this many checks after phase 2 starts")
+    parser.add_argument("--overfit_patience_checks", type=int, default=5, help="Number of consecutive bad val loss samples we can withstand before early stopping.")
+    parser.add_argument("--overfit_margin", type=float, default=0.05, help="Delta over best val after which considered a bad val loss.")
+    parser.add_argument(
+        "--do_gradient_checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing",
+    )
+
+    # System
+    parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes")
+    parser.add_argument("--gpus_per_node", type=int, default=1, help="Number of GPUs per node")
+    parser.add_argument(
+        "--do_torch_compile",
+        action="store_true",
+        help="Enable calling torch.compile on model instance",
+    )
+    parser.add_argument("--output_dir", type=str, help="Output directory for checkpoints")
+    parser.add_argument("--checkpoint_path", type=str, default=None,
+                        help="Initialize model weights from this checkpoint (not supported)")
     parser.add_argument("--bf16", action="store_true", help="Use bfloat16 mixed precision training")
     parser.add_argument("--steps_per_eval", type=int, default=1000, help="Number of steps between validation evals")
     parser.add_argument("--steps_per_checkpoint", type=int, default=1000,
-                        help="Number of steps between checkpoints")  # set back to 1000
+                        help="Number of steps between checkpoints")
 
-    parser.add_argument("--overfit_window_size", type=int, default=1, help="Number of validation samples to use in smoothed best val loss.")
-    parser.add_argument("--overfit_patience_checks", type=int, default=5, help="Number of consecutive bad val loss samples we can withstand before early stopping.")
-    parser.add_argument("--overfit_margin", type=float, default=0.05, help="Delta over best val after which considered a bad val loss.")
-
-    # System parameters
-    parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes")
-    parser.add_argument("--gpus_per_node", type=int, default=1, help="Number of GPUs per node")  # 4 gpus
-
-    # wandb stuff
+    # Logging
     parser.add_argument(
         "--use_wandb", action="store_true", help="whether to use wandb logging"
     )
@@ -864,7 +962,5 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
     os.makedirs(args.output_dir, exist_ok=True)
-
     do_training(args)

@@ -55,6 +55,12 @@ NUM_GPUS=1
 # ~1%
 # 10%
 N=(
+    #0
+    # 20480
+    # 40960
+    # 81920
+    # 163840
+    # 327680
     655360
     1310720
 )
@@ -64,7 +70,9 @@ K=(
     2560
 )
 NUM_LAYERS=(
-    2
+    4
+    # 8
+    # 12
 )
 # always train on transcripts for 1 epoch only
 DS_1_NUM_EPOCHS=1
@@ -120,6 +128,7 @@ for curr_layers in "${NUM_LAYERS[@]}"; do
                 --steps_per_checkpoint 1000 \
                 --wandb_project "amt_exhaustion_break" \
                 --use_wandb \
+                --overfit_margin 0.07 \
                 --num_layers $curr_layers
         done
     done

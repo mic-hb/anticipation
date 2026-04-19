@@ -25,6 +25,10 @@ class PreTokenizedDataset(Dataset):
         num_tokens_per_sequence = self.data.shape[1]
         return num_sequences * num_tokens_per_sequence
 
+    @property
+    def seq_len(self) -> int:
+        return self.data.shape[1]
+
     def __len__(self) -> int:
         return self.data.shape[0]
 
