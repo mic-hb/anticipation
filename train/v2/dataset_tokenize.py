@@ -469,7 +469,7 @@ def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
             for p in train:
                 shutil.copy2(p, train_path)
 
-            val_path = splits_path / "val"
+            val_path = splits_path / "validation"
             val_path.mkdir()
             for p in val:
                 shutil.copy2(p, val_path)
@@ -537,7 +537,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset_type",
         type=str,
         default="lakh",
-        choices=["lakh", "aria", "transcripts", "giga_midi", "maestro3"],
+        choices=["lakh", "aria", "transcripts", "giga_midi", "maestro3", "adl_piano"],
         help=(
             "Which dataset to tokenize. These are expected to be in specific locations in the ./data/ folder"
         ),
