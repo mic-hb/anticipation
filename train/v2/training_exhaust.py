@@ -4,6 +4,8 @@ import argparse
 import math
 import warnings
 from pathlib import Path
+from collections import deque
+from typing import Any
 
 
 import numpy as np
@@ -15,13 +17,147 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 import lightning as L
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, TQDMProgressBar
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, TQDMProgressBar, Callback
 from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.loggers import WandbLogger
 
 from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
 from train.v2.dataset_utils import PreTokenizedDataset
+
+
+
+
+class OverfitStopper(Callback):
+    """
+    Stop training when validation loss has clearly risen above its best value,
+    using smoothing and a consecutive-check requirement to avoid reacting to noise.
+    """
+
+    def __init__(
+        self,
+        monitor: str = "val/loss",
+        warmup_checks: int = 5,
+        window_size: int = 3,
+        overfit_margin: float = 0.01,
+        patience_checks: int = 3,
+        verbose: bool = True,
+        ignore_sanity_checks: bool = True,
+    ) -> None:
+        super().__init__()
+        if warmup_checks < 0:
+            raise ValueError("warmup_checks must be >= 0")
+        if window_size <= 0:
+            raise ValueError("window_size must be > 0")
+        if overfit_margin < 0:
+            raise ValueError("overfit_margin must be >= 0")
+        if patience_checks <= 0:
+            raise ValueError("patience_checks must be > 0")
+
+        self.monitor = monitor
+        self.warmup_checks = warmup_checks
+        self.window_size = window_size
+        self.overfit_margin = overfit_margin
+        self.patience_checks = patience_checks
+        self.verbose = verbose
+        self.ignore_sanity_checks = ignore_sanity_checks
+
+        self.best_val = float("inf")
+        self.num_checks = 0
+        self.bad_check_streak = 0
+        self.recent_vals: deque[float] = deque(maxlen=window_size)
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "best_val": self.best_val,
+            "num_checks": self.num_checks,
+            "bad_check_streak": self.bad_check_streak,
+            "recent_vals": list(self.recent_vals),
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self.best_val = float(state_dict["best_val"])
+        self.num_checks = int(state_dict["num_checks"])
+        self.bad_check_streak = int(state_dict["bad_check_streak"])
+        self.recent_vals = deque(state_dict["recent_vals"], maxlen=self.window_size)
+
+    def on_validation_epoch_end(
+        self,
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
+    ) -> None:
+        if self.ignore_sanity_checks and trainer.sanity_checking:
+            return
+
+        metric = trainer.callback_metrics.get(self.monitor)
+        if metric is None:
+            raise RuntimeError(
+                f"Monitored metric {self.monitor!r} not found in trainer.callback_metrics. "
+                "Make sure it is logged during validation."
+            )
+
+        val = float(metric.detach().cpu() if isinstance(metric, torch.Tensor) else metric)
+
+        self.num_checks += 1
+        self.recent_vals.append(val)
+
+        if val < self.best_val:
+            self.best_val = val
+
+        smoothed = sum(self.recent_vals) / len(self.recent_vals)
+
+        # These are allowed here.
+        pl_module.log("overfit/best_val", self.best_val, on_step=False, on_epoch=True, sync_dist=True)
+        pl_module.log("overfit/smoothed_val", smoothed, on_step=False, on_epoch=True, sync_dist=True)
+        pl_module.log(
+            "overfit/excess_over_best",
+            smoothed - self.best_val,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+
+        if self.num_checks <= self.warmup_checks:
+            pl_module.log(
+                "overfit/bad_check_streak",
+                float(self.bad_check_streak),
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+            )
+            return
+
+        if len(self.recent_vals) < self.window_size:
+            pl_module.log(
+                "overfit/bad_check_streak",
+                float(self.bad_check_streak),
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+            )
+            return
+
+        if smoothed > self.best_val + self.overfit_margin:
+            self.bad_check_streak += 1
+        else:
+            self.bad_check_streak = 0
+
+        pl_module.log(
+            "overfit/bad_check_streak",
+            float(self.bad_check_streak),
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+
+        if self.bad_check_streak >= self.patience_checks:
+            trainer.should_stop = True
+            if self.verbose and trainer.is_global_zero:
+                print(
+                    f"Stopping due to overfitting: smoothed {self.monitor}={smoothed:.6f} "
+                    f"> best {self.best_val:.6f} + margin {self.overfit_margin:.6f} "
+                    f"for {self.bad_check_streak} consecutive validation checks."
+                )
 
 class MaxStepProgressBar(TQDMProgressBar):
     def __init__(self):
@@ -319,7 +455,14 @@ class TwoPhaseLMModule(L.LightningModule):
         self.log("train_loss", loss, prog_bar=True, logger=True)
 
         # phase is 0 if pretraining on n, 1 if midtraining on k
-        self.log("train/phase", 1.0 if self.current_epoch == 0 else 2.0, on_step=True, on_epoch=False, sync_dist=True)
+        if self.steps_ds1 == 0:
+            # no steps in the first dataset, we start on phase 2
+            self.log("train/phase", 2.0, on_step=True, on_epoch=False, sync_dist=True)
+        else:
+            # phase 1 = noisy pretrain
+            # phase 2 = target midtrain
+            self.log("train/phase", 1.0 if self.current_epoch == 0 else 2.0, on_step=True, on_epoch=False, sync_dist=True)
+
         if not self._switch_logged and self.global_step >= self.steps_ds1:
             self._switch_logged = True
 
@@ -552,7 +695,11 @@ def do_training(args):
         if tags == ["scaling"]:
             run_name = f"scaling-run-{int(time.time())}"
         else:
-            run_name = f"run-{int(time.time())}"
+            num_layers = args.num_layers
+            k = args.k_ds2
+            n = args.n_ds1
+            #time_int = int(time.time())
+            run_name = f"run-{num_layers}-{k}-{n}"
 
         if args.wandb_resume_from_run_id:
             resume_from_run_id: str = args.wandb_resume_from_run_id
@@ -599,6 +746,14 @@ def do_training(args):
             checkpoint_callback,
             LearningRateMonitor(logging_interval="step"),
             MaxStepProgressBar(),
+            OverfitStopper(
+                monitor="val_loss",
+                warmup_checks=20,
+                window_size=1,
+                # this is in terms of nats/tok
+                overfit_margin=0.05,
+                patience_checks=5,
+            ),
         ],
         enable_progress_bar=True,
         precision="bf16-mixed" if args.bf16 else 32,
@@ -614,9 +769,9 @@ def do_training(args):
     trainer.validate(lit_model)
 
     # save the model only, not trainer state
-    lit_model: TwoPhaseLMModule
-    lit_model.save_model_checkpoint(Path(args.output_dir))
-    print(f"saved checkpoint to: {Path(args.output_dir)}")
+    #lit_model: TwoPhaseLMModule
+    #lit_model.save_model_checkpoint(Path(args.output_dir))
+    #print(f"saved checkpoint to: {Path(args.output_dir)}")
 
     # saves trainer state and model weights
     #trainer.save_checkpoint((Path(args.output_dir) / "final.ckpt"))

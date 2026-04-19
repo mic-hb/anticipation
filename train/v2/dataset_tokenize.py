@@ -1,3 +1,6 @@
+import random
+import shutil
+import pandas as pd
 import argparse
 import csv
 import math
@@ -359,6 +362,28 @@ def _write_book_keeping_info_and_get_dataset_enclosing_path(
     return work_dir
 
 
+def split_files(files, train_pct=0.8, val_pct=0.1, test_pct=0.1, seed=None):
+    if not (0 <= train_pct <= 1 and 0 <= val_pct <= 1 and 0 <= test_pct <= 1):
+        raise ValueError("All split percentages must be in [0, 1].")
+
+    total = train_pct + val_pct + test_pct
+    if abs(total - 1.0) > 1e-8:
+        raise ValueError(f"Split percentages must sum to 1. Got {total}")
+
+    files = list(files)
+    rng = random.Random(seed)
+    rng.shuffle(files)
+
+    n = len(files)
+    n_train = int(n * train_pct)
+    n_val = int(n * val_pct)
+
+    train = files[:n_train]
+    val = files[n_train:n_train + n_val]
+    test = files[n_train + n_val:]
+
+    return train, val, test
+
 def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
     if (
         raw_data_enclosing_path == LAKH_MIDI_FULL_PATH
@@ -383,6 +408,92 @@ def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
             {
                 "name": "test",
                 "dataset_paths": [raw_data_enclosing_path / "test"],
+                "do_shuffle": False,
+            },
+        ]
+    elif raw_data_enclosing_path.parts[-1] == "maestro-v3.0.0":
+        dataset_info = raw_data_enclosing_path / "maestro-v3.0.0.csv"
+        df = pd.read_csv(dataset_info)
+
+        train_df = df[df["split"] == "train"]
+        train_files = train_df["midi_filename"].tolist()
+        train_path = raw_data_enclosing_path / "train"
+        if not (train_path.exists() and train_path.is_dir()):
+            train_path.mkdir()
+            for fname in train_files:
+                shutil.copy2(raw_data_enclosing_path / fname, train_path / Path(fname).parts[-1])
+
+
+        valid_df = df[df["split"] == "validation"]
+        valid_files = valid_df["midi_filename"].tolist()
+        valid_path = raw_data_enclosing_path / "validation"
+        if not (valid_path.exists() and valid_path.is_dir()):
+            valid_path.mkdir()
+            for fname in valid_files:
+                shutil.copy2(raw_data_enclosing_path / fname, valid_path / Path(fname).parts[-1])
+
+        test_df = df[df["split"] == "test"]
+        test_files = test_df["midi_filename"].tolist()
+        test_path = raw_data_enclosing_path / "test"
+        if not (test_path.exists() and test_path.is_dir()):
+            test_path.mkdir()
+            for fname in test_files:
+                shutil.copy2(raw_data_enclosing_path / fname, test_path / Path(fname).parts[-1])
+
+        return [
+            {
+                "name": "train",
+                "dataset_paths": [raw_data_enclosing_path / "train"],
+                "do_shuffle": True,
+            },
+            {
+                "name": "valid",
+                "dataset_paths": [raw_data_enclosing_path / "validation"],
+                "do_shuffle": True,
+            },
+            {
+                "name": "test",
+                "dataset_paths": [raw_data_enclosing_path / "test"],
+                "do_shuffle": False,
+            },
+        ]
+    elif raw_data_enclosing_path.parts[-1] == "adl-piano-midi":
+        splits_path = raw_data_enclosing_path / "splits"
+        if not (splits_path.exists() and splits_path.is_dir()):
+            splits_path.mkdir()
+            all_files = sorted(list(iter_files(raw_data_enclosing_path, file_extensions=(".mid", ".midi"))))
+            train, val, test = split_files(all_files, train_pct=0.8, val_pct=0.1, test_pct=0.1, seed=42)
+
+            train_path = splits_path / "train"
+            train_path.mkdir()
+            for p in train:
+                shutil.copy2(p, train_path)
+
+            val_path = splits_path / "val"
+            val_path.mkdir()
+            for p in val:
+                shutil.copy2(p, val_path)
+
+
+            test_path = splits_path / "test"
+            test_path.mkdir()
+            for p in test:
+                shutil.copy2(p, test_path)
+
+        return [
+            {
+                "name": "train",
+                "dataset_paths": [splits_path / "train"],
+                "do_shuffle": True,
+            },
+            {
+                "name": "valid",
+                "dataset_paths": [splits_path / "validation"],
+                "do_shuffle": True,
+            },
+            {
+                "name": "test",
+                "dataset_paths": [splits_path / "test"],
                 "do_shuffle": False,
             },
         ]
@@ -426,7 +537,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset_type",
         type=str,
         default="lakh",
-        choices=["lakh", "aria", "transcripts", "giga_midi"],
+        choices=["lakh", "aria", "transcripts", "giga_midi", "maestro3"],
         help=(
             "Which dataset to tokenize. These are expected to be in specific locations in the ./data/ folder"
         ),
@@ -482,6 +593,14 @@ if __name__ == "__main__":
             # can use the same config as local lakh
             "settings": settings_file_path,
             "raw_data_enclosing_path": DATASET_ROOT / "aria-midi-v1-pruned-ext",
+        },
+        "adl_piano": {
+            "settings": settings_file_path,
+            "raw_data_enclosing_path": DATASET_ROOT / "adl-piano-midi",
+        },
+        "maestro3": {
+            "settings": settings_file_path,
+            "raw_data_enclosing_path": DATASET_ROOT / "maestro-v3.0.0",
         },
         "giga_midi": {
             "settings": settings_file_path,

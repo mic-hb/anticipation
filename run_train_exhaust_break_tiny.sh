@@ -1,7 +1,26 @@
 #!/bin/bash
-
+#SBATCH -p thickstun --gres=gpu:nvidia_rtx_6000_ada_generation:1
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=128GB
+#SBATCH -t 120:00:00
+#SBATCH -J train_exhaust_break_tiny
+#SBATCH -e output/slurm_logs/%j/stderr.err
+#SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
-# ./run_train_for_testing_exhaust.sh
+# sbatch run_train_exhaust_break_tiny.sh
+
+# --- set up conda and activate it ---
+# assuming conda binary lives here
+CONDA_ACTIVATE_PATH="/share/apps/software/anaconda3/etc/profile.d/conda.sh"
+if source "$CONDA_ACTIVATE_PATH" 2>/dev/null; then
+  cd /home/mf867/anticipation/
+  conda activate ./env
+  echo "activated environment."
+else
+  echo "conda startup script not found."
+fi
 
 # 'cuda.h is missing'
 export CUDA_HOME=/usr/local/cuda-12.8
@@ -16,6 +35,9 @@ export TEMP=$TMPDIR
 export TMP=$TMPDIR
 mkdir -p "$TMPDIR"
 
+
+export USE_FA4=False
+#
 # ----
 NUM_GPUS=1
 
@@ -28,22 +50,21 @@ NUM_GPUS=1
 # dataset 2 is lakh: total 1,704,709
 # validation dataset is lakh validation set
 
-# 10240
+# transcripts
+# 0%
+# ~1%
+# 10%
 N=(
-    20480
-    40960
-    81920
-    163840
-    327680
+    655360
+    1310720
 )
 
-# started at 1280
+# lakh
 K=(
     2560
 )
 NUM_LAYERS=(
     2
-    4
 )
 # always train on transcripts for 1 epoch only
 DS_1_NUM_EPOCHS=1
@@ -51,8 +72,8 @@ DS_1_NUM_EPOCHS=1
 # train for this many epochs on Lakh / target clean dataset for the baseline
 BASELINE_DS_2_NUM_EPOCHS=1000
 STEPS_PER_VAL_REPORT=64
-BS=128
-ACCUM=4
+BS=32
+ACCUM=16
 
 for curr_layers in "${NUM_LAYERS[@]}"; do
     for curr_k in "${K[@]}"; do
@@ -68,7 +89,6 @@ for curr_layers in "${NUM_LAYERS[@]}"; do
                 continue
             fi
 
-                # Require exact divisibility so total steps match exactly
             if (( REMAINING_SEQUENCES % curr_k != 0 )); then
                 echo "Skipping: N=$N K=$K NUM_LAYERS=$NUM_LAYERS because DS_2_NUM_EPOCHS would not be an integer"
                 echo "  TOTAL_SEQUENCES=$TOTAL_SEQUENCES, DS1_SEQUENCES=$DS1_SEQUENCES, REMAINING_SEQUENCES=$REMAINING_SEQUENCES"
@@ -79,10 +99,10 @@ for curr_layers in "${NUM_LAYERS[@]}"; do
             echo "Running: N=$curr_n K=$curr_k NUM_LAYERS=$curr_layers DS_1_NUM_EPOCHS=$DS_1_NUM_EPOCHS DS_2_NUM_EPOCHS=$DS_2_NUM_EPOCHS"
 
             combo="${curr_layers}_${curr_n}_${curr_k}"
-            output_dir="output/checkpoints/exhaustion_testing_break/${combo}"
+            output_dir="output/slurm_logs/${SLURM_JOB_ID}/${combo}"
 
             # run training
-            PYTHONPATH=. python train/v2/training_exhaust.py \
+            CUDA_LAUNCH_BLOCKING=1 PYTHONPATH=. python train/v2/training_exhaust.py \
                 --dataset1_path data/tokenized_datasets/transcripts/7f1aadd4f9603af995abc3428289f7ec/train.npy \
                 --epochs_ds1 $DS_1_NUM_EPOCHS \
                 --n_ds1 $curr_n \
