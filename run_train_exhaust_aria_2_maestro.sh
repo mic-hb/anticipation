@@ -1,7 +1,26 @@
 #!/bin/bash
-
+#SBATCH -p genai-thickstun-highpri --gres=gpu:1
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=128GB
+#SBATCH -t 50:00:00
+#SBATCH -J train_exhaust_aria_2_maestro
+#SBATCH -e output/slurm_logs/%j/stderr.err
+#SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
-# ./run_train_for_testing_exhaust.sh
+# sbatch run_train_exhaust_aria_2_maestro.sh
+
+# --- set up conda and activate it ---
+# assuming conda binary lives here
+CONDA_ACTIVATE_PATH="/share/apps/software/anaconda3/etc/profile.d/conda.sh"
+if source "$CONDA_ACTIVATE_PATH" 2>/dev/null; then
+  cd /home/mf867/anticipation/
+  conda activate ./env
+  echo "activated environment."
+else
+  echo "conda startup script not found."
+fi
 
 # 'cuda.h is missing'
 export CUDA_HOME=/usr/local/cuda-12.8
@@ -23,14 +42,6 @@ export USE_FA4=False
 # in seconds, default is 90
 export WANDB_INIT_TIMEOUT=600
 
-# original global batch size is 512
-# set to, for 1 gpu:
-# batch_size 128
-# gradient accumulation steps 4
-
-# dataset 1 is transcripts: total 8,400,449
-# dataset 2 is lakh: total 1,704,709
-# validation dataset is lakh validation set
 SEQ_MILESTONES=(
   # 0 is baseline, train only on original dataset
   0
@@ -45,6 +56,7 @@ SEQ_MILESTONES=(
 )
 
 K=(
+    # for aria, this is everything
     16623
 )
 NUM_LAYERS=(
@@ -89,11 +101,11 @@ COMMON_ARGS=(
     --aspect_ratio $ASPECT_RATIO \
     --head_dim $HEAD_DIM \
     --pos_emb rope \
-    --wandb_project "final_exhaust_3_debugging" \
+    --wandb_project "amt_exhaust_aria_maestro" \
     --use_wandb
 )
 # no "/" suffix
-OUTPUT_DIR_PARENT=output/checkpoints/final_exhaust_2
+OUTPUT_DIR_PARENT="output/slurm_logs/${SLURM_JOB_ID}"
 
 for curr_layers in "${NUM_LAYERS[@]}"; do
     for curr_k in "${K[@]}"; do

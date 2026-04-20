@@ -19,6 +19,12 @@ from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
+import os
+import re
+import shutil
+from pathlib import Path
+
+from lightning.pytorch.callbacks import ModelCheckpoint
 import lightning as L
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, TQDMProgressBar, Callback
 from lightning.pytorch.strategies import DDPStrategy
@@ -189,25 +195,48 @@ class Phase1SequenceCheckpoint(L.Callback):
         )
         self._next_idx += 1
 
+
 class Phase2TopKCheckpoint(ModelCheckpoint):
+    _FILE_EXTENSION = ".ckpt"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def on_validation_end(self, trainer, pl_module):
-        super().on_validation_end(trainer, pl_module)
+    def _hf_dir_from_ckpt_path(self, filepath: str) -> str:
+        if filepath.endswith(self._FILE_EXTENSION):
+            filepath = filepath[: -len(self._FILE_EXTENSION)]
 
-    def _save_checkpoint(self, trainer, filepath):
+        return filepath
+
+    def _save_checkpoint(self, trainer, filepath: str) -> None:
         if trainer.global_rank != 0:
             return
 
-        # override to use HF format instead of .ckpt
-        step_dir = filepath.replace(".ckpt", "")
-        raw_model = trainer.lightning_module.model if hasattr(trainer.lightning_module, "model") else trainer.lightning_module
+        step_dir = self._hf_dir_from_ckpt_path(filepath)
+        os.makedirs(step_dir, exist_ok=True)
+
+        raw_model = (
+            trainer.lightning_module.model
+            if hasattr(trainer.lightning_module, "model")
+            else trainer.lightning_module
+        )
+
         raw_model.save_pretrained(
-            step_dir, safe_serialization=True, max_shard_size="2GB"
+            step_dir,
+            safe_serialization=True,
+            max_shard_size="2GB",
         )
         print(f"Saved Phase 2 checkpoint to: {step_dir}")
 
+    def _remove_checkpoint(self, trainer, filepath: str) -> None:
+        if trainer.global_rank != 0:
+            return
+
+        step_dir = self._hf_dir_from_ckpt_path(filepath)
+        path = Path(step_dir)
+        if path.exists():
+            shutil.rmtree(path)
+            print(f"Removed Phase 2 checkpoint: {step_dir}")
 
 class OverfitStopper(Callback):
     """
@@ -886,9 +915,11 @@ def do_training(args):
         num_layers = args.num_layers
         n = args.n_ds1
         k = args.k_ds2
-        run_name = f"{num_layers}_ds1-{n}_ds2-{k}"
+        run_name = f"run-{num_layers}_ds1-{n}_ds2-{k}"
+        _started_from = 0
         if resume_info.get("wandb_run_id", None):
-            run_name += " (phase 2)"
+            _started_from = resume_info.get("global_step", "?")
+            run_name += f" (phase 2 - {_started_from})"
 
         wandb_logger = WandbLogger(
             project=args.wandb_project,
@@ -897,6 +928,7 @@ def do_training(args):
             config={
                 **vars(args),
                 **{f"scaling_param__{x}": y for x, y in scaling_params.items()},
+                "started_from_global_step": _started_from,
             },
         )
         logger_dict["logger"] = wandb_logger
