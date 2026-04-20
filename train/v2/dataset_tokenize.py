@@ -366,6 +366,9 @@ def _write_book_keeping_info_and_get_dataset_enclosing_path(
     settings.save_to_disk(work_dir)
     return work_dir
 
+def unique_name(p: Path, src_root: Path) -> str:
+    rel = p.relative_to(src_root)
+    return "__".join(rel.parts)
 
 def split_files(files, train_pct=0.8, val_pct=0.1, test_pct=0.1, seed=None):
     if not (0 <= train_pct <= 1 and 0 <= val_pct <= 1 and 0 <= test_pct <= 1):
@@ -466,24 +469,40 @@ def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
         splits_path = raw_data_enclosing_path / "splits"
         if not (splits_path.exists() and splits_path.is_dir()):
             splits_path.mkdir()
-            all_files = sorted(list(iter_files(raw_data_enclosing_path, file_extensions=(".mid", ".midi"))))
-            train, val, test = split_files(all_files, train_pct=0.8, val_pct=0.1, test_pct=0.1, seed=42)
+            all_files = sorted(
+                list(iter_files(raw_data_enclosing_path, file_extensions=(".mid", ".midi")))
+            )
+            train, val, test = split_files(
+                all_files, train_pct=0.8, val_pct=0.1, test_pct=0.1, seed=42
+            )
+            assert len(train) + len(val) + len(test) == len(all_files)
 
+            # careful here, there are non-unique filenames, so we need to prefix
+            # the directory they came from to preserve it
             train_path = splits_path / "train"
             train_path.mkdir()
             for p in train:
-                shutil.copy2(p, train_path)
+                # copy2 will silently overwrite files of same name
+                shutil.copy2(p, train_path / unique_name(p, raw_data_enclosing_path))
 
             val_path = splits_path / "validation"
             val_path.mkdir()
             for p in val:
-                shutil.copy2(p, val_path)
-
+                # copy2 will silently overwrite files of same name
+                shutil.copy2(p, val_path / unique_name(p, raw_data_enclosing_path))
 
             test_path = splits_path / "test"
             test_path.mkdir()
             for p in test:
-                shutil.copy2(p, test_path)
+                # copy2 will silently overwrite files of same name
+                shutil.copy2(p, test_path / unique_name(p, raw_data_enclosing_path))
+
+            num_moved = (
+                len(list(iter_files(train_path, file_extensions=(".mid", ".midi"))))
+                + len(list(iter_files(val_path, file_extensions=(".mid", ".midi"))))
+                + len(list(iter_files(test_path, file_extensions=(".mid", ".midi"))))
+            )
+            assert num_moved == len(all_files), f"{num_moved}"
 
         return [
             {
