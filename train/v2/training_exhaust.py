@@ -1,3 +1,5 @@
+#from regex import A
+import json
 import os
 import time
 import argparse
@@ -21,8 +23,11 @@ import lightning as L
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, TQDMProgressBar, Callback
 from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.utilities.rank_zero import rank_zero_info
 
 from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
+
+import wandb
 
 from train.v2.dataset_utils import PreTokenizedDataset
 from train.v2.hf_gpt2_rewrite import (
@@ -82,26 +87,126 @@ class MaxStepProgressBar(TQDMProgressBar):
         self._persistent_bar.refresh()
 
 
-class HuggingFaceCheckpoint(ModelCheckpoint):
-    def __init__(self, config, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.config = config
+class Phase1SequenceCheckpoint(L.Callback):
+    def __init__(
+        self,
+        dirpath: str,
+        seq_milestones: list[int],
+        per_device_batch_size: int,
+        grad_accum: int,
+    ):
+        self.dirpath = dirpath
+        self.seq_milestones = sorted(seq_milestones)
+        self.per_device_batch_size = per_device_batch_size
+        self.grad_accum = grad_accum
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
-        super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
+        self._next_idx = 0
 
-        if (trainer.global_step % self._every_n_train_steps) != 0:
+    def _sequences_seen(self, trainer):
+        return (
+            trainer.global_step
+            * self.per_device_batch_size
+            * trainer.world_size
+            * self.grad_accum
+        )
+
+    def _get_wandb_run_id(self, trainer) -> str | None:
+        logger = trainer.logger
+
+        if logger is None:
+            return None
+
+        if hasattr(logger, "experiment"):
+            exp = logger.experiment
+            if exp is not None and hasattr(exp, "id"):
+                return exp.id
+
+        if hasattr(logger, "_logger_iterable"):
+            for sublogger in logger._logger_iterable:
+                if hasattr(sublogger, "experiment"):
+                    exp = sublogger.experiment
+                    if exp is not None and hasattr(exp, "id"):
+                        return exp.id
+
+        return None
+
+    def _write_resume_metadata(
+        self,
+        trainer,
+        pl_module,
+        step_dir: Path,
+        seq_target: int,
+        ckpt_path: Path,
+    ) -> None:
+        payload = {
+            "wandb_run_id": self._get_wandb_run_id(trainer),
+            "resume_ckpt": str(ckpt_path),
+            "global_step": trainer.global_step,
+            "seq_milestone": seq_target,
+            "sequences_seen_estimate": self._sequences_seen(trainer),
+            "phase": 1,
+            "total_optimizer_steps": getattr(pl_module, "total_optimizer_steps", None),
+            "steps_ds1": getattr(pl_module, "steps_ds1", None),
+        }
+        if payload["total_optimizer_steps"] is None:
+            raise ValueError("Must save the total optimizer steps. This field was null.")
+
+        with open(step_dir / "resume_info.json", "w") as f:
+            json.dump(payload, f, indent=4, sort_keys=True)
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if trainer.global_rank != 0:
             return
 
-        if trainer.global_step == 0:
-            # don't save if we just started
+        # only phase 1
+        if getattr(pl_module, "phase_2", False):
             return
 
-        step_dir = os.path.join(str(self.dirpath), f"step-{trainer.global_step}")
+        if self._next_idx >= len(self.seq_milestones):
+            return
+
+        seen = self._sequences_seen(trainer)
+        target = self.seq_milestones[self._next_idx]
+
+        if seen < target:
+            return
+
+        # stop when a specific number of sequences is reached
+        step_dir = Path(os.path.join(self.dirpath, f"phase1_seq-{target}"))
+
+        ckpt_path = step_dir / "trainer.ckpt"
+        trainer.save_checkpoint(ckpt_path, weights_only=False)
         raw_model = pl_module.model if hasattr(pl_module, "model") else pl_module
         raw_model.save_pretrained(
             step_dir, safe_serialization=True, max_shard_size="2GB"
         )
+        self._write_resume_metadata(
+            trainer=trainer,
+            pl_module=pl_module,
+            step_dir=Path(step_dir),
+            seq_target=target,
+            ckpt_path=ckpt_path,
+        )
+        self._next_idx += 1
+
+class Phase2TopKCheckpoint(ModelCheckpoint):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def on_validation_end(self, trainer, pl_module):
+        super().on_validation_end(trainer, pl_module)
+
+    def _save_checkpoint(self, trainer, filepath):
+        if trainer.global_rank != 0:
+            return
+
+        # override to use HF format instead of .ckpt
+        step_dir = filepath.replace(".ckpt", "")
+        raw_model = trainer.lightning_module.model if hasattr(trainer.lightning_module, "model") else trainer.lightning_module
+        raw_model.save_pretrained(
+            step_dir, safe_serialization=True, max_shard_size="2GB"
+        )
+        print(f"Saved Phase 2 checkpoint to: {step_dir}")
 
 
 class OverfitStopper(Callback):
@@ -165,8 +270,6 @@ class OverfitStopper(Callback):
         if self.ignore_sanity_checks and trainer.sanity_checking:
             return
 
-        assert isinstance(pl_module, TwoPhaseLMModule)
-
         metric = trainer.callback_metrics.get(self.monitor)
         if metric is None:
             raise RuntimeError(
@@ -200,18 +303,6 @@ class OverfitStopper(Callback):
             sync_dist=True,
         )
 
-        if not pl_module.phase_2:
-            # too early to check for overfit, stop
-            pl_module.log(
-                "overfit/bad_check_streak",
-                float(self.bad_check_streak),
-                on_step=False,
-                on_epoch=True,
-                sync_dist=True,
-            )
-            return
-
-        # we are in phase 2, now start counting checks
         self.num_checks += 1
         if (self.num_checks <= self.warmup_checks):
             pl_module.log(
@@ -347,20 +438,11 @@ def optimizer_steps_per_epoch(
     return math.ceil(num_batches_per_rank / grad_accum_steps)
 
 
-class TwoPhaseLMModule(L.LightningModule):
-    """
-    Epoch 0:    train on dataset 1
-    Epochs 1-4: train on dataset 2
-
-    Optimizer and scheduler state remain continuous because everything happens
-    inside one fit() call.
-    """
-
+class LMModule(L.LightningModule):
     def __init__(
         self,
         model: torch.nn.Module,
-        dataset1_path: Path,
-        dataset2_path: Path,
+        train_dataset_path: Path,
         val_dataset_path: Path,
         per_device_batch_size: int,
         val_batch_size: int,
@@ -368,119 +450,77 @@ class TwoPhaseLMModule(L.LightningModule):
         learning_rate: float,
         weight_decay: float,
         total_optimizer_steps: int,
-        steps_ds1: int,
         pin_memory: bool = True,
         sampler_drop_last: bool = True,
         loader_drop_last: bool = True,
-        subset_size_1: int | None = None,
-        subset_size_2: int | None = None,
-        subset_seed_1: int | None = None,
-        subset_seed_2: int | None = None,
+        subset_size_train: int | None = None,
+        subset_size_val: int | None = None,
+        subset_seed_train: int | None = None,
+        subset_seed_val: int | None = None,
         warmup_steps: int = 0,
         do_gradient_checkpointing: bool = False,
+        resume_training_state_path: str | None = None,
+        inherited_global_step: int = 0,
     ) -> None:
         super().__init__()
+
         self.model = model
         self.model.config.bos_token_id = self.model.config.eos_token_id = 0
 
-        if model.config.do_torch_compile:
-            self.model = torch.compile(
-                self.model, dynamic=False, fullgraph=True
-            )
+        if getattr(model.config, "do_torch_compile", False):
+            self.model = torch.compile(self.model, dynamic=False, fullgraph=True)
 
         self.do_gradient_checkpointing = do_gradient_checkpointing
-
         if self.do_gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        self.dataset1_path = Path(dataset1_path)
-        self.dataset2_path = Path(dataset2_path)
+        self.train_dataset_path = Path(train_dataset_path)
         self.val_dataset_path = Path(val_dataset_path)
-        self.val_batch_size = val_batch_size
 
         self.per_device_batch_size = per_device_batch_size
+        self.val_batch_size = val_batch_size
         self.num_workers = num_workers
         self.learning_rate = learning_rate
-        self.warmup_steps = warmup_steps
         self.weight_decay = weight_decay
         self.total_optimizer_steps = total_optimizer_steps
+        self.warmup_steps = warmup_steps
         self.pin_memory = pin_memory
         self.sampler_drop_last = sampler_drop_last
         self.loader_drop_last = loader_drop_last
 
-        # use this to determined when the cut-off point is
-        self.steps_ds1 = steps_ds1
-        self._switch_logged = False
-        self.phase_2 = False
+        self.subset_size_train = subset_size_train
+        self.subset_size_val = subset_size_val
+        self.subset_seed_train = subset_seed_train
+        self.subset_seed_val = subset_seed_val
 
-        self.subset_size_1 = subset_size_1
-        self.subset_size_2 = subset_size_2
-        self.subset_seed_1 = subset_seed_1
-        self.subset_seed_2 = subset_seed_2
-
-        self.dataset1: Dataset | None = None
-        self.dataset2: Dataset | None = None
+        self.resume_training_state_path = resume_training_state_path
+        self._loaded_training_state = False
+        self.inherited_global_step = inherited_global_step
+        self.train_dataset: Dataset | None = None
 
         self.save_hyperparameters(ignore=["model"])
 
     def setup(self, stage: str | None = None) -> None:
-        if stage not in (None, "fit"):
+        if stage not in (None, "fit", "validate"):
             return
 
-        if self.dataset1 is None:
-            base1 = PreTokenizedDataset(self.dataset1_path)
-            self.dataset1 = maybe_make_fixed_random_subset(
-                base1,
-                subset_size=self.subset_size_1,
-                seed=self.subset_seed_1,
+        if self.train_dataset is None:
+            base = PreTokenizedDataset(self.train_dataset_path)
+            self.train_dataset = maybe_make_fixed_random_subset(
+                base,
+                subset_size=self.subset_size_train,
+                seed=self.subset_seed_train,
             )
-
-        if self.dataset2 is None:
-            base2 = PreTokenizedDataset(self.dataset2_path)
-            self.dataset2 = maybe_make_fixed_random_subset(
-                base2,
-                subset_size=self.subset_size_2,
-                seed=self.subset_seed_2,
-            )
-
-    def _current_train_dataset(self) -> Dataset:
-        assert self.dataset1 is not None
-        assert self.dataset2 is not None
-        if self.steps_ds1 == 0:
-            # can also say not to use dataset 1 at all
-            return self.dataset2
-        else:
-            return self.dataset1 if self.current_epoch == 0 else self.dataset2
-
-    def val_dataloader(self):
-        dataset = PreTokenizedDataset(self.val_dataset_path)
-        if self.subset_size_2 is not None:
-            subset = maybe_make_fixed_random_subset(
-                dataset,
-                # proportional to k
-                subset_size=max(self.subset_size_2 // 10, 100),
-                seed=self.subset_seed_2,
-            )
-        else:
-            subset = dataset
-
-        return DataLoader(
-            subset,
-            batch_size=self.val_batch_size,
-            num_workers=0,
-            shuffle=False,
-            pin_memory=True
-        )
 
     def train_dataloader(self) -> DataLoader:
-        dataset = self._current_train_dataset()
+        assert self.train_dataset is not None
 
         sampler = None
         shuffle = True
 
         if self.trainer is not None and self.trainer.world_size > 1:
             sampler = DistributedSampler(
-                dataset,
+                self.train_dataset,
                 num_replicas=self.trainer.world_size,
                 rank=self.global_rank,
                 shuffle=True,
@@ -489,7 +529,7 @@ class TwoPhaseLMModule(L.LightningModule):
             shuffle = False
 
         return DataLoader(
-            dataset,
+            self.train_dataset,
             batch_size=self.per_device_batch_size,
             shuffle=shuffle,
             sampler=sampler,
@@ -497,6 +537,22 @@ class TwoPhaseLMModule(L.LightningModule):
             pin_memory=self.pin_memory,
             persistent_workers=self.num_workers > 0,
             drop_last=self.loader_drop_last,
+        )
+
+    def val_dataloader(self) -> DataLoader:
+        dataset = PreTokenizedDataset(self.val_dataset_path)
+        subset = maybe_make_fixed_random_subset(
+            dataset,
+            subset_size=self.subset_size_val,
+            seed=self.subset_seed_val,
+        ) if self.subset_size_val is not None else dataset
+
+        return DataLoader(
+            subset,
+            batch_size=self.val_batch_size,
+            num_workers=0,
+            shuffle=False,
+            pin_memory=True,
         )
 
     def forward(self, **inputs):
@@ -507,30 +563,34 @@ class TwoPhaseLMModule(L.LightningModule):
         labels = batch.pop("labels")
         outputs = self(**batch)
 
-        logits = outputs.logits.float()  # upcast logits and compute loss in fp32
+        logits = outputs.logits.float()
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+
         self.log("train_loss", loss, prog_bar=True, logger=True)
-
-        # phase is 0 if pretraining on n, 1 if midtraining on k
-        if self.steps_ds1 == 0:
-            # no steps in the first dataset, we start on phase 2
-            self.log("train/phase", 2.0, on_step=True, on_epoch=False, sync_dist=True)
-        else:
-            # phase 1 = noisy pretrain
-            # phase 2 = target midtrain
-            self.log("train/phase", 1.0 if self.current_epoch == 0 else 2.0, on_step=True, on_epoch=False, sync_dist=True)
-
-        if not self._switch_logged and self.global_step >= self.steps_ds1:
-            self._switch_logged = True
-            self.phase_2 = True
-
+        self.log("train/phase", 1.0 if self.inherited_global_step == 0 else 2.0,
+                 on_step=True,
+                 on_epoch=False,
+        )
         return loss
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        accum = self.trainer.accumulate_grad_batches
+        is_step_boundary = ((batch_idx + 1) % accum == 0)
+        if is_step_boundary:
+            self.log(
+                "train/effective_global_step",
+                float(self.inherited_global_step + self.global_step),
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+                sync_dist=True,
+            )
 
     def validation_step(self, batch, batch_idx):
         labels = batch.pop("labels")
         outputs = self(**batch)
 
-        logits = outputs.logits.float()  # upcast logits and compute loss in fp32
+        logits = outputs.logits.float()
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         return loss
@@ -539,134 +599,168 @@ class TwoPhaseLMModule(L.LightningModule):
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
-                "params": [p for n, p in self.model.named_parameters()
-                            if not any(nd in n for nd in no_decay)],
+                "params": [
+                    p for n, p in self.model.named_parameters()
+                    if not any(nd in n for nd in no_decay)
+                ],
                 "weight_decay": self.hparams.weight_decay,
             },
             {
-                "params": [p for n, p in self.model.named_parameters()
-                            if any(nd in n for nd in no_decay)],
+                "params": [
+                    p for n, p in self.model.named_parameters()
+                    if any(nd in n for nd in no_decay)
+                ],
                 "weight_decay": 0.0,
             },
         ]
+
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters,
             lr=self.hparams.learning_rate,
-            betas=(0.9, 0.95)
+            betas=(0.9, 0.95),
         )
 
-        train_dataloader = self.train_dataloader()
-        if hasattr(train_dataloader, "dataset"):
-            dataset_size = len(train_dataloader.dataset)
-            pct_start = min(0.3, self.hparams.warmup_steps / self.total_optimizer_steps)
-            scheduler = OneCycleLR(
-                optimizer,
-                max_lr=self.hparams.learning_rate,
-                total_steps=self.total_optimizer_steps,
-                pct_start=pct_start,
-                div_factor=100.0,
-                final_div_factor=0.1,
-                anneal_strategy='cos',
-                three_phase=False,
-                cycle_momentum=False
+        pct_start = min(0.3, self.hparams.warmup_steps / self.total_optimizer_steps)
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=self.hparams.learning_rate,
+            total_steps=self.total_optimizer_steps,
+            pct_start=pct_start,
+            div_factor=100.0,
+            final_div_factor=0.1,
+            anneal_strategy="cos",
+            three_phase=False,
+            cycle_momentum=False,
+        )
+
+        scheduler_config = {
+            "scheduler": scheduler,
+            "interval": "step",
+            "frequency": 1,
+        }
+
+        return [optimizer], [scheduler_config]
+
+    def on_train_start(self) -> None:
+        # need to restore optimizer state and model
+        if not self.resume_training_state_path or self._loaded_training_state:
+            return
+
+        ckpt_path = Path(self.resume_training_state_path) / "trainer.ckpt"
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+        # 1) Restore model weights from the Lightning checkpoint payload.
+        ckpt_state_dict = ckpt["state_dict"]
+        missing, unexpected = self.load_state_dict(ckpt_state_dict, strict=False)
+
+        if missing:
+            raise RuntimeError(
+                f"Missing keys when loading model state from {ckpt_path}: {missing}"
+            )
+        if unexpected:
+            raise RuntimeError(
+                f"Unexpected keys when loading model state from {ckpt_path}: {unexpected}"
             )
 
-            scheduler_config = {
-                "scheduler": scheduler,
-                "interval": "step",
-                "frequency": 1
-            }
+        # 2) Restore optimizer state very carefully.
+        ckpt_optimizer_states = ckpt.get("optimizer_states", [])
+        trainer_optimizers = self.trainer.optimizers
 
-            return [optimizer], [scheduler_config]
+        if len(ckpt_optimizer_states) != len(trainer_optimizers):
+            raise RuntimeError(
+                "Optimizer count mismatch while restoring training state: "
+                f"checkpoint has {len(ckpt_optimizer_states)}, "
+                f"current trainer has {len(trainer_optimizers)}"
+            )
 
-        return optimizer
+        for idx, (optimizer, optimizer_state) in enumerate(
+            zip(trainer_optimizers, ckpt_optimizer_states)
+        ):
+            try:
+                optimizer.load_state_dict(optimizer_state)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed loading optimizer state for optimizer index {idx}"
+                ) from e
 
-    def save_model_checkpoint(
-        self, step_dir
-    ) -> None:
-        assert isinstance(self.model, GPT2LMHeadModel)
+        # 3) Restore scheduler state carefully.
+        ckpt_scheduler_states = ckpt.get("lr_schedulers", [])
+        trainer_scheduler_configs = self.trainer.lr_scheduler_configs
+
+        if len(ckpt_scheduler_states) != len(trainer_scheduler_configs):
+            raise RuntimeError(
+                "Scheduler count mismatch while restoring training state: "
+                f"checkpoint has {len(ckpt_scheduler_states)}, "
+                f"current trainer has {len(trainer_scheduler_configs)}"
+            )
+
+        for idx, (scheduler_state, scheduler_config) in enumerate(
+            zip(ckpt_scheduler_states, trainer_scheduler_configs)
+        ):
+            try:
+                scheduler_config.scheduler.load_state_dict(scheduler_state)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed loading scheduler state for scheduler index {idx}"
+                ) from e
+        self._loaded_training_state = True
+        rank_zero_info(f"Loaded branch training state from {ckpt_path}")
+
+    def save_model_checkpoint(self, step_dir) -> None:
+        assert isinstance(self.model, GPT2LMHeadModelLite)
         self.model.save_pretrained(
-            step_dir, safe_serialization=True, max_shard_size="2GB",
+            step_dir,
+            safe_serialization=True,
+            max_shard_size="2GB",
         )
 
-
-def build_two_phase_module(
+def build_lm_module(
     *,
     model: torch.nn.Module,
-    dataset1_path: Path,
-    dataset2_path: Path,
+    train_dataset_path: Path,
     val_dataset_path: Path,
     per_device_batch_size: int,
     val_batch_size: int,
-    grad_accum_steps: int,
-    world_size: int,
     num_workers: int = 0,
     learning_rate: float = 3e-4,
     weight_decay: float = 0.1,
     sampler_drop_last: bool = True,
     loader_drop_last: bool = True,
-    subset_size_1: int | None = None,
-    subset_size_2: int | None = None,
-    subset_seed_1: int | None = None,
-    subset_seed_2: int | None = None,
+    subset_size_train: int | None = None,
+    subset_size_val: int | None = None,
+    subset_seed_train: int | None = None,
+    subset_seed_val: int | None = None,
     warmup_steps: int = 0,
-    num_epochs_dataset_1: int = 1,
-    num_epochs_dataset_2: int = 4,
+    total_optimizer_steps: int = 0,
     do_gradient_checkpointing: bool = False,
-) -> TwoPhaseLMModule:
-    base1 = PreTokenizedDataset(dataset1_path)
-    base2 = PreTokenizedDataset(dataset2_path)
+    resume_training_state_path: str | None = None,
+    inherited_global_step: int = 0,
+) -> LMModule:
+    base = PreTokenizedDataset(train_dataset_path)
+    print("Total seq in train dataset:", len(base))
 
-    print("Total seq in ds1: ", len(base1))
-    print("Total seq in ds2: ", len(base2))
-
-    effective_num_sequences_1 = subset_size_1 if subset_size_1 is not None else len(base1)
-    effective_num_sequences_2 = subset_size_2 if subset_size_2 is not None else len(base2)
-
-    if effective_num_sequences_1 > len(base1):
-        raise ValueError(
-            f"subset_size_1={effective_num_sequences_1} exceeds dataset1 size {len(base1)}"
-        )
-    if effective_num_sequences_2 > len(base2):
-        raise ValueError(
-            f"subset_size_2={effective_num_sequences_2} exceeds dataset2 size {len(base2)}"
-        )
-
-    if subset_size_1 is not None and subset_seed_1 is None:
-        raise ValueError("subset_seed_1 must be provided when subset_size_1 is not None")
-    if subset_size_2 is not None and subset_seed_2 is None:
-        raise ValueError("subset_seed_2 must be provided when subset_size_2 is not None")
-
-    steps_ds1 = num_epochs_dataset_1 * optimizer_steps_per_epoch(
-        num_sequences=effective_num_sequences_1,
-        world_size=world_size,
-        per_device_batch_size=per_device_batch_size,
-        grad_accum_steps=grad_accum_steps,
-        sampler_drop_last=sampler_drop_last,
-        loader_drop_last=loader_drop_last,
+    effective_num_sequences = (
+        subset_size_train if subset_size_train is not None else len(base)
     )
 
-    steps_ds2 = num_epochs_dataset_2 * optimizer_steps_per_epoch(
-        num_sequences=effective_num_sequences_2,
-        world_size=world_size,
-        per_device_batch_size=per_device_batch_size,
-        grad_accum_steps=grad_accum_steps,
-        sampler_drop_last=sampler_drop_last,
-        loader_drop_last=loader_drop_last,
-    )
+    if effective_num_sequences > len(base):
+        raise ValueError(
+            f"subset_size_train={effective_num_sequences} exceeds dataset size {len(base)}"
+        )
 
-    total_optimizer_steps = steps_ds1 + steps_ds2
+    if subset_size_train is not None and subset_seed_train is None:
+        raise ValueError(
+            "subset_seed_train must be provided when subset_size_train is not None"
+        )
 
     if total_optimizer_steps <= 0:
         raise ValueError(
-            "Computed total_optimizer_steps <= 0. "
-            "Check subset sizes, world size, batch size, grad accumulation, and drop_last."
+            f"total_optimizer_steps must be > 0, got {total_optimizer_steps}"
         )
 
-    return TwoPhaseLMModule(
+    return LMModule(
         model=model,
-        dataset1_path=dataset1_path,
-        dataset2_path=dataset2_path,
+        train_dataset_path=train_dataset_path,
         val_dataset_path=val_dataset_path,
         val_batch_size=val_batch_size,
         per_device_batch_size=per_device_batch_size,
@@ -674,16 +768,17 @@ def build_two_phase_module(
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         total_optimizer_steps=total_optimizer_steps,
-        steps_ds1=steps_ds1,
         pin_memory=True,
         sampler_drop_last=sampler_drop_last,
         loader_drop_last=loader_drop_last,
-        subset_size_1=subset_size_1,
-        subset_size_2=subset_size_2,
-        subset_seed_1=subset_seed_1,
-        subset_seed_2=subset_seed_2,
+        subset_size_train=subset_size_train,
+        subset_size_val=subset_size_val,
+        subset_seed_train=subset_seed_train,
+        subset_seed_val=subset_seed_val,
         warmup_steps=warmup_steps,
-        do_gradient_checkpointing=do_gradient_checkpointing
+        do_gradient_checkpointing=do_gradient_checkpointing,
+        resume_training_state_path=resume_training_state_path,
+        inherited_global_step=inherited_global_step,
     )
 
 def get_scaling_dimensions_for_model(depth: int, aspect_ratio: int, head_dim: int):
@@ -705,7 +800,7 @@ def do_training(args):
     num_devices = args.gpus_per_node
     batch_size = args.train_batch_size
     assert batch_size % num_devices == 0
-    per_device_bach_size = batch_size // num_devices
+    per_device_batch_size = batch_size // num_devices
     world_size = num_devices * args.num_nodes
     grad_accum_steps = args.gradient_accumulation_steps
     num_nodes = args.num_nodes
@@ -720,146 +815,63 @@ def do_training(args):
     del ds_2
     vocab_size = 55028
 
-    # model_config = GPT2Config(
-    #     vocab_size=vocab_size,
-    #     n_positions=seq_len,
-    #     n_embd=args.hidden_dim,
-    #     n_layer=args.num_layers,
-    #     n_head=args.num_heads,
-    #     embd_pdrop=args.embed_pdrop,
-    #     resid_pdrop=args.resid_pdrop,
-    #     activation_function="gelu_new",
-    #     layer_norm_epsilon=1e-5,
-    #     scale_attn_weights=True,
-    #     scale_attn_by_inverse_layer_idx=True,
-    #     use_cache=False,
-    # )
-    # model = GPT2LMHeadModel(model_config)
-    #
-    model_dimensions = get_scaling_dimensions_for_model(depth=args.num_layers, aspect_ratio=args.aspect_ratio, head_dim=args.head_dim)
-    model_config = GPT2ConfigLite(
-        vocab_size=vocab_size,
-        n_positions=seq_len,
-        n_embd=model_dimensions["n_embed"],
-        #n_inner=args.intermediate_dim,
-        n_layer=model_dimensions["num_transformer_blocks"],
-        n_head=model_dimensions["num_heads"],
-        embd_pdrop=args.embed_pdrop,
-        resid_pdrop=args.resid_pdrop,
-        # as of right now doesn't do anything, we always use gelu
-        activation_function="gelu_new",
-        layer_norm_epsilon=1e-5,
-        pos_emb=args.pos_emb,
-        window_pattern="L",
-        scale_attn_weights=True,
-        scale_attn_by_inverse_layer_idx=True,
-        use_cache=False,
-        embedding_and_lm_head_weight_tying=True,
-        use_value_embeds=False,
-        do_torch_compile=args.do_torch_compile,
-        mlp_style="GPT2",
-    )
-    model = GPT2LMHeadModelLite(model_config)
-    scaling_params = get_num_scaling_params(model)
-
-    checkpoint_callback = HuggingFaceCheckpoint(
-        config=model.config,
-        dirpath=args.output_dir,
-        filename="{step}",
-        save_top_k=0,
-        monitor=None,
-        save_last=False,
-        every_n_train_steps=args.steps_per_checkpoint
-    )
-    checkpoint_callback.CHECKPOINT_EQUALS_CHAR = "-"
-
-    max_epochs = args.epochs_ds1 + args.epochs_ds2
-    lit_model = build_two_phase_module(
-        model=model,
-        dataset1_path=Path(args.dataset1_path),
-        dataset2_path=Path(args.dataset2_path),
-        val_dataset_path=Path(args.val_dataset_path),
-        val_batch_size=args.val_batch_size,
-        per_device_batch_size=per_device_bach_size,
-        grad_accum_steps=grad_accum_steps,
-        world_size=world_size,
-        num_workers=0,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        sampler_drop_last=True,
-        loader_drop_last=True,
-        # number of subsets from each dataset, sequence wise
-        subset_size_1=args.n_ds1,
-        subset_size_2=args.k_ds2,
-        subset_seed_1=args.dataset1_subset_seed,
-        subset_seed_2=args.dataset2_subset_seed,
-        warmup_steps=args.warmup_steps,
-        num_epochs_dataset_1=args.epochs_ds1,
-        num_epochs_dataset_2=args.epochs_ds2,
-    )
-
-    logger_dict = {}
-    if args.use_wandb:
-        if args.wandb_tag:
-            tags = [str(args.wandb_tag).strip()]
-        else:
-            tags = []
-
-        if tags == ["scaling"]:
-            run_name = f"scaling-run-{int(time.time())}"
-        else:
-            num_layers = args.num_layers
-            k = args.k_ds2
-            n = args.n_ds1
-            #time_int = int(time.time())
-            run_name = f"run-{num_layers}-{k}-{n}"
-
-        if args.wandb_resume_from_run_id:
-            resume_from_run_id: str = args.wandb_resume_from_run_id
-            resume_from_step: int = args.wandb_resume_from_step
-            assert resume_from_step > 0, "Resume from step is unfilled or 0 - start a new run or provide a resume step."
-            resume_from = f"{resume_from_run_id}?_step={resume_from_step}"
-            import wandb
-            _run = wandb.init(
-                project=args.wandb_project,
-                name=run_name,
-                # UPDATE: both fork_from and resume_from are in private preview
-                # email: support@wandb.com
-                # to enable them on your account
-                fork_from=resume_from,
-                # this is in private preview, forking is the closest alternative for now
-                # it starts a new run from the step you specify
-                #resume_from=resume_from,
-            )
-            wandb_logger = WandbLogger(
-                experiment=_run,
-                save_dir=args.output_dir,
-            )
-        else:
-            wandb_logger = WandbLogger(
-                project=args.wandb_project,
-                name=run_name,
-                save_dir=args.output_dir,
-                config={
-                    **vars(args),
-                    **{f"scaling_param__{x}": y for x, y in scaling_params.items()},
-                },
-                tags=tags,
-            )
-        logger_dict["logger"] = wandb_logger
-
-    #print("Steps in ds1: ", lit_model.steps_ds1)
-    trainer = L.Trainer(
-        accelerator="gpu",
-        devices=num_devices,
-        num_nodes=num_nodes,
-        strategy=DDPStrategy(find_unused_parameters=False, static_graph=False),
-        max_epochs=max_epochs,
-        reload_dataloaders_every_n_epochs=1,
-        callbacks=[
-            checkpoint_callback,
-            LearningRateMonitor(logging_interval="step"),
-            MaxStepProgressBar(),
+    if args.start_phase_2_from is None:
+        # PHASE 1
+        model_dimensions = get_scaling_dimensions_for_model(depth=args.num_layers, aspect_ratio=args.aspect_ratio, head_dim=args.head_dim)
+        model_config = GPT2ConfigLite(
+            vocab_size=vocab_size,
+            n_positions=seq_len,
+            n_embd=model_dimensions["n_embed"],
+            n_layer=model_dimensions["num_transformer_blocks"],
+            n_head=model_dimensions["num_heads"],
+            embd_pdrop=args.embed_pdrop,
+            resid_pdrop=args.resid_pdrop,
+            # as of right now doesn't do anything, we always use gelu
+            activation_function="gelu_new",
+            layer_norm_epsilon=1e-5,
+            pos_emb=args.pos_emb,
+            window_pattern="L",
+            scale_attn_weights=True,
+            scale_attn_by_inverse_layer_idx=True,
+            use_cache=False,
+            embedding_and_lm_head_weight_tying=True,
+            use_value_embeds=False,
+            do_torch_compile=args.do_torch_compile,
+            mlp_style="GPT2",
+        )
+        model = GPT2LMHeadModelLite(model_config)
+        scaling_params = get_num_scaling_params(model)
+        resume_info = {}
+        checkpointing_callbacks = [
+            Phase1SequenceCheckpoint(
+                dirpath=args.output_dir,
+                seq_milestones=args.seq_milestones,
+                per_device_batch_size=per_device_batch_size,
+                grad_accum=args.gradient_accumulation_steps,
+            ),
+        ]
+    else:
+        # PHASE 2
+        model_config = GPT2ConfigLite.from_json(
+            str(Path(args.start_phase_2_from) / "config.json")
+        )
+        model = GPT2LMHeadModelLite.from_pretrained(
+            args.start_phase_2_from, config=model_config
+        )
+        scaling_params = get_num_scaling_params(model)
+        trainer_ckpt_path = Path(args.start_phase_2_from) / "trainer.ckpt"
+        resume_info_path = Path(args.start_phase_2_from) / "resume_info.json"
+        resume_info = json.loads(resume_info_path.read_text())
+        print("loaded a phase 1 checkpoint to continue in phase 2.", trainer_ckpt_path)
+        checkpointing_callbacks = [
+            Phase2TopKCheckpoint(
+                dirpath=args.output_dir,
+                filename="phase2-{step}-{val_loss:.4f}",
+                monitor="val_loss",
+                mode="min",
+                save_top_k=args.save_top_k_checkpoints_phase_2,
+                save_last=False,
+            ),
             OverfitStopper(
                 monitor="val_loss",
                 warmup_checks=args.overfit_warmup_checks,
@@ -867,27 +879,139 @@ def do_training(args):
                 overfit_margin=args.overfit_margin,
                 patience_checks=args.overfit_patience_checks,
             ),
-        ],
-        enable_progress_bar=True,
-        precision="bf16-mixed" if args.bf16 else 32,
-        gradient_clip_val=args.max_grad_norm,
-        accumulate_grad_batches=args.gradient_accumulation_steps,
-        log_every_n_steps=10,
-        val_check_interval=args.steps_per_eval,
-        check_val_every_n_epoch=None,
-        max_steps=lit_model.total_optimizer_steps,
-        **logger_dict
-    )
-    trainer.fit(lit_model)
-    trainer.validate(lit_model)
+        ]
 
-    # save the model only, not trainer state
-    #lit_model: TwoPhaseLMModule
-    #lit_model.save_model_checkpoint(Path(args.output_dir))
-    #print(f"saved checkpoint to: {Path(args.output_dir)}")
+    logger_dict = {}
+    if args.use_wandb:
+        num_layers = args.num_layers
+        n = args.n_ds1
+        k = args.k_ds2
+        run_name = f"{num_layers}_ds1-{n}_ds2-{k}"
+        if resume_info.get("wandb_run_id", None):
+            run_name += " (phase 2)"
 
-    # saves trainer state and model weights
-    #trainer.save_checkpoint((Path(args.output_dir) / "final.ckpt"))
+        wandb_logger = WandbLogger(
+            project=args.wandb_project,
+            name=run_name,
+            save_dir=args.output_dir,
+            config={
+                **vars(args),
+                **{f"scaling_param__{x}": y for x, y in scaling_params.items()},
+            },
+        )
+        logger_dict["logger"] = wandb_logger
+
+    log_every_n_steps = 10
+    subset_size_2 = args.k_ds2
+    subset_seed_2 = args.dataset2_subset_seed
+    if args.start_phase_2_from is None:
+        # --- PHASE 1 ---
+        total_schedule_steps = optimizer_steps_per_epoch(
+            num_sequences=args.n_ds1,
+            world_size=world_size,
+            per_device_batch_size=per_device_batch_size,
+            grad_accum_steps=grad_accum_steps,
+            sampler_drop_last=True,
+            loader_drop_last=True,
+        )
+        lit_model = build_lm_module(
+            model=model,
+            train_dataset_path=Path(args.dataset1_path),
+            val_dataset_path=Path(args.val_dataset_path),
+            per_device_batch_size=per_device_batch_size,
+            val_batch_size=args.val_batch_size,
+            num_workers=0,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            sampler_drop_last=True,
+            loader_drop_last=True,
+            subset_size_train=args.n_ds1,
+            subset_size_val=max(subset_size_2 // 10, 100) if subset_size_2 is not None else None,
+            subset_seed_train=args.dataset1_subset_seed,
+            subset_seed_val=subset_seed_2,
+            warmup_steps=args.warmup_steps,
+            total_optimizer_steps=total_schedule_steps,
+            do_gradient_checkpointing=args.do_gradient_checkpointing,
+            resume_training_state_path=None,
+            inherited_global_step=0,
+        )
+        trainer = L.Trainer(
+            accelerator="gpu",
+            devices=num_devices,
+            num_nodes=num_nodes,
+            strategy=DDPStrategy(find_unused_parameters=False, static_graph=False),
+            max_steps=total_schedule_steps,
+            reload_dataloaders_every_n_epochs=1,
+            callbacks=[
+                *checkpointing_callbacks,
+                LearningRateMonitor(logging_interval="step"),
+                MaxStepProgressBar(),
+            ],
+            enable_progress_bar=True,
+            precision="bf16-mixed" if args.bf16 else 32,
+            gradient_clip_val=args.max_grad_norm,
+            accumulate_grad_batches=args.gradient_accumulation_steps,
+            log_every_n_steps=log_every_n_steps,
+            val_check_interval=args.steps_per_eval,
+            check_val_every_n_epoch=None,
+            **logger_dict,
+        )
+        trainer.fit(lit_model)
+        trainer.validate(lit_model)
+    else:
+        # --- PHASE 2 ---
+        resume_training_state_path = args.start_phase_2_from
+        inherited_global_step = resume_info["global_step"]
+        total_steps_budget = resume_info["total_optimizer_steps"]
+        steps_remaining = total_steps_budget - inherited_global_step
+        lit_model = build_lm_module(
+            model=model,
+            train_dataset_path=Path(args.dataset2_path),
+            val_dataset_path=Path(args.val_dataset_path),
+            per_device_batch_size=per_device_batch_size,
+            val_batch_size=args.val_batch_size,
+            num_workers=0,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            sampler_drop_last=True,
+            loader_drop_last=True,
+            subset_size_train=args.k_ds2,
+            subset_seed_train=args.dataset2_subset_seed,
+            subset_size_val=max(subset_size_2 // 10, 100) if subset_size_2 is not None else None,
+            subset_seed_val=subset_seed_2,
+            warmup_steps=args.warmup_steps,
+            total_optimizer_steps=total_steps_budget,
+            do_gradient_checkpointing=args.do_gradient_checkpointing,
+            resume_training_state_path=resume_training_state_path,
+            inherited_global_step=inherited_global_step,
+        )
+        trainer = L.Trainer(
+            accelerator="gpu",
+            devices=num_devices,
+            num_nodes=num_nodes,
+            strategy=DDPStrategy(find_unused_parameters=False, static_graph=False),
+            max_steps=steps_remaining,
+            reload_dataloaders_every_n_epochs=1,
+            callbacks=[
+                *checkpointing_callbacks,
+                LearningRateMonitor(logging_interval="step"),
+                MaxStepProgressBar(),
+            ],
+            enable_progress_bar=True,
+            precision="bf16-mixed" if args.bf16 else 32,
+            gradient_clip_val=args.max_grad_norm,
+            accumulate_grad_batches=args.gradient_accumulation_steps,
+            log_every_n_steps=log_every_n_steps,
+            val_check_interval=args.steps_per_eval,
+            check_val_every_n_epoch=None,
+            # skip it
+            num_sanity_val_steps=0,
+            **logger_dict,
+        )
+        trainer.fit(lit_model)
+        trainer.validate(lit_model)
+
+    return
 
 
 if __name__ == "__main__":
@@ -899,10 +1023,15 @@ if __name__ == "__main__":
     parser.add_argument("--val_dataset_path", type=str, help="Lakh validation numpy file")
     parser.add_argument("--n_ds1", type=int, default=10, help="Number of sequences from transcripts")
     parser.add_argument("--k_ds2", type=int, default=10, help="Number of sequences from Lakh train")
-    parser.add_argument("--epochs_ds1", type=int, default=1, help="Number of epochs for dataset 1")
-    parser.add_argument("--epochs_ds2", type=int, default=4, help="Number of epochs for dataset 2")
     parser.add_argument("--dataset1_subset_seed", type=int, default=1234, help="Dataset 1 subset seed")
     parser.add_argument("--dataset2_subset_seed", type=int, default=5678, help="Dataset 1 subset seed")
+    parser.add_argument(
+        "--seq-milestones",
+        type=int,
+        nargs="+",
+        default=[],
+        help="Sequence-count milestones at which to save phase-1 branch checkpoints.",
+    )
 
     # Model
     parser.add_argument("--head_dim", type=int, default=64, help="The number of dimensions per attention head")
@@ -962,6 +1091,8 @@ if __name__ == "__main__":
     parser.add_argument("--steps_per_eval", type=int, default=1000, help="Number of steps between validation evals")
     parser.add_argument("--steps_per_checkpoint", type=int, default=1000,
                         help="Number of steps between checkpoints")
+    parser.add_argument("--start_phase_2_from", type=str, default=None,
+                        help="Start training on dataset 2 from this checkpoint dir")
 
     # Logging
     parser.add_argument(
@@ -982,6 +1113,7 @@ if __name__ == "__main__":
         help="The run ID to resume. It will be in the URL of the wandb website.",
         default="",
     )
+    parser.add_argument("--save_top_k_checkpoints_phase_2", type=int, default=3, help="Once phase 2 is reached preserve k checkpoints.")
 
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
