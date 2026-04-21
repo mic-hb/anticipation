@@ -1,6 +1,15 @@
 #!/bin/bash
+#SBATCH -p genai-thickstun-highpri --gres=gpu:2
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=128GB
+#SBATCH -t 200:00:00
+#SBATCH -J train_exhaust_lakh
+#SBATCH -e output/slurm_logs/%j/stderr.err
+#SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
-# ./run_train_for_testing
+# sbatch run_train_exhaust_lakh.sh
 
 # --- set up conda and activate it ---
 # assuming conda binary lives here
@@ -26,44 +35,24 @@ export TEMP=$TMPDIR
 export TMP=$TMPDIR
 mkdir -p "$TMPDIR"
 
-
 export USE_FA4=False
-NUM_GPUS=1
+# --------------------------
 
-NUM_LAYERS=(
-    1
-    2
-    4
-    6
-    8
-    10
-    12
-    14
-)
-LAKH_TRAIN=data/tokenized_datasets/lmd_full/ad9826395376a4e7c9be1eb6e07c45b6/train.npy
-LAKH_VALID=data/tokenized_datasets/lmd_full/ad9826395376a4e7c9be1eb6e07c45b6/valid.npy
-LAKH_TEST=data/tokenized_datasets/lmd_full/ad9826395376a4e7c9be1eb6e07c45b6/test.npy
-LAKH_TRAIN_TOTAL_SEQ=1718700
-# 1718700
-# N cannot exceed max lakh seq
-N=(
-    5120
-    10240
-    20480
-    40960
-    81920
-    163840
-    327680
-    655360
-)
-STEPS_PER_VAL_REPORT=100
+NUM_GPUS=2
+STEPS_PER_VAL_REPORT=10000
 BS=128
 ACCUM=4
 HEAD_DIM=64
 ASPECT_RATIO=64
+
+source "./run_constants.sh"
+DS_SUBSETS=("${LAKH_TRAIN_SUBSETS[@]}")
+
 # make this extremely large to ensure we overfit
 TOTAL_EPOCHS_FOR_OVERFIT=250
 COMMON_ARGS=(
+    --dataset1_subset_seed 1234 \
+    --dataset2_subset_seed 5678 \
     --ds1_num_epochs $TOTAL_EPOCHS_FOR_OVERFIT \
     --train_batch_size $BS \
     --val_batch_size $BS \
@@ -77,13 +66,15 @@ COMMON_ARGS=(
     --aspect_ratio $ASPECT_RATIO \
     --head_dim $HEAD_DIM \
     --pos_emb rope \
-    --wandb_project "basic_exhaust_debugging"
+    --wandb_project "lakh_exhaust" \
+    --use_wandb
 )
+# num layers is defined in ./run_constant.sh
 for curr_layers in "${NUM_LAYERS[@]}"; do
-    for curr_n in "${N[@]}"; do
+    for curr_n in "${DS_SUBSETS[@]}"; do
         combo="${curr_layers}/${curr_n}"
         echo "Training: ${combo}"
-        output_dir="output/checkpoints/basic_exhaust/${combo}"
+        output_dir="output/experiments/lakh_exhaust/${combo}"
 
         # run training
         # this is just phase 1, "normal" training on source dataset

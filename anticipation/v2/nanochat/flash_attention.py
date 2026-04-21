@@ -13,6 +13,7 @@ Usage (drop-in replacement for FA3):
     # Inference (with KV cache)
     y = flash_attn.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, ...)
 """
+
 import os
 
 import torch
@@ -43,23 +44,27 @@ def _load_flash_attention_3():
     except Exception:
         return None
 
+
 def _use_fa4():
-    if str(os.environ.get("USE_FA4", True)) == 'True':
+    if str(os.environ.get("USE_FA4", True)) == "True":
         if not torch.cuda.is_available():
             return False
         try:
             from flash_attn.cute import flash_attn_func
+
             return True
         except Exception:
             return False
     else:
         return False
 
+
 def _load_flash_attention_4():
     if not torch.cuda.is_available():
         return None
     try:
         from flash_attn import cute as fa4
+
         return fa4
     except Exception:
         return None

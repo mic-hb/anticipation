@@ -136,7 +136,7 @@ def add_token(
     unwrapped_tokens = [x for b in tmp for x in b]
 
     # not sure why this is 1017, but keeping it the same as v1
-    #look_back_n_tokens = 1017
+    # look_back_n_tokens = 1017
     look_back_n_tokens = settings.context_size - 20
     history = unwrapped_tokens[-1 * look_back_n_tokens :]  # Markov window
 
@@ -155,16 +155,18 @@ def add_token(
                 # model did not place a tick, go forward and generate a triple
                 for i in range(3):
                     input_tokens = (
-                        torch.tensor(z + history + new_token).unsqueeze(0).to(model.device)
+                        torch.tensor(z + history + new_token)
+                        .unsqueeze(0)
+                        .to(model.device)
                     )
                     logits = model(input_tokens).logits[0, -1]
 
                     # uses idx % 3 to determine what to mask
-                    #idx = input_tokens.shape[1] - 1
+                    # idx = input_tokens.shape[1] - 1
                     logits = safe_logits(logits, i, settings)
 
                     if i == 0:
-                        #logits = future_logits(logits, current_time, settings)
+                        # logits = future_logits(logits, current_time, settings)
                         pass
                     elif i == 2:
                         # restrict the total number of instruments
@@ -189,7 +191,7 @@ def add_token(
                 logits = model(input_tokens).logits[0, -1]
 
                 # uses idx % 3 to determine what to mask
-                #idx = input_tokens.shape[1] - 1
+                # idx = input_tokens.shape[1] - 1
                 logits = safe_logits(logits, i, settings)
 
                 if i == 0:

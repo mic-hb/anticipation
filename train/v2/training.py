@@ -165,7 +165,7 @@ class GPT2LightningModule(pl.LightningModule):
     def forward(self, **inputs):
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
             return self.model(**inputs)
-        #return self.model(**inputs)
+        # return self.model(**inputs)
 
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
@@ -770,9 +770,12 @@ def main(args: argparse.Namespace) -> None:
         if args.wandb_resume_from_run_id:
             resume_from_run_id: str = args.wandb_resume_from_run_id
             resume_from_step: int = args.wandb_resume_from_step
-            assert resume_from_step > 0, "Resume from step is unfilled or 0 - start a new run or provide a resume step."
+            assert resume_from_step > 0, (
+                "Resume from step is unfilled or 0 - start a new run or provide a resume step."
+            )
             resume_from = f"{resume_from_run_id}?_step={resume_from_step}"
             import wandb
+
             _run = wandb.init(
                 project=args.wandb_project,
                 name=run_name,
@@ -782,7 +785,7 @@ def main(args: argparse.Namespace) -> None:
                 fork_from=resume_from,
                 # this is in private preview, forking is the closest alternative for now
                 # it starts a new run from the step you specify
-                #resume_from=resume_from,
+                # resume_from=resume_from,
             )
             wandb_logger = WandbLogger(
                 experiment=_run,

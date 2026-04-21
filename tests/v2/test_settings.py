@@ -49,7 +49,7 @@ def test_serialize_anticipation_v2_settings() -> None:
             "SEPARATOR": 55025,
             "SPECIAL_OFFSET": 55025,
             "TIME_OFFSET": 0,
-            "use_controls": True
+            "use_controls": True,
         },
     }
     s, _ = settings._get_as_file()

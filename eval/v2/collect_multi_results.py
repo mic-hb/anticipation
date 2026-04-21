@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import pandas as pd
 
+
 def get_results(checkpoint_collection_dir: Path) -> pd.DataFrame:
     parent_dir = checkpoint_collection_dir
     result_files: list[Path] = []
@@ -14,12 +15,9 @@ def get_results(checkpoint_collection_dir: Path) -> pd.DataFrame:
 
     results = []
     for result_path in result_files:
-        results.append(
-            json.loads(result_path.read_text())
-        )
+        results.append(json.loads(result_path.read_text()))
 
     df = pd.json_normalize(results)
-
 
     # isolate these columns
     columns_of_interest = [
@@ -46,9 +44,7 @@ def get_results(checkpoint_collection_dir: Path) -> pd.DataFrame:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Multi Training Result Collector"
-    )
+    parser = argparse.ArgumentParser(description="Multi Training Result Collector")
     parser.add_argument(
         "--output_dir",
         type=str,

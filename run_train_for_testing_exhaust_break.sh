@@ -1,26 +1,7 @@
 #!/bin/bash
-#SBATCH -p genai-thickstun-highpri --gres=gpu:1
-#SBATCH -N 1
-#SBATCH -n 1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=128GB
-#SBATCH -t 120:00:00
-#SBATCH -J train_exhaust_break
-#SBATCH -e output/slurm_logs/%j/stderr.err
-#SBATCH -o output/slurm_logs/%j/stdout.out
-set -e
-# sbatch run_train_exhaust_break.sh
 
-# --- set up conda and activate it ---
-# assuming conda binary lives here
-CONDA_ACTIVATE_PATH="/share/apps/software/anaconda3/etc/profile.d/conda.sh"
-if source "$CONDA_ACTIVATE_PATH" 2>/dev/null; then
-  cd /home/mf867/anticipation/
-  conda activate ./env
-  echo "activated environment."
-else
-  echo "conda startup script not found."
-fi
+set -e
+# ./run_train_for_testing_exhaust_break.sh
 
 # 'cuda.h is missing'
 export CUDA_HOME=/usr/local/cuda-12.8
@@ -42,7 +23,7 @@ export USE_FA4=False
 # in seconds, default is 90
 export WANDB_INIT_TIMEOUT=600
 
-CHOICE="aria2maestro"
+CHOICE="transcripts2lakh"
 NUM_LAYERS=(
     1
     2
@@ -119,9 +100,12 @@ echo "$CHOICE"
 
 # same for all configs
 COMMON_ARGS=(
+    --ds1_num_epochs 1 \
+    --dataset1_subset_seed 1234 \
     --dataset1_path "$dataset1_path" \
     --n_ds1 "$n_ds1" \
     --dataset2_path "$dataset2_path" \
+    --dataset2_subset_seed 4567 \
     --val_dataset_path "$val_dataset_path" \
     --train_batch_size $BS \
     --val_batch_size $BS \
@@ -135,11 +119,11 @@ COMMON_ARGS=(
     --aspect_ratio $ASPECT_RATIO \
     --head_dim $HEAD_DIM \
     --pos_emb rope \
-    --wandb_project "final_exp_exhaust_break" \
+    --wandb_project "final_exhaust_4_debugging" \
     --use_wandb
 )
 # no "/" suffix
-OUTPUT_DIR_PARENT="output/checkpoints/final_exp_exhaust_break/${CHOICE}"
+OUTPUT_DIR_PARENT="output/checkpoints/final_exhaust_4/${CHOICE}"
 for curr_layers in "${NUM_LAYERS[@]}"; do
     combo="${curr_layers}"
     output_dir="${OUTPUT_DIR_PARENT}/${combo}"
@@ -149,7 +133,8 @@ for curr_layers in "${NUM_LAYERS[@]}"; do
         "${COMMON_ARGS[@]}" \
         --seq-milestones "${SEQ_MILESTONES[@]}" \
         --output_dir $output_dir \
-        --num_layers $curr_layers
+        --num_layers $curr_layers \
+        --check_vocabs
 
     # from each checkpoint, resume at phase 2, taking a subset of dataset 2
     # defined by k

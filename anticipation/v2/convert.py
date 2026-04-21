@@ -61,7 +61,10 @@ def compound_to_events(
 
 
 def midi_to_compound(
-    midifile: Path, settings: AnticipationV2Settings, pitch_transpose: int = 0, convert_all_instruments_to_code: Optional[int] = None,
+    midifile: Path,
+    settings: AnticipationV2Settings,
+    pitch_transpose: int = 0,
+    convert_all_instruments_to_code: Optional[int] = None,
 ) -> list[int]:
     time_resolution = settings.time_resolution
     try:

@@ -259,11 +259,11 @@ def make_vocab(
             # controls, just making these all larger than
             # the event token IDs since some logic uses that to
             # determine if something is an event or control
-            ANTICIPATE=note_stops_at + 1,
-            CONTROL_OFFSET=note_stops_at + 1,
-            ATIME_OFFSET=note_stops_at + 1,
-            ADUR_OFFSET=note_stops_at + 1,
-            ANOTE_OFFSET=note_stops_at + 1,
+            ANTICIPATE=note_stops_at + 3,
+            CONTROL_OFFSET=note_stops_at + 3,
+            ATIME_OFFSET=note_stops_at + 3,
+            ADUR_OFFSET=note_stops_at + 3,
+            ANOTE_OFFSET=note_stops_at + 3,
         )
 
 
@@ -296,6 +296,7 @@ class AnticipationV2Settings:
     # 128 program codes + 1 for drums
     max_midi_instrument: int = 129
     max_note_duration_in_seconds: int = 10
+    max_seq_time_in_seconds: int = 100
 
     # if this is true, then a note cannot have overlapping sustains
     # it is possible in MIDI to have two notes from the same instrument
@@ -328,7 +329,8 @@ class AnticipationV2Settings:
 
     @property
     def max_time(self) -> int:
-        return self.time_resolution * self.max_track_time_in_seconds
+        # the maximum quantized time that a sequence we use may have
+        return self.time_resolution * self.max_seq_time_in_seconds
 
     @property
     def max_note(self) -> int:
@@ -442,3 +444,8 @@ class AnticipationV2Settings:
         # check there is sufficient spacing, probably better to
         # create vocabulary with `make_vocab` function
         assert v.DUR_OFFSET - v.TIME_OFFSET >= self.tick_token_every_n_ticks
+
+        if self.tick_token_every_n_ticks == 0:
+            # if not using relativize, we need enough token space to represent the maximum
+            # time possible
+            assert (v.DUR_OFFSET // self.time_resolution) >= self.max_seq_time_in_seconds, "Max seq time in seconds exceeds available onset token space."

@@ -112,7 +112,7 @@ def translate(
     for time, dur, note in zip(tokens[0::3], tokens[1::3], tokens[2::3]):
         # stop translating after EOT
         if note == settings.vocab.SEPARATOR:
-            #yield (time, dur, note)
+            # yield (time, dur, note)
             new_tokens.extend([time, dur, note])
             dt = 0
             continue
@@ -123,7 +123,7 @@ def translate(
             this_time = time - settings.vocab.ATIME_OFFSET
 
         assert 0 <= this_time + dt
-        #yield (time + dt, dur, note)
+        # yield (time + dt, dur, note)
         new_tokens.extend([time + dt, dur, note])
 
     return new_tokens
@@ -307,8 +307,8 @@ def extract_instruments(
     events = []
     controls = []
     for time, dur, note in zip(all_events[0::3], all_events[1::3], all_events[2::3]):
-        #for x in all_events:
-        #time, dur, note = x
+        # for x in all_events:
+        # time, dur, note = x
         assert note < settings.vocab.CONTROL_OFFSET  # shouldn't be in the sequence yet
         instr = (note - settings.vocab.NOTE_OFFSET) // 2**7
         if instr in instruments:

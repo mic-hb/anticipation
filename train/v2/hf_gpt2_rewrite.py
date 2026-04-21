@@ -446,11 +446,11 @@ class GPT2ModelLite(nn.Module):
             m = attention_mask[:, None, None, :].to(dtype=x.dtype)
             attn_bias = (1.0 - m) * -10000.0
 
-        #x0 = x
-        #block: GPT2BlockLite
+        # x0 = x
+        # block: GPT2BlockLite
         for i, block in enumerate(self.h):
             window_size = self.window_sizes[i]
-            #x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+            # x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = (
                 self.value_embeds[str(i)](input_ids)
                 if str(i) in self.value_embeds
@@ -621,9 +621,7 @@ def get_num_scaling_params(gpt: GPT2LMHeadModelLite) -> dict[str, int]:
     lm_head_unique = 0 if gpt.config.embedding_and_lm_head_weight_tying else lm_head
     transformer_matrices = sum(p.numel() for p in gpt.transformer.h.parameters())
     ln_f = sum(p.numel() for p in gpt.transformer.ln_f.parameters())
-    total = (
-        wte + wpe + value_embeds + transformer_matrices + ln_f + lm_head_unique
-    )
+    total = wte + wpe + value_embeds + transformer_matrices + ln_f + lm_head_unique
 
     actual = sum(p.numel() for p in gpt.parameters())
     assert total == actual, (

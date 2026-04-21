@@ -21,9 +21,13 @@ from anticipation.v2.config import (
     TOKENIZED_DATASETS_SAVE_TO_PATH,
     AnticipationV2Settings,
     Vocab,
-    make_vocab
+    make_vocab,
 )
-from anticipation.v2.io import TokenSequenceBinaryFile, consolidate_bins, buffered_shuffle_bin_to_npy
+from anticipation.v2.io import (
+    TokenSequenceBinaryFile,
+    consolidate_bins,
+    buffered_shuffle_bin_to_npy,
+)
 from anticipation.v2.tokenize import (
     TokenizationStatSummary,
     tokenize,
@@ -136,9 +140,7 @@ def _get_dataset_file_from_paths(
     # so it is clearer how to load it
     bin_out_path = shards_dir / (save_to + ".bin")
     npy_out_path = parent_work_dir / (save_to + ".npy")
-    dtype = TokenSequenceBinaryFile.get_dtype_for_tokens(
-        settings.vocab.total_tokens()
-    )
+    dtype = TokenSequenceBinaryFile.get_dtype_for_tokens(settings.vocab.total_tokens())
     consolidate_bins(
         list(shards_dir.rglob("*.bin")),
         out_path=bin_out_path,
@@ -247,7 +249,9 @@ def _tokenize_dataset_in_parallel(
                 do_shuffle=conf["do_shuffle"],
                 is_training_split=(split_name == "train"),
                 v1_mode=v1_mode,
-                convert_all_instruments_to_code=conf.get("convert_all_instruments_to_code", None),
+                convert_all_instruments_to_code=conf.get(
+                    "convert_all_instruments_to_code", None
+                ),
             )
 
             # gather any ignored file results
@@ -374,9 +378,11 @@ def _write_book_keeping_info_and_get_dataset_enclosing_path(
     settings.save_to_disk(work_dir)
     return work_dir
 
+
 def unique_name(p: Path, src_root: Path) -> str:
     rel = p.relative_to(src_root)
     return "__".join(rel.parts)
+
 
 def split_files(files, train_pct=0.8, val_pct=0.1, test_pct=0.1, seed=None):
     if not (0 <= train_pct <= 1 and 0 <= val_pct <= 1 and 0 <= test_pct <= 1):
@@ -395,10 +401,11 @@ def split_files(files, train_pct=0.8, val_pct=0.1, test_pct=0.1, seed=None):
     n_val = int(n * val_pct)
 
     train = files[:n_train]
-    val = files[n_train:n_train + n_val]
-    test = files[n_train + n_val:]
+    val = files[n_train : n_train + n_val]
+    test = files[n_train + n_val :]
 
     return train, val, test
+
 
 def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
     if (
@@ -437,8 +444,9 @@ def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
         if not (train_path.exists() and train_path.is_dir()):
             train_path.mkdir()
             for fname in train_files:
-                shutil.copy2(raw_data_enclosing_path / fname, train_path / Path(fname).parts[-1])
-
+                shutil.copy2(
+                    raw_data_enclosing_path / fname, train_path / Path(fname).parts[-1]
+                )
 
         valid_df = df[df["split"] == "validation"]
         valid_files = valid_df["midi_filename"].tolist()
@@ -446,7 +454,9 @@ def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
         if not (valid_path.exists() and valid_path.is_dir()):
             valid_path.mkdir()
             for fname in valid_files:
-                shutil.copy2(raw_data_enclosing_path / fname, valid_path / Path(fname).parts[-1])
+                shutil.copy2(
+                    raw_data_enclosing_path / fname, valid_path / Path(fname).parts[-1]
+                )
 
         test_df = df[df["split"] == "test"]
         test_files = test_df["midi_filename"].tolist()
@@ -454,7 +464,9 @@ def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
         if not (test_path.exists() and test_path.is_dir()):
             test_path.mkdir()
             for fname in test_files:
-                shutil.copy2(raw_data_enclosing_path / fname, test_path / Path(fname).parts[-1])
+                shutil.copy2(
+                    raw_data_enclosing_path / fname, test_path / Path(fname).parts[-1]
+                )
 
         return [
             {
@@ -478,7 +490,11 @@ def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
         if not (splits_path.exists() and splits_path.is_dir()):
             splits_path.mkdir()
             all_files = sorted(
-                list(iter_files(raw_data_enclosing_path, file_extensions=(".mid", ".midi")))
+                list(
+                    iter_files(
+                        raw_data_enclosing_path, file_extensions=(".mid", ".midi")
+                    )
+                )
             )
             train, val, test = split_files(
                 all_files, train_pct=0.8, val_pct=0.1, test_pct=0.1, seed=42
@@ -544,8 +560,11 @@ def get_splits(raw_data_enclosing_path: Path) -> list[dict[str, Any]]:
 
 
 def main(
-    settings_path: Path, put_shards_in_tmp: bool, raw_data_enclosing_path: Path, v1_mode: bool = False,
-) -> None:
+    settings_path: Path,
+    put_shards_in_tmp: bool,
+    raw_data_enclosing_path: Path,
+    v1_mode: bool = False,
+) -> Path:
     dataset_enclosing_path = raw_data_enclosing_path.parts[-1]
     settings = AnticipationV2Settings.load_from_disk(settings_path)
 
@@ -553,18 +572,20 @@ def main(
         TOKENIZED_DATASETS_SAVE_TO_PATH / dataset_enclosing_path
     ) / settings.md5_hash()
 
-    with AtomicDirectory(put_tokenized_datasets_in_dir, overwrite=False, keep_temp_on_error=False) as txn:
+    with AtomicDirectory(
+        put_tokenized_datasets_in_dir, overwrite=False, keep_temp_on_error=False
+    ) as txn:
         # do the work now, no more config past this point
         _tokenize_dataset_in_parallel(
             settings,
             raw_data_enclosing_path,
-            _write_book_keeping_info_and_get_dataset_enclosing_path(
-                settings, txn.path
-            ),
+            _write_book_keeping_info_and_get_dataset_enclosing_path(settings, txn.path),
             put_shards_in_tmp,
             get_splits(raw_data_enclosing_path),
             v1_mode=v1_mode,
         )
+
+    return put_tokenized_datasets_in_dir
 
 
 def parse_args() -> argparse.Namespace:
@@ -579,8 +600,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-	    '--v1_mode', action='store_true', help='use v1 tokenization mode (AR only supported)'
-	)
+        "--v1_mode",
+        action="store_true",
+        help="use v1 tokenization mode (AR only supported)",
+    )
     _args = parser.parse_args()
     return _args
 
@@ -619,6 +642,9 @@ if __name__ == "__main__":
         # too small - if 16 workers, some won't have any work to do
         num_workers = 1
         max_instr = 10_000
+
+    if args.dataset_type == "adl_piano":
+        num_workers = 4
 
     assert n >= num_workers, f"not enough CPUs. Need: {num_workers}, Have: {n}"
     to_create = AnticipationV2Settings(
@@ -668,9 +694,10 @@ if __name__ == "__main__":
         },
     }
     dataset_choice = configs[args.dataset_type]
-    main(
+    output_place = main(
         settings_path=dataset_choice["settings"],
         put_shards_in_tmp=True,
         raw_data_enclosing_path=dataset_choice["raw_data_enclosing_path"],
         v1_mode=args.v1_mode,
     )
+    print(f"SUCCESS. Saved {args.dataset_type} to: {output_place}")

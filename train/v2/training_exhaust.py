@@ -1,15 +1,15 @@
-#from regex import A
 import json
+import re
 import os
 import time
 import argparse
 import logging
 import math
 import warnings
+import shutil
 from pathlib import Path
 from collections import deque
 from typing import Any
-
 
 import numpy as np
 import torch
@@ -19,19 +19,19 @@ from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
-import os
-import re
-import shutil
-from pathlib import Path
 
-from lightning.pytorch.callbacks import ModelCheckpoint
 import lightning as L
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, TQDMProgressBar, Callback
+from lightning.pytorch.callbacks import (
+    LearningRateMonitor,
+    ModelCheckpoint,
+    TQDMProgressBar,
+    Callback,
+)
 from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.rank_zero import rank_zero_info
 
-from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
+# from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
 import wandb
 
@@ -47,7 +47,7 @@ from train.v2.hf_gpt2_rewrite import (
 )
 from anticipation.v2.config import AnticipationV2Settings
 
-import warnings
+
 warnings.filterwarnings(
     "ignore",
     message=".*does not have many workers.*",
@@ -68,6 +68,7 @@ class TipFilter(logging.Filter):
 
 
 logging.getLogger("lightning.pytorch.utilities.rank_zero").addFilter(TipFilter())
+
 
 class MaxStepProgressBar(TQDMProgressBar):
     def __init__(self):
@@ -156,7 +157,9 @@ class Phase1SequenceCheckpoint(L.Callback):
             "steps_ds1": getattr(pl_module, "steps_ds1", None),
         }
         if payload["total_optimizer_steps"] is None:
-            raise ValueError("Must save the total optimizer steps. This field was null.")
+            raise ValueError(
+                "Must save the total optimizer steps. This field was null."
+            )
 
         with open(step_dir / "resume_info.json", "w") as f:
             json.dump(payload, f, indent=4, sort_keys=True)
@@ -194,6 +197,7 @@ class Phase1SequenceCheckpoint(L.Callback):
             seq_target=target,
             ckpt_path=ckpt_path,
         )
+        print("Saved a phase 1 checkpoint to: ", step_dir)
         self._next_idx += 1
 
 
@@ -238,6 +242,27 @@ class Phase2TopKCheckpoint(ModelCheckpoint):
         if path.exists():
             shutil.rmtree(path)
             print(f"Removed Phase 2 checkpoint: {step_dir}")
+
+class HuggingFaceCheckpoint(ModelCheckpoint):
+    def __init__(self, config, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.config = config
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+        super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
+
+        if (trainer.global_step % self._every_n_train_steps) != 0:
+            return
+
+        if trainer.global_step == 0:
+            # don't save if we just started
+            return
+
+        step_dir = os.path.join(str(self.dirpath), f"step-{trainer.global_step}")
+        raw_model = pl_module.model if hasattr(pl_module, "model") else pl_module
+        raw_model.save_pretrained(
+            step_dir, safe_serialization=True, max_shard_size="2GB"
+        )
 
 class OverfitStopper(Callback):
     """
@@ -307,7 +332,9 @@ class OverfitStopper(Callback):
                 "Make sure it is logged during validation."
             )
 
-        val = float(metric.detach().cpu() if isinstance(metric, torch.Tensor) else metric)
+        val = float(
+            metric.detach().cpu() if isinstance(metric, torch.Tensor) else metric
+        )
         self.recent_vals.append(val)
 
         if val < self.best_val:
@@ -315,8 +342,20 @@ class OverfitStopper(Callback):
 
         smoothed = sum(self.recent_vals) / len(self.recent_vals)
 
-        pl_module.log("overfit/best_val", self.best_val, on_step=False, on_epoch=True, sync_dist=True)
-        pl_module.log("overfit/smoothed_val", smoothed, on_step=False, on_epoch=True, sync_dist=True)
+        pl_module.log(
+            "overfit/best_val",
+            self.best_val,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        pl_module.log(
+            "overfit/smoothed_val",
+            smoothed,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
         pl_module.log(
             "overfit/excess_over_best",
             smoothed - self.best_val,
@@ -334,7 +373,7 @@ class OverfitStopper(Callback):
         )
 
         self.num_checks += 1
-        if (self.num_checks <= self.warmup_checks):
+        if self.num_checks <= self.warmup_checks:
             pl_module.log(
                 "overfit/bad_check_streak",
                 float(self.bad_check_streak),
@@ -571,11 +610,15 @@ class LMModule(L.LightningModule):
 
     def val_dataloader(self) -> DataLoader:
         dataset = PreTokenizedDataset(self.val_dataset_path)
-        subset = maybe_make_fixed_random_subset(
-            dataset,
-            subset_size=self.subset_size_val,
-            seed=self.subset_seed_val,
-        ) if self.subset_size_val is not None else dataset
+        subset = (
+            maybe_make_fixed_random_subset(
+                dataset,
+                subset_size=self.subset_size_val,
+                seed=self.subset_seed_val,
+            )
+            if self.subset_size_val is not None
+            else dataset
+        )
 
         return DataLoader(
             subset,
@@ -597,15 +640,17 @@ class LMModule(L.LightningModule):
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
 
         self.log("train_loss", loss, prog_bar=True, logger=True)
-        self.log("train/phase", 1.0 if self.inherited_global_step == 0 else 2.0,
-                 on_step=True,
-                 on_epoch=False,
+        self.log(
+            "train/phase",
+            1.0 if self.inherited_global_step == 0 else 2.0,
+            on_step=True,
+            on_epoch=False,
         )
         return loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         accum = self.trainer.accumulate_grad_batches
-        is_step_boundary = ((batch_idx + 1) % accum == 0)
+        is_step_boundary = (batch_idx + 1) % accum == 0
         if is_step_boundary:
             self.log(
                 "train/effective_global_step",
@@ -622,7 +667,9 @@ class LMModule(L.LightningModule):
 
         logits = outputs.logits.float()
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
-        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log(
+            "val_loss", loss, on_epoch=True, prog_bar=True, logger=True, sync_dist=True
+        )
         return loss
 
     def configure_optimizers(self):
@@ -630,14 +677,16 @@ class LMModule(L.LightningModule):
         optimizer_grouped_parameters = [
             {
                 "params": [
-                    p for n, p in self.model.named_parameters()
+                    p
+                    for n, p in self.model.named_parameters()
                     if not any(nd in n for nd in no_decay)
                 ],
                 "weight_decay": self.hparams.weight_decay,
             },
             {
                 "params": [
-                    p for n, p in self.model.named_parameters()
+                    p
+                    for n, p in self.model.named_parameters()
                     if any(nd in n for nd in no_decay)
                 ],
                 "weight_decay": 0.0,
@@ -744,6 +793,7 @@ class LMModule(L.LightningModule):
             max_shard_size="2GB",
         )
 
+
 def build_lm_module(
     *,
     model: torch.nn.Module,
@@ -811,6 +861,7 @@ def build_lm_module(
         inherited_global_step=inherited_global_step,
     )
 
+
 def get_scaling_dimensions_for_model(depth: int, aspect_ratio: int, head_dim: int):
     """
     From: https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/scripts/base_train.py#L125
@@ -826,7 +877,52 @@ def get_scaling_dimensions_for_model(depth: int, aspect_ratio: int, head_dim: in
         "n_embed": model_dim,
     }
 
+
+def get_settings_for_dataset_path(ds_path):
+    md5_hash = Path(ds_path).parent.name
+    settings = AnticipationV2Settings.load_from_disk(
+        Path(ds_path).parent / ("settings_" + md5_hash + ".json")
+    )
+    return settings
+
+
+def check_dataset_vocabs(args):
+    ds_1 = PreTokenizedDataset(Path(args.dataset1_path))
+    ds_2 = PreTokenizedDataset(Path(args.dataset2_path))
+    val_ds = PreTokenizedDataset(Path(args.val_dataset_path))
+    assert ds_1.seq_len == ds_2.seq_len == val_ds.seq_len
+
+    # check that the vocabulary settings that produced each dataset are equal
+    settings_ds1 = get_settings_for_dataset_path(args.dataset1_path)
+    settings_ds2 = get_settings_for_dataset_path(args.dataset2_path)
+    settings_val = get_settings_for_dataset_path(args.val_dataset_path)
+    assert settings_ds1.vocab == settings_ds2.vocab == settings_val.vocab
+    vocab_size = settings_ds1.vocab.total_tokens()
+    for sample in val_ds:
+        c_max_token_id = sample["input_ids"].max()
+        c_min_token_id = sample["input_ids"].min()
+        assert 0 <= c_min_token_id < c_max_token_id < vocab_size, f"{args.val_dataset_path} has problem: (0 <= {c_min_token_id} < {c_max_token_id} < {vocab_size}) is false."
+
+    for sample in ds_1:
+        c_max_token_id = sample["input_ids"].max()
+        c_min_token_id = sample["input_ids"].min()
+        assert 0 <= c_min_token_id < c_max_token_id < vocab_size, f"{args.dataset1_path} has problem: (0 <= {c_min_token_id} < {c_max_token_id} < {vocab_size}) is false."
+
+    for s in ds_2:
+        c_max_token_id = s["input_ids"].max()
+        c_min_token_id = s["input_ids"].min()
+        assert 0 <= c_min_token_id < c_max_token_id < vocab_size, f"{args.dataset2_path} has problem: (0 <= {c_min_token_id} < {c_max_token_id} < {vocab_size}) is false."
+
+    print("Total seq in ds1:", len(ds_1))
+    print("Total seq in ds2:", len(ds_2))
+    print("Total seq in val:", len(val_ds))
+    print("--- OK ---")
+
+
 def do_training(args):
+    if args.check_vocabs:
+        check_dataset_vocabs(args)
+
     num_devices = args.gpus_per_node
     batch_size = args.train_batch_size
     assert batch_size % num_devices == 0
@@ -834,30 +930,19 @@ def do_training(args):
     world_size = num_devices * args.num_nodes
     grad_accum_steps = args.gradient_accumulation_steps
     num_nodes = args.num_nodes
-
     L.seed_everything(args.seed)
-
     ds_1 = PreTokenizedDataset(Path(args.dataset1_path))
-    ds_2 = PreTokenizedDataset(Path(args.dataset2_path))
-    print("Total seq in ds1:", len(ds_1))
-    print("Total seq in ds2:", len(ds_2))
-
-    assert ds_1.seq_len == ds_2.seq_len
+    settings_ds1 = get_settings_for_dataset_path(args.dataset1_path)
     seq_len = ds_1.seq_len
-    del ds_1
-    del ds_2
-
-    # check that the vocabulary settings that produced each dataset are equal
-    hash_name_ds_1 = Path(args.dataset1_path).parent.name
-    hash_name_ds_2 = Path(args.dataset2_path).parent.name
-    settings_ds_1 = AnticipationV2Settings.load_from_disk(Path(args.dataset1_path).parent / ("settings_" + hash_name_ds_1 + ".json"))
-    settings_ds_2 = AnticipationV2Settings.load_from_disk(Path(args.dataset2_path).parent / ("settings_" + hash_name_ds_2 + ".json"))
-    assert settings_ds_1.vocab == settings_ds_2.vocab
-    vocab_size = settings_ds_1.vocab.total_tokens()
+    vocab_size = settings_ds1.vocab.total_tokens()
 
     if args.start_phase_2_from is None:
         # PHASE 1
-        model_dimensions = get_scaling_dimensions_for_model(depth=args.num_layers, aspect_ratio=args.aspect_ratio, head_dim=args.head_dim)
+        model_dimensions = get_scaling_dimensions_for_model(
+            depth=args.num_layers,
+            aspect_ratio=args.aspect_ratio,
+            head_dim=args.head_dim,
+        )
         model_config = GPT2ConfigLite(
             vocab_size=vocab_size,
             n_positions=seq_len,
@@ -890,6 +975,19 @@ def do_training(args):
                 grad_accum=args.gradient_accumulation_steps,
             ),
         ]
+        if args.ds1_num_epochs > 1:
+            # doing exhaustion... save checkpoints if the run is really long
+            standard_checkpoint_callback = HuggingFaceCheckpoint(
+                config=model_config,
+                dirpath=args.output_dir,
+                filename="{step}",
+                save_top_k=0,
+                monitor=None,
+                save_last=True,
+                every_n_train_steps=args.steps_per_checkpoint,
+            )
+            standard_checkpoint_callback.CHECKPOINT_EQUALS_CHAR = "-"
+            checkpointing_callbacks.append(standard_checkpoint_callback)
     else:
         # PHASE 2
         model_config = GPT2ConfigLite.from_json(
@@ -926,11 +1024,18 @@ def do_training(args):
         num_layers = args.num_layers
         n = args.n_ds1
         k = args.k_ds2
-        run_name = f"run-{num_layers}_ds1-{n}_ds2-{k}"
+        # run_name = f"run-{num_layers}_ds1-{n}_ds2-{k}"
+
+        tags = []
+        run_name = f"run-{int(time.time())}"
         _started_from = 0
         if resume_info.get("wandb_run_id", None):
-            _started_from = resume_info.get("global_step", "?")
+            _started_from = resume_info.get("global_step", -1)
             run_name += f" (phase 2 - {_started_from})"
+
+        if _started_from == 0 and resume_info:
+            # using our data only
+            tags = ["baseline"]
 
         wandb_logger = WandbLogger(
             project=args.wandb_project,
@@ -941,23 +1046,26 @@ def do_training(args):
                 **{f"scaling_param__{x}": y for x, y in scaling_params.items()},
                 "started_from_global_step": _started_from,
             },
+            tags=tags,
         )
         logger_dict["logger"] = wandb_logger
 
     log_every_n_steps = 10
-    subset_size_2 = args.k_ds2
-    subset_seed_2 = args.dataset2_subset_seed
     if args.start_phase_2_from is None:
         # --- PHASE 1 ---
         num_epochs_ds_1 = args.ds1_num_epochs
-        total_schedule_steps = optimizer_steps_per_epoch(
-            num_sequences=args.n_ds1,
-            world_size=world_size,
-            per_device_batch_size=per_device_batch_size,
-            grad_accum_steps=grad_accum_steps,
-            sampler_drop_last=True,
-            loader_drop_last=True,
-        ) * num_epochs_ds_1
+        total_schedule_steps = (
+            optimizer_steps_per_epoch(
+                num_sequences=args.n_ds1,
+                world_size=world_size,
+                per_device_batch_size=per_device_batch_size,
+                grad_accum_steps=grad_accum_steps,
+                sampler_drop_last=True,
+                loader_drop_last=True,
+            )
+            * num_epochs_ds_1
+        )
+        val_check_interval = min(total_schedule_steps//8, args.steps_per_eval)
         lit_model = build_lm_module(
             model=model,
             train_dataset_path=Path(args.dataset1_path),
@@ -971,8 +1079,6 @@ def do_training(args):
             loader_drop_last=True,
             subset_size_train=args.n_ds1,
             subset_seed_train=args.dataset1_subset_seed,
-            #subset_size_val=None, #max(subset_size_2 // 10, 100) if subset_size_2 is not None else None,
-            #subset_seed_val=subset_seed_2,
             warmup_steps=args.warmup_steps,
             total_optimizer_steps=total_schedule_steps,
             do_gradient_checkpointing=args.do_gradient_checkpointing,
@@ -996,7 +1102,7 @@ def do_training(args):
             gradient_clip_val=args.max_grad_norm,
             accumulate_grad_batches=args.gradient_accumulation_steps,
             log_every_n_steps=log_every_n_steps,
-            val_check_interval=args.steps_per_eval,
+            val_check_interval=val_check_interval,
             check_val_every_n_epoch=None,
             **logger_dict,
         )
@@ -1021,14 +1127,13 @@ def do_training(args):
             loader_drop_last=True,
             subset_size_train=args.k_ds2,
             subset_seed_train=args.dataset2_subset_seed,
-            # subset_size_val=max(subset_size_2 // 10, 100) if subset_size_2 is not None else None,
-            # subset_seed_val=subset_seed_2,
             warmup_steps=args.warmup_steps,
             total_optimizer_steps=total_steps_budget,
             do_gradient_checkpointing=args.do_gradient_checkpointing,
             resume_training_state_path=resume_training_state_path,
             inherited_global_step=inherited_global_step,
         )
+        val_check_interval = min(steps_remaining//8, args.steps_per_eval)
         trainer = L.Trainer(
             accelerator="gpu",
             devices=num_devices,
@@ -1046,7 +1151,7 @@ def do_training(args):
             gradient_clip_val=args.max_grad_norm,
             accumulate_grad_batches=args.gradient_accumulation_steps,
             log_every_n_steps=log_every_n_steps,
-            val_check_interval=args.steps_per_eval,
+            val_check_interval=val_check_interval,
             check_val_every_n_epoch=None,
             # skip it
             num_sanity_val_steps=0,
@@ -1059,17 +1164,35 @@ def do_training(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GPT-2 training script using PyTorch Lightning")
+    parser = argparse.ArgumentParser(
+        description="GPT-2 training script using PyTorch Lightning"
+    )
 
     # Midtraining and Dataset
-    parser.add_argument("--dataset1_path", type=str, help="Dataset 1 (n, transcripts) numpy file")
-    parser.add_argument("--dataset2_path", type=str, help="Dataset 1 (k, lakh) numpy file")
-    parser.add_argument("--val_dataset_path", type=str, help="Lakh validation numpy file")
-    parser.add_argument("--ds1_num_epochs", type=int, default=1, help="Number of epochs for ds 1")
-    parser.add_argument("--n_ds1", type=int, default=10, help="Number of sequences from transcripts")
-    parser.add_argument("--k_ds2", type=int, default=10, help="Number of sequences from Lakh train")
-    parser.add_argument("--dataset1_subset_seed", type=int, default=1234, help="Dataset 1 subset seed")
-    parser.add_argument("--dataset2_subset_seed", type=int, default=5678, help="Dataset 1 subset seed")
+    parser.add_argument(
+        "--dataset1_path", type=str, help="Dataset 1 (n, transcripts) numpy file"
+    )
+    parser.add_argument(
+        "--dataset2_path", type=str, help="Dataset 1 (k, lakh) numpy file"
+    )
+    parser.add_argument(
+        "--val_dataset_path", type=str, help="Lakh validation numpy file"
+    )
+    parser.add_argument(
+        "--ds1_num_epochs", type=int, default=1, help="Number of epochs for ds 1"
+    )
+    parser.add_argument(
+        "--n_ds1", type=int, default=10, help="Number of sequences from transcripts"
+    )
+    parser.add_argument(
+        "--k_ds2", type=int, default=10, help="Number of sequences from Lakh train"
+    )
+    parser.add_argument(
+        "--dataset1_subset_seed", type=int, default=None, help="Dataset 1 subset seed", required=False,
+    )
+    parser.add_argument(
+        "--dataset2_subset_seed", type=int, default=None, help="Dataset 2 subset seed", required=False
+    )
     parser.add_argument(
         "--seq-milestones",
         type=int,
@@ -1077,18 +1200,34 @@ if __name__ == "__main__":
         default=[],
         help="Sequence-count milestones at which to save phase-1 branch checkpoints.",
     )
+    parser.add_argument(
+        "--check_vocabs",
+        action="store_true",
+        help="Run vocab check before starting",
+    )
 
     # Model
-    parser.add_argument("--head_dim", type=int, default=64, help="The number of dimensions per attention head")
-    parser.add_argument("--num_layers", type=int, default=12, help="Model number of layers")
+    parser.add_argument(
+        "--head_dim",
+        type=int,
+        default=64,
+        help="The number of dimensions per attention head",
+    )
+    parser.add_argument(
+        "--num_layers", type=int, default=12, help="Model number of layers"
+    )
     parser.add_argument(
         "--aspect_ratio",
         type=int,
         default=64,
         help="model_dim = depth * aspect_ratio. Default is 64, same as nanochat",
     )
-    parser.add_argument("--embed_pdrop", type=float, default=0.1, help="Apply embedding dropout")
-    parser.add_argument("--resid_pdrop", type=float, default=0.1, help="Apply residual dropout")
+    parser.add_argument(
+        "--embed_pdrop", type=float, default=0.1, help="Apply embedding dropout"
+    )
+    parser.add_argument(
+        "--resid_pdrop", type=float, default=0.1, help="Apply residual dropout"
+    )
     parser.add_argument(
         "--pos_emb",
         type=str,
@@ -1101,20 +1240,56 @@ if __name__ == "__main__":
 
     # Optimization
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--train_batch_size", type=int, default=512,
-                        help="Batch size for training (total, not per device)")
-    parser.add_argument("--val_batch_size", type=int, default=512,
-                        help="Batch size for validation")
-    parser.add_argument("--warmup_steps", type=int, default=200, help="Number of warmup steps")
+    parser.add_argument(
+        "--learning_rate", type=float, default=3e-4, help="Learning rate"
+    )
+    parser.add_argument(
+        "--train_batch_size",
+        type=int,
+        default=512,
+        help="Batch size for training (total, not per device)",
+    )
+    parser.add_argument(
+        "--val_batch_size", type=int, default=512, help="Batch size for validation"
+    )
+    parser.add_argument(
+        "--warmup_steps", type=int, default=200, help="Number of warmup steps"
+    )
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay")
-    parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
+    parser.add_argument(
+        "--max_grad_norm", type=float, default=1.0, help="Max gradient norm"
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps",
+    )
 
-    parser.add_argument("--overfit_window_size", type=int, default=1, help="Number of validation samples to use in smoothed best val loss.")
-    parser.add_argument("--overfit_warmup_checks", type=int, default=10, help="Do not start counting bad val loss until this many checks after phase 2 starts")
-    parser.add_argument("--overfit_patience_checks", type=int, default=5, help="Number of consecutive bad val loss samples we can withstand before early stopping.")
-    parser.add_argument("--overfit_margin", type=float, default=0.05, help="Delta over best val after which considered a bad val loss.")
+    parser.add_argument(
+        "--overfit_window_size",
+        type=int,
+        default=1,
+        help="Number of validation samples to use in smoothed best val loss.",
+    )
+    parser.add_argument(
+        "--overfit_warmup_checks",
+        type=int,
+        default=10,
+        help="Do not start counting bad val loss until this many checks after phase 2 starts",
+    )
+    parser.add_argument(
+        "--overfit_patience_checks",
+        type=int,
+        default=5,
+        help="Number of consecutive bad val loss samples we can withstand before early stopping.",
+    )
+    parser.add_argument(
+        "--overfit_margin",
+        type=float,
+        default=0.05,
+        help="Delta over best val after which considered a bad val loss.",
+    )
     parser.add_argument(
         "--do_gradient_checkpointing",
         action="store_true",
@@ -1123,21 +1298,44 @@ if __name__ == "__main__":
 
     # System
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes")
-    parser.add_argument("--gpus_per_node", type=int, default=1, help="Number of GPUs per node")
+    parser.add_argument(
+        "--gpus_per_node", type=int, default=1, help="Number of GPUs per node"
+    )
     parser.add_argument(
         "--do_torch_compile",
         action="store_true",
         help="Enable calling torch.compile on model instance",
     )
-    parser.add_argument("--output_dir", type=str, help="Output directory for checkpoints")
-    parser.add_argument("--checkpoint_path", type=str, default=None,
-                        help="Initialize model weights from this checkpoint (not supported)")
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16 mixed precision training")
-    parser.add_argument("--steps_per_eval", type=int, default=1000, help="Number of steps between validation evals")
-    parser.add_argument("--steps_per_checkpoint", type=int, default=1000,
-                        help="Number of steps between checkpoints")
-    parser.add_argument("--start_phase_2_from", type=str, default=None,
-                        help="Start training on dataset 2 from this checkpoint dir")
+    parser.add_argument(
+        "--output_dir", type=str, help="Output directory for checkpoints"
+    )
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        default=None,
+        help="Initialize model weights from this checkpoint (not supported)",
+    )
+    parser.add_argument(
+        "--bf16", action="store_true", help="Use bfloat16 mixed precision training"
+    )
+    parser.add_argument(
+        "--steps_per_eval",
+        type=int,
+        default=1000,
+        help="Number of steps between validation evals",
+    )
+    parser.add_argument(
+        "--steps_per_checkpoint",
+        type=int,
+        default=1000,
+        help="Number of steps between checkpoints",
+    )
+    parser.add_argument(
+        "--start_phase_2_from",
+        type=str,
+        default=None,
+        help="Start training on dataset 2 from this checkpoint dir",
+    )
 
     # Logging
     parser.add_argument(
@@ -1158,7 +1356,12 @@ if __name__ == "__main__":
         help="The run ID to resume. It will be in the URL of the wandb website.",
         default="",
     )
-    parser.add_argument("--save_top_k_checkpoints_phase_2", type=int, default=3, help="Once phase 2 is reached preserve k checkpoints.")
+    parser.add_argument(
+        "--save_top_k_checkpoints_phase_2",
+        type=int,
+        default=3,
+        help="Once phase 2 is reached preserve k checkpoints.",
+    )
 
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)

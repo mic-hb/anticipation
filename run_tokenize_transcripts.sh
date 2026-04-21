@@ -10,7 +10,7 @@
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
 
-# sbatch run_tokenize_transcripts.sh
+# ./run_tokenize_transcripts.sh
 
 # --- set up conda and activate it ---
 # assuming conda binary lives here

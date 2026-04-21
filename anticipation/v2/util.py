@@ -60,7 +60,6 @@ def temporary_directory(
             yield td
 
 
-
 class AtomicDirectory(AbstractContextManager["AtomicDirectory"]):
     """
     Stage output into a temporary directory and atomically promote it to `final_path`
@@ -167,6 +166,7 @@ class AtomicDirectory(AbstractContextManager["AtomicDirectory"]):
             os.replace(temp_dir, final_path)
 
         return False
+
 
 def get_book_keeping_info() -> dict[str, Any]:
     return {

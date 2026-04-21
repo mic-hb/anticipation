@@ -2207,7 +2207,9 @@ def test_no_information_loss_for_multiple_packed_files(
         )
 
 
-def test_tokenize_no_controls_with_force_piano(dense_drums_sparse_piano_midi_path: Path) -> None:
+def test_tokenize_no_controls_with_force_piano(
+    dense_drums_sparse_piano_midi_path: Path,
+) -> None:
     # --- create settings and vocabulary ---
     max_note_duration_in_seconds = 10
     time_resolution = 100
@@ -2240,11 +2242,16 @@ def test_tokenize_no_controls_with_force_piano(dense_drums_sparse_piano_midi_pat
         time_resolution=time_resolution,
     )
 
-    events, _, __ = _maybe_tokenize(dense_drums_sparse_piano_midi_path, settings, convert_all_instruments_to_code=0)
+    events, _, __ = _maybe_tokenize(
+        dense_drums_sparse_piano_midi_path, settings, convert_all_instruments_to_code=0
+    )
     all_midi_program_codes = list(v2_ops.get_instruments(events, settings))
     assert all_midi_program_codes == [0]
 
-def test_tokenize_no_controls_with_force_piano_2(lmd_0_example_1_midi_path: Path) -> None:
+
+def test_tokenize_no_controls_with_force_piano_2(
+    lmd_0_example_1_midi_path: Path,
+) -> None:
     # --- create settings and vocabulary ---
     max_note_duration_in_seconds = 10
     time_resolution = 100
@@ -2277,6 +2284,8 @@ def test_tokenize_no_controls_with_force_piano_2(lmd_0_example_1_midi_path: Path
         time_resolution=time_resolution,
     )
 
-    events, _, __ = _maybe_tokenize(lmd_0_example_1_midi_path, settings, convert_all_instruments_to_code=0)
+    events, _, __ = _maybe_tokenize(
+        lmd_0_example_1_midi_path, settings, convert_all_instruments_to_code=0
+    )
     all_midi_program_codes = list(v2_ops.get_instruments(events, settings))
     assert all_midi_program_codes == [0]

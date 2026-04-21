@@ -126,11 +126,6 @@ def consolidate_bins(
                     f.write(chunk)
 
 
-
-
-
-
-
 def buffered_shuffle_bin_to_npy(
     *,
     bin_path: Path,
@@ -188,7 +183,7 @@ def buffered_shuffle_bin_to_npy(
         if needed <= 0 or read_pos >= num_rows:
             return 0
         take = min(needed, num_rows - read_pos)
-        buffer[buffer_count:buffer_count + take] = src[read_pos:read_pos + take]
+        buffer[buffer_count : buffer_count + take] = src[read_pos : read_pos + take]
         buffer_count += take
         read_pos += take
         return take

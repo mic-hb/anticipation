@@ -27,6 +27,7 @@ def get_time_as_string() -> str:
     # e.g. 2025_01_01_13_31_12
     return dt.strftime("%Y_%m_%d_%H_%M_%S")
 
+
 def get_scaling_params_and_model_settings(gpt: GPT2LMHeadModel) -> dict[str, int]:
     # https://github.com/karpathy/nanochat/blob/c7ba25214276d165eeefca7cb2060587975db189/nanochat/gpt.py#L319
     # Count each group separately (mirrors the grouping in setup_optimizers)
@@ -39,9 +40,7 @@ def get_scaling_params_and_model_settings(gpt: GPT2LMHeadModel) -> dict[str, int
     wpe = sum(p.numel() for p in gpt.transformer.wpe.parameters())
     ln_f = sum(p.numel() for p in gpt.transformer.ln_f.parameters())
 
-    total = (
-        wte + lm_head + transformer_matrices + ln_f + wpe
-    )
+    total = wte + lm_head + transformer_matrices + ln_f + wpe
 
     # indeed using weight tie
     # if using weight tying the params are shared
@@ -58,7 +57,7 @@ def get_scaling_params_and_model_settings(gpt: GPT2LMHeadModel) -> dict[str, int
         "lm_head": lm_head,
         "transformer_matrices": transformer_matrices,
         "total": total,
-        **model_config.to_dict()
+        **model_config.to_dict(),
     }
 
 
@@ -73,7 +72,7 @@ def log_loss(
 ):
     total_params = sum(p.numel() for p in model.parameters())
     model_id = settings.md5_hash()
-    #save_path = save_artfacts_to_enclosing_folder / f"ppl_plot.html"
+    # save_path = save_artfacts_to_enclosing_folder / f"ppl_plot.html"
 
     if context_limit is not None:
         assert settings.context_size % context_limit == 0
@@ -168,13 +167,17 @@ def log_loss(
     # ticks only
     res["tick_ppl"] = np.round(np.exp(ce_ticks.mean().item()), d_rounding)
 
-    if (context_limit is None or context_limit == settings.context_size) and (cut_prefix == 0):
+    if (context_limit is None or context_limit == settings.context_size) and (
+        cut_prefix == 0
+    ):
         # WARNING: hard-coded lakh dataset test split
         # the test split is `f`, 560.98 hours total in there.
         num_seconds_in_test_split = 560.98 * 3600
     else:
         # approximate the number of seconds seen in the limited split
-        num_seconds_in_test_split = (total_ticks * settings.tick_token_every_n_ticks) / settings.time_resolution
+        num_seconds_in_test_split = (
+            total_ticks * settings.tick_token_every_n_ticks
+        ) / settings.time_resolution
 
         # remove the effect of subsampling because we've measured it directly for what
         # the model has seen
@@ -189,7 +192,7 @@ def log_loss(
 
     res["total_params"] = total_params
     res["total_params_m"] = total_params / (1_000_000)
-    res['subsample'] = subsample_ratio
+    res["subsample"] = subsample_ratio
     res["cut_prefix"] = cut_prefix
     res["model_id"] = model_id
 
@@ -224,7 +227,7 @@ def log_loss(
             x=stab_idx,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"stabilization @ {stab_idx}"
+            annotation_text=f"stabilization @ {stab_idx}",
         )
     fig.write_html(str(save_artfacts_to_enclosing_folder / "ppl_plot.html"))
 
@@ -241,8 +244,9 @@ def log_loss(
 
     res_casted["time"] = get_time_as_string()
     res_casted["checkpoint_folder"] = str(save_artfacts_to_enclosing_folder)
-    res_casted["checkpoint_folder_last_part"] = str(save_artfacts_to_enclosing_folder.parts[-1])
-
+    res_casted["checkpoint_folder_last_part"] = str(
+        save_artfacts_to_enclosing_folder.parts[-1]
+    )
 
     p = str(save_artfacts_to_enclosing_folder.parts[-1])
     s_n, s_k = p.split("_")
@@ -264,16 +268,18 @@ def log_loss(
 
     return res_casted
 
+
 def find_stabilization_variance(y, window=50, var_threshold=5e-3):
     # sliding window over the context to see when variance drops below
     # some value
     y = np.asarray(y)
 
     for i in range(len(y) - window):
-        if np.var(y[i:i+window]) < var_threshold:
+        if np.var(y[i : i + window]) < var_threshold:
             return i
 
     return None
+
 
 def format_result_row(res: dict[str, Any]) -> dict[str, str]:
     formatted = {}
@@ -296,6 +302,7 @@ def format_result_row(res: dict[str, Any]) -> dict[str, str]:
 
     return formatted
 
+
 def get_num_steps(pretrained_checkpoint_path: str, num_gpus: int = 1) -> int:
     # TODO: need to know number of epochs the model has seen
     # number of non-augmented epochs
@@ -303,18 +310,10 @@ def get_num_steps(pretrained_checkpoint_path: str, num_gpus: int = 1) -> int:
     pass
 
 
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Eval Loss"
-    )
+    parser = argparse.ArgumentParser(description="Eval Loss")
     # float
-    parser.add_argument(
-        "--subsample",
-        type=int,
-        default=10,
-        help="Subsample ratio"
-    )
+    parser.add_argument("--subsample", type=int, default=10, help="Subsample ratio")
     # path
     parser.add_argument(
         "--checkpoint_dir",
@@ -335,7 +334,9 @@ def main() -> None:
     checkpoint_dir = "/home/mf867/anticipation_isolated/anticipation/output/slurm_logs/232666/checkpoints/step-20000"
     checkpoint_dir = "/home/mf867/anticipation_isolated/anticipation/output/slurm_logs/263233/checkpoints/step-100000"
 
-    checkpoint_dir = "/home/mf867/anticipation/output/checkpoints/midtraining_testing/8203_6659"
+    checkpoint_dir = (
+        "/home/mf867/anticipation/output/checkpoints/midtraining_testing/8203_6659"
+    )
     data_dir = "data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a"
 
     args = parse_args()
@@ -357,10 +358,12 @@ def main() -> None:
     # same settings as in v1 baselines
     context_limit = 1024
     res = log_loss(
-        model, dataset, settings,
+        model,
+        dataset,
+        settings,
         subsample_ratio=subsample,
         context_limit=context_limit,
-        save_artfacts_to_enclosing_folder=Path(checkpoint_dir)
+        save_artfacts_to_enclosing_folder=Path(checkpoint_dir),
     )
     pprint(res)
 

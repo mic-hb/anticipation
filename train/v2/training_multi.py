@@ -15,13 +15,18 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 import lightning as L
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, TQDMProgressBar
+from lightning.pytorch.callbacks import (
+    LearningRateMonitor,
+    ModelCheckpoint,
+    TQDMProgressBar,
+)
 from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.loggers import WandbLogger
 
 from transformers import PretrainedConfig, GPT2LMHeadModel, GPT2Config
 
 from train.v2.dataset_utils import PreTokenizedDataset
+
 
 class MaxStepProgressBar(TQDMProgressBar):
     def __init__(self):
@@ -272,7 +277,7 @@ class TwoPhaseLMModule(L.LightningModule):
             batch_size=self.val_batch_size,
             num_workers=0,
             shuffle=False,
-            pin_memory=True
+            pin_memory=True,
         )
 
     def train_dataloader(self) -> DataLoader:
@@ -315,7 +320,13 @@ class TwoPhaseLMModule(L.LightningModule):
         self.log("train_loss", loss, prog_bar=True, logger=True)
 
         # phase is 0 if pretraining on n, 1 if midtraining on k
-        self.log("train/phase", 1.0 if self.current_epoch == 0 else 2.0, on_step=True, on_epoch=False, sync_dist=True)
+        self.log(
+            "train/phase",
+            1.0 if self.current_epoch == 0 else 2.0,
+            on_step=True,
+            on_epoch=False,
+            sync_dist=True,
+        )
         if not self._switch_logged and self.global_step >= self.steps_epoch_0:
             self._switch_logged = True
 
@@ -327,27 +338,35 @@ class TwoPhaseLMModule(L.LightningModule):
 
         logits = outputs.logits.float()  # upcast logits and compute loss in fp32
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
-        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log(
+            "val_loss", loss, on_epoch=True, prog_bar=True, logger=True, sync_dist=True
+        )
         return loss
 
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
-                "params": [p for n, p in self.model.named_parameters()
-                            if not any(nd in n for nd in no_decay)],
+                "params": [
+                    p
+                    for n, p in self.model.named_parameters()
+                    if not any(nd in n for nd in no_decay)
+                ],
                 "weight_decay": self.hparams.weight_decay,
             },
             {
-                "params": [p for n, p in self.model.named_parameters()
-                            if any(nd in n for nd in no_decay)],
+                "params": [
+                    p
+                    for n, p in self.model.named_parameters()
+                    if any(nd in n for nd in no_decay)
+                ],
                 "weight_decay": 0.0,
             },
         ]
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters,
             lr=self.hparams.learning_rate,
-            betas=(0.9, 0.95)
+            betas=(0.9, 0.95),
         )
 
         train_dataloader = self.train_dataloader()
@@ -361,27 +380,27 @@ class TwoPhaseLMModule(L.LightningModule):
                 pct_start=pct_start,
                 div_factor=100.0,
                 final_div_factor=0.1,
-                anneal_strategy='cos',
+                anneal_strategy="cos",
                 three_phase=False,
-                cycle_momentum=False
+                cycle_momentum=False,
             )
 
             scheduler_config = {
                 "scheduler": scheduler,
                 "interval": "step",
-                "frequency": 1
+                "frequency": 1,
             }
 
             return [optimizer], [scheduler_config]
 
         return optimizer
 
-    def save_model_checkpoint(
-        self, step_dir
-    ) -> None:
+    def save_model_checkpoint(self, step_dir) -> None:
         assert isinstance(self.model, GPT2LMHeadModel)
         self.model.save_pretrained(
-            step_dir, safe_serialization=True, max_shard_size="2GB",
+            step_dir,
+            safe_serialization=True,
+            max_shard_size="2GB",
         )
 
 
@@ -409,8 +428,12 @@ def build_two_phase_module(
     base1 = PreTokenizedDataset(dataset1_path)
     base2 = PreTokenizedDataset(dataset2_path)
 
-    effective_num_sequences_1 = subset_size_1 if subset_size_1 is not None else len(base1)
-    effective_num_sequences_2 = subset_size_2 if subset_size_2 is not None else len(base2)
+    effective_num_sequences_1 = (
+        subset_size_1 if subset_size_1 is not None else len(base1)
+    )
+    effective_num_sequences_2 = (
+        subset_size_2 if subset_size_2 is not None else len(base2)
+    )
 
     if effective_num_sequences_1 > len(base1):
         raise ValueError(
@@ -422,9 +445,13 @@ def build_two_phase_module(
         )
 
     if subset_size_1 is not None and subset_seed_1 is None:
-        raise ValueError("subset_seed_1 must be provided when subset_size_1 is not None")
+        raise ValueError(
+            "subset_seed_1 must be provided when subset_size_1 is not None"
+        )
     if subset_size_2 is not None and subset_seed_2 is None:
-        raise ValueError("subset_seed_2 must be provided when subset_size_2 is not None")
+        raise ValueError(
+            "subset_seed_2 must be provided when subset_size_2 is not None"
+        )
 
     steps_epoch_0 = optimizer_steps_per_epoch(
         num_sequences=effective_num_sequences_1,
@@ -471,8 +498,9 @@ def build_two_phase_module(
         subset_size_2=subset_size_2,
         subset_seed_1=subset_seed_1,
         subset_seed_2=subset_seed_2,
-        warmup_steps=warmup_steps
+        warmup_steps=warmup_steps,
     )
+
 
 def do_training(args):
     num_devices = args.gpus_per_node
@@ -507,7 +535,7 @@ def do_training(args):
         save_top_k=0,
         monitor=None,
         save_last=False,
-        every_n_train_steps=args.steps_per_checkpoint
+        every_n_train_steps=args.steps_per_checkpoint,
     )
     checkpoint_callback.CHECKPOINT_EQUALS_CHAR = "-"
 
@@ -548,9 +576,12 @@ def do_training(args):
         if args.wandb_resume_from_run_id:
             resume_from_run_id: str = args.wandb_resume_from_run_id
             resume_from_step: int = args.wandb_resume_from_step
-            assert resume_from_step > 0, "Resume from step is unfilled or 0 - start a new run or provide a resume step."
+            assert resume_from_step > 0, (
+                "Resume from step is unfilled or 0 - start a new run or provide a resume step."
+            )
             resume_from = f"{resume_from_run_id}?_step={resume_from_step}"
             import wandb
+
             _run = wandb.init(
                 project=args.wandb_project,
                 name=run_name,
@@ -560,7 +591,7 @@ def do_training(args):
                 fork_from=resume_from,
                 # this is in private preview, forking is the closest alternative for now
                 # it starts a new run from the step you specify
-                #resume_from=resume_from,
+                # resume_from=resume_from,
             )
             wandb_logger = WandbLogger(
                 experiment=_run,
@@ -600,7 +631,7 @@ def do_training(args):
         val_check_interval=args.steps_per_eval,
         check_val_every_n_epoch=None,
         max_steps=lit_model.total_optimizer_steps,
-        **logger_dict
+        **logger_dict,
     )
     trainer.fit(lit_model)
     trainer.validate(lit_model)
@@ -611,57 +642,120 @@ def do_training(args):
     print(f"saved checkpoint to: {Path(args.output_dir)}")
 
     # saves trainer state and model weights
-    #trainer.save_checkpoint((Path(args.output_dir) / "final.ckpt"))
+    # trainer.save_checkpoint((Path(args.output_dir) / "final.ckpt"))
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GPT-2 training script using PyTorch Lightning")
+    parser = argparse.ArgumentParser(
+        description="GPT-2 training script using PyTorch Lightning"
+    )
 
     # new for midtraining
-    parser.add_argument("--dataset1_path", type=str, help="Dataset 1 (n, transcripts) numpy file")
-    parser.add_argument("--dataset2_path", type=str, help="Dataset 1 (k, lakh) numpy file")
-    parser.add_argument("--val_dataset_path", type=str, help="Lakh validation numpy file")
+    parser.add_argument(
+        "--dataset1_path", type=str, help="Dataset 1 (n, transcripts) numpy file"
+    )
+    parser.add_argument(
+        "--dataset2_path", type=str, help="Dataset 1 (k, lakh) numpy file"
+    )
+    parser.add_argument(
+        "--val_dataset_path", type=str, help="Lakh validation numpy file"
+    )
 
-    parser.add_argument("--n_ds1", type=int, default=10, help="Number of sequences from transcripts")
-    parser.add_argument("--k_ds2", type=int, default=10, help="Number of sequences from Lakh train")
+    parser.add_argument(
+        "--n_ds1", type=int, default=10, help="Number of sequences from transcripts"
+    )
+    parser.add_argument(
+        "--k_ds2", type=int, default=10, help="Number of sequences from Lakh train"
+    )
 
-    parser.add_argument("--dataset1_subset_seed", type=int, default=1234, help="Dataset 1 subset seed")
-    parser.add_argument("--dataset2_subset_seed", type=int, default=5678, help="Dataset 1 subset seed")
+    parser.add_argument(
+        "--dataset1_subset_seed", type=int, default=1234, help="Dataset 1 subset seed"
+    )
+    parser.add_argument(
+        "--dataset2_subset_seed", type=int, default=5678, help="Dataset 1 subset seed"
+    )
 
     # --- existed before ---
-    parser.add_argument("--output_dir", type=str, help="Output directory for checkpoints")
-    parser.add_argument("--checkpoint_path", type=str, default=None,
-                        help="Initialize model weights from this checkpoint (not supported)")
+    parser.add_argument(
+        "--output_dir", type=str, help="Output directory for checkpoints"
+    )
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        default=None,
+        help="Initialize model weights from this checkpoint (not supported)",
+    )
 
     # Dataset parameters
-    parser.add_argument("--seq_len", type=int, default=1024, help="Dataset sequence length")
+    parser.add_argument(
+        "--seq_len", type=int, default=1024, help="Dataset sequence length"
+    )
 
     # Model parameters
-    parser.add_argument("--hidden_dim", type=int, default=768, help="Model hidden dimensions")  # 768
-    parser.add_argument("--num_heads", type=int, default=12, help="Model number of attention heads")  # 12
-    parser.add_argument("--num_layers", type=int, default=12, help="Model number of layers")  # 12
-    parser.add_argument("--embed_pdrop", type=float, default=0.1, help="Apply embedding dropout")
-    parser.add_argument("--resid_pdrop", type=float, default=0.1, help="Apply residual dropout")
+    parser.add_argument(
+        "--hidden_dim", type=int, default=768, help="Model hidden dimensions"
+    )  # 768
+    parser.add_argument(
+        "--num_heads", type=int, default=12, help="Model number of attention heads"
+    )  # 12
+    parser.add_argument(
+        "--num_layers", type=int, default=12, help="Model number of layers"
+    )  # 12
+    parser.add_argument(
+        "--embed_pdrop", type=float, default=0.1, help="Apply embedding dropout"
+    )
+    parser.add_argument(
+        "--resid_pdrop", type=float, default=0.1, help="Apply residual dropout"
+    )
 
     # Optimization parameters
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--train_batch_size", type=int, default=512,
-                        help="Batch size for training (total, not per device)")
-    parser.add_argument("--val_batch_size", type=int, default=512,
-                        help="Batch size for validation")
-    parser.add_argument("--warmup_steps", type=int, default=200, help="Number of warmup steps")
+    parser.add_argument(
+        "--learning_rate", type=float, default=3e-4, help="Learning rate"
+    )
+    parser.add_argument(
+        "--train_batch_size",
+        type=int,
+        default=512,
+        help="Batch size for training (total, not per device)",
+    )
+    parser.add_argument(
+        "--val_batch_size", type=int, default=512, help="Batch size for validation"
+    )
+    parser.add_argument(
+        "--warmup_steps", type=int, default=200, help="Number of warmup steps"
+    )
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay")
-    parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16 mixed precision training")
-    parser.add_argument("--steps_per_eval", type=int, default=1000, help="Number of steps between validation evals")
-    parser.add_argument("--steps_per_checkpoint", type=int, default=1000,
-                        help="Number of steps between checkpoints")  # set back to 1000
+    parser.add_argument(
+        "--max_grad_norm", type=float, default=1.0, help="Max gradient norm"
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps",
+    )
+    parser.add_argument(
+        "--bf16", action="store_true", help="Use bfloat16 mixed precision training"
+    )
+    parser.add_argument(
+        "--steps_per_eval",
+        type=int,
+        default=1000,
+        help="Number of steps between validation evals",
+    )
+    parser.add_argument(
+        "--steps_per_checkpoint",
+        type=int,
+        default=1000,
+        help="Number of steps between checkpoints",
+    )  # set back to 1000
 
     # System parameters
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes")
-    parser.add_argument("--gpus_per_node", type=int, default=1, help="Number of GPUs per node")  # 4 gpus
+    parser.add_argument(
+        "--gpus_per_node", type=int, default=1, help="Number of GPUs per node"
+    )  # 4 gpus
 
     # wandb stuff
     parser.add_argument(
