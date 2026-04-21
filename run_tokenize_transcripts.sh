@@ -30,8 +30,4 @@ mkdir -p "$CUSTOM_TMP_DIR"
 
 PYTHONPATH=. python train/v2/dataset_tokenize.py \
     --dataset_type transcripts \
-    --v1_mode \
-    --settings_json_name "ar_only_local_midi_no_instr_limit_settings_87451b329323d36a658ac64ed9a8bb81.json" \
-
-# validation split is the Lakh split
-cp "data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a/valid.npy" "data/tokenized_datasets/transcripts/7f1aadd4f9603af995abc3428289f7ec/valid.npy"
+    --v1_mode

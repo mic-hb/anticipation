@@ -48,6 +48,8 @@ class Vocab:
     AUTOREGRESS: int = SEPARATOR + 1
     ANTICIPATE: int = AUTOREGRESS + 1
 
+    use_controls: bool = True
+
     def __post_init__(self) -> None:
         # check that all the token values are organized and increasing
         # event block
@@ -58,25 +60,29 @@ class Vocab:
         assert self.TICK > self.NOTE_OFFSET
 
         # control block
-        assert self.CONTROL_OFFSET > self.NOTE_OFFSET
-        assert self.ATIME_OFFSET >= self.CONTROL_OFFSET
-        assert self.ADUR_OFFSET > self.ATIME_OFFSET
-        assert self.ANOTE_OFFSET > self.ADUR_OFFSET
+        if self.use_controls:
+            assert self.CONTROL_OFFSET > self.NOTE_OFFSET
+            assert self.ATIME_OFFSET >= self.CONTROL_OFFSET
+            assert self.ADUR_OFFSET > self.ATIME_OFFSET
+            assert self.ANOTE_OFFSET > self.ADUR_OFFSET
+            assert self.ANTICIPATE > self.AUTOREGRESS
+            assert self.SPECIAL_OFFSET > self.ANOTE_OFFSET
 
         # this is not strong enough to guarantee correctness, we will
         # check that later in settings
-        assert self.SPECIAL_OFFSET > self.ANOTE_OFFSET
         assert self.SEPARATOR >= self.SPECIAL_OFFSET
         assert self.AUTOREGRESS > self.SEPARATOR
-        assert self.ANTICIPATE > self.AUTOREGRESS
 
     def total_tokens(self) -> int:
-        field_to_val = {
-            field.name: getattr(self, field.name)
-            for field in fields(self)  # noqa
-        }
-        # zero indexed
-        return max(field_to_val.values()) + 1
+        if self.use_controls:
+            field_to_val = {
+                field.name: getattr(self, field.name)
+                for field in fields(self)  # noqa
+            }
+            # zero indexed
+            return max(field_to_val.values()) + 1
+        else:
+            return self.AUTOREGRESS + 1
 
     def realize_as_array(self) -> list[dict]:
         v = []
@@ -190,6 +196,7 @@ def make_vocab(
     tick_token_every_n_ticks: int,
     max_note_duration_in_seconds: float,
     time_resolution: int,
+    use_controls: bool = True,
 ) -> Vocab:
     max_note_duration_in_ticks = int(max_note_duration_in_seconds * time_resolution)
     time_offset = 0
@@ -208,30 +215,56 @@ def make_vocab(
     note_stops_at = dur_stops_at + num_notes
 
     control_offset = note_stops_at + 1
-
     special_offset = dur_stops_at + control_offset + num_notes
 
-    return Vocab(
-        # events
-        EVENT_OFFSET=0,
-        # the triple of (time, dur, note x instr)
-        TIME_OFFSET=time_offset,
-        DUR_OFFSET=time_stops_at,
-        NOTE_OFFSET=dur_stops_at,
-        # the tick token
-        TICK=note_stops_at,
-        # controls
-        CONTROL_OFFSET=control_offset,
-        # the triple of (time, dur, note x instr)
-        ATIME_OFFSET=time_offset + control_offset,
-        ADUR_OFFSET=time_stops_at + control_offset,
-        ANOTE_OFFSET=dur_stops_at + control_offset,
-        # sequence-level instruction tokens
-        SPECIAL_OFFSET=special_offset,
-        SEPARATOR=special_offset,
-        AUTOREGRESS=special_offset + 1,
-        ANTICIPATE=special_offset + 2,
-    )
+    if use_controls:
+        return Vocab(
+            # events
+            EVENT_OFFSET=0,
+            # the triple of (time, dur, note x instr)
+            TIME_OFFSET=time_offset,
+            DUR_OFFSET=time_stops_at,
+            NOTE_OFFSET=dur_stops_at,
+            # the tick token
+            TICK=note_stops_at,
+            # controls
+            CONTROL_OFFSET=control_offset,
+            # the triple of (time, dur, note x instr)
+            ATIME_OFFSET=time_offset + control_offset,
+            ADUR_OFFSET=time_stops_at + control_offset,
+            ANOTE_OFFSET=dur_stops_at + control_offset,
+            # sequence-level instruction tokens
+            SPECIAL_OFFSET=special_offset,
+            SEPARATOR=special_offset,
+            AUTOREGRESS=special_offset + 1,
+            ANTICIPATE=special_offset + 2,
+            use_controls=True,
+        )
+    else:
+        return Vocab(
+            # events
+            EVENT_OFFSET=0,
+            # the triple of (time, dur, note x instr)
+            TIME_OFFSET=time_offset,
+            DUR_OFFSET=time_stops_at,
+            NOTE_OFFSET=dur_stops_at,
+            # the tick token
+            TICK=note_stops_at,
+            # sequence-level instruction tokens
+            SPECIAL_OFFSET=note_stops_at + 1,
+            SEPARATOR=note_stops_at + 1,
+            AUTOREGRESS=note_stops_at + 2,
+            # ---- not in use ----
+            use_controls=False,
+            # controls, just making these all larger than
+            # the event token IDs since some logic uses that to
+            # determine if something is an event or control
+            ANTICIPATE=note_stops_at + 1,
+            CONTROL_OFFSET=note_stops_at + 1,
+            ATIME_OFFSET=note_stops_at + 1,
+            ADUR_OFFSET=note_stops_at + 1,
+            ANOTE_OFFSET=note_stops_at + 1,
+        )
 
 
 # MIDI defines 128 specific instruments labelled 0-127, but then
@@ -333,6 +366,13 @@ class AnticipationV2Settings:
         _, md5 = self._get_as_file()
         return md5
 
+    @property
+    def m(self) -> int:
+        # ctx = 1 + self.event_size * self.m
+        m = (self.context_size - 1) / self.event_size
+        assert m % 1 == 0.0
+        return int(m)
+
     def save_to_disk(self, enclosing_folder: Path) -> Path:
         assert isinstance(enclosing_folder, Path)
         assert enclosing_folder.exists()
@@ -373,19 +413,22 @@ class AnticipationV2Settings:
         # ensure that the control tokens' space does not overlap with events' space
         total_instr_note_tokens = self.max_midi_pitch * self.max_midi_instrument
         assert v.TICK == v.NOTE_OFFSET + total_instr_note_tokens  # 0-indexed
-        assert v.CONTROL_OFFSET > v.TICK
 
-        # ensure that the ranges of (time -> duration) and (duration -> note) are
-        # identical for events and controls
-        assert v.ADUR_OFFSET - v.ATIME_OFFSET == v.DUR_OFFSET - v.TIME_OFFSET
-        assert v.ANOTE_OFFSET - v.ADUR_OFFSET == v.NOTE_OFFSET - v.DUR_OFFSET
+        if v.use_controls:
+            assert v.CONTROL_OFFSET > v.TICK
 
-        assert v.SPECIAL_OFFSET >= v.ANOTE_OFFSET + total_instr_note_tokens, (
-            f"!({v.SPECIAL_OFFSET} >= {v.ANOTE_OFFSET + total_instr_note_tokens})"
-        )
+            # ensure that the ranges of (time -> duration) and (duration -> note) are
+            # identical for events and controls
+            assert v.ADUR_OFFSET - v.ATIME_OFFSET == v.DUR_OFFSET - v.TIME_OFFSET
+            assert v.ANOTE_OFFSET - v.ADUR_OFFSET == v.NOTE_OFFSET - v.DUR_OFFSET
+
+            assert v.SPECIAL_OFFSET >= v.ANOTE_OFFSET + total_instr_note_tokens, (
+                f"!({v.SPECIAL_OFFSET} >= {v.ANOTE_OFFSET + total_instr_note_tokens})"
+            )
+            assert v.ANTICIPATE > v.AUTOREGRESS
+
         assert v.SEPARATOR >= v.SPECIAL_OFFSET
         assert v.AUTOREGRESS > v.SEPARATOR
-        assert v.ANTICIPATE > v.AUTOREGRESS
 
         # ensure there's no 0s in this
         assert 0 not in self.augmentation_pitch_shifts, (

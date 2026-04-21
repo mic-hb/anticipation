@@ -1,3 +1,5 @@
+import os
+
 import random
 import shutil
 import pandas as pd
@@ -11,14 +13,17 @@ from pathlib import Path
 from typing import Any, Iterable, Union, Optional
 
 import numpy as np
+from numpy.lib.format import open_memmap
 from anticipation.v2.config import (
     CONFIG_ROOT,
     DATASET_ROOT,
     LAKH_MIDI_FULL_PATH,
     TOKENIZED_DATASETS_SAVE_TO_PATH,
     AnticipationV2Settings,
+    Vocab,
+    make_vocab
 )
-from anticipation.v2.io import TokenSequenceBinaryFile, consolidate_bins
+from anticipation.v2.io import TokenSequenceBinaryFile, consolidate_bins, buffered_shuffle_bin_to_npy
 from anticipation.v2.tokenize import (
     TokenizationStatSummary,
     tokenize,
@@ -27,6 +32,7 @@ from anticipation.v2.util import (
     get_book_keeping_info,
     iter_files,
     temporary_directory,
+    AtomicDirectory,
 )
 from tqdm.contrib.concurrent import process_map
 
@@ -130,25 +136,32 @@ def _get_dataset_file_from_paths(
     # so it is clearer how to load it
     bin_out_path = shards_dir / (save_to + ".bin")
     npy_out_path = parent_work_dir / (save_to + ".npy")
+    dtype = TokenSequenceBinaryFile.get_dtype_for_tokens(
+        settings.vocab.total_tokens()
+    )
     consolidate_bins(
         list(shards_dir.rglob("*.bin")),
         out_path=bin_out_path,
-        dtype=TokenSequenceBinaryFile.get_dtype_for_tokens(
-            settings.vocab.total_tokens()
-        ),
+        dtype=dtype,
         seq_len=settings.context_size,
     )
-    loaded_arr = TokenSequenceBinaryFile.load_from_disk_to_numpy(
-        bin_out_path, settings.context_size, settings.vocab.total_tokens()
-    )
     if do_shuffle:
-        # NB: this won't work for huge datasets that don't fit in ram, might need
-        # to fix later
-        np.random.seed(settings.train_data_split_shuffle_random_seed)
-        loaded_arr = loaded_arr[np.random.permutation(loaded_arr.shape[0])]
+        buffered_shuffle_bin_to_npy(
+            bin_path=bin_out_path,
+            npy_path=npy_out_path,
+            dtype=dtype,
+            seq_len=settings.context_size,
+            seed=settings.train_data_split_shuffle_random_seed,
+        )
+    else:
+        # -----
+        loaded_arr = TokenSequenceBinaryFile.load_from_disk_to_numpy(
+            bin_out_path, settings.context_size, settings.vocab.total_tokens()
+        )
 
-    # save the consolidated samples to single numpy
-    np.save(npy_out_path, loaded_arr)
+        # save the consolidated samples to single numpy
+        np.save(npy_out_path, loaded_arr)
+
     return npy_out_path, records
 
 
@@ -180,7 +193,6 @@ def get_lakh_midi_splits_and_configs(
         {
             "name": "test",
             "dataset_paths": lmd_test,
-            # TODO: implement this!
             "do_shuffle": False,
         },
     ]
@@ -350,11 +362,7 @@ def _write_book_keeping_info_and_get_dataset_enclosing_path(
     - generating a UUID, creating a directory using this UUID and returns it
     """
     dataset_generation_info = get_book_keeping_info()
-
-    # save all subsequent dataset files to `work_dir` - do not allow
-    # overwriting folder of same name! That means it was already generated
-    work_dir = save_tokenized_dataset_to / settings.md5_hash()
-    work_dir.mkdir(exist_ok=False)
+    work_dir = save_tokenized_dataset_to
 
     # save bookkeeping info
     dataset_generation_info_save_to = work_dir / "book_keeping_info.json"
@@ -539,24 +547,24 @@ def main(
     settings_path: Path, put_shards_in_tmp: bool, raw_data_enclosing_path: Path, v1_mode: bool = False,
 ) -> None:
     dataset_enclosing_path = raw_data_enclosing_path.parts[-1]
-    put_tokenized_datasets_in_dir = (
-        TOKENIZED_DATASETS_SAVE_TO_PATH / dataset_enclosing_path
-    )
-    put_tokenized_datasets_in_dir.mkdir(exist_ok=True, parents=True)
-
     settings = AnticipationV2Settings.load_from_disk(settings_path)
 
-    # do the work now, no more config past this point
-    _tokenize_dataset_in_parallel(
-        settings,
-        raw_data_enclosing_path,
-        _write_book_keeping_info_and_get_dataset_enclosing_path(
-            settings, put_tokenized_datasets_in_dir
-        ),
-        put_shards_in_tmp,
-        get_splits(raw_data_enclosing_path),
-        v1_mode=v1_mode,
-    )
+    put_tokenized_datasets_in_dir = (
+        TOKENIZED_DATASETS_SAVE_TO_PATH / dataset_enclosing_path
+    ) / settings.md5_hash()
+
+    with AtomicDirectory(put_tokenized_datasets_in_dir, overwrite=False, keep_temp_on_error=False) as txn:
+        # do the work now, no more config past this point
+        _tokenize_dataset_in_parallel(
+            settings,
+            raw_data_enclosing_path,
+            _write_book_keeping_info_and_get_dataset_enclosing_path(
+                settings, txn.path
+            ),
+            put_shards_in_tmp,
+            get_splits(raw_data_enclosing_path),
+            v1_mode=v1_mode,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -571,13 +579,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--settings_json_name",
-        type=str,
-        default=None,
-        required=True,
-        help="name to settings file, not path - must be in ./config/...",
-    )
-    parser.add_argument(
 	    '--v1_mode', action='store_true', help='use v1 tokenization mode (AR only supported)'
 	)
     _args = parser.parse_args()
@@ -585,29 +586,60 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+    """
+    Example:
+
+        PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type lakh --v1_mode
+
+    """
     mp.set_start_method("spawn", force=True)
     args = parse_args()
 
-    if args.v1_mode:
-        # v1 mode, use same settings
-        settings_file_name: str = "settings_b0d0dbce322fc3318387b6cc12cf096a.json"
-        settings_file_path: Path = (DATASET_ROOT / "tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a/settings_b0d0dbce322fc3318387b6cc12cf096a.json")
-        # vocab size: 55028
-        v1_lakh_settings = AnticipationV2Settings.load_from_disk(settings_file_path)
-        settings_props = v1_lakh_settings.to_dict()
-        settings_props["max_track_instruments"] = 10_000
-        settings_props["num_workers_in_dataset_construction"] = 16
-        override_settings = AnticipationV2Settings.from_dict(settings_props)
-        settings_file_path = override_settings.save_to_disk((DATASET_ROOT / "tokenized_datasets/transcripts"))
-        settings_file_name = str(settings_file_path.parts[-1])
+    # --- create settings and vocabulary ---
+    max_note_duration_in_seconds = 10
+    time_resolution = 100
+    tick_token_every_n_ticks = 0
+    num_workers = 16
+
+    n = len(os.sched_getaffinity(0))
+
+    my_vocab: Vocab = make_vocab(
+        tick_token_every_n_ticks=tick_token_every_n_ticks,
+        time_resolution=time_resolution,
+        max_note_duration_in_seconds=max_note_duration_in_seconds,
+        use_controls=False,
+    )
+    if args.dataset_type == "lakh":
+        max_instr = 16
     else:
-        settings_file_name: str = args.settings_json_name
-        settings_file_path: Path = CONFIG_ROOT / settings_file_name
+        # no limit
+        max_instr = 10_000
 
-    assert settings_file_path.exists()
-    assert settings_file_path.is_file()
-    assert settings_file_path.suffix == ".json"
+    if args.dataset_type == "maestro3":
+        # too small - if 16 workers, some won't have any work to do
+        num_workers = 1
+        max_instr = 10_000
 
+    assert n >= num_workers, f"not enough CPUs. Need: {num_workers}, Have: {n}"
+    to_create = AnticipationV2Settings(
+        vocab=my_vocab,
+        delta=5,
+        context_size=1024,
+        # filter settings
+        max_track_instruments=max_instr,
+        max_note_duration_in_seconds=max_note_duration_in_seconds,
+        # data mixture and augmentation settings
+        num_autoregressive_seq_per_midi_file=1,
+        num_span_anticipation_augmentations_per_midi_file=0,
+        num_instrument_anticipation_augmentations_per_midi_file=0,
+        # system-like settings
+        num_workers_in_dataset_construction=num_workers,
+        do_clip_overlapping_durations_in_midi_conversion=False,
+        # time settings
+        tick_token_every_n_ticks=tick_token_every_n_ticks,
+        time_resolution=time_resolution,
+    )
+    settings_file_path = to_create.save_to_disk(CONFIG_ROOT)
     configs = {
         "lakh": {
             "settings": settings_file_path,

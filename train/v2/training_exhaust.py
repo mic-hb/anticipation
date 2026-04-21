@@ -45,6 +45,7 @@ from train.v2.hf_gpt2_rewrite import (
     get_scaling_analysis_data,
     print0,
 )
+from anticipation.v2.config import AnticipationV2Settings
 
 import warnings
 warnings.filterwarnings(
@@ -838,11 +839,21 @@ def do_training(args):
 
     ds_1 = PreTokenizedDataset(Path(args.dataset1_path))
     ds_2 = PreTokenizedDataset(Path(args.dataset2_path))
+    print("Total seq in ds1:", len(ds_1))
+    print("Total seq in ds2:", len(ds_2))
+
     assert ds_1.seq_len == ds_2.seq_len
     seq_len = ds_1.seq_len
     del ds_1
     del ds_2
-    vocab_size = 55028
+
+    # check that the vocabulary settings that produced each dataset are equal
+    hash_name_ds_1 = Path(args.dataset1_path).parent.name
+    hash_name_ds_2 = Path(args.dataset2_path).parent.name
+    settings_ds_1 = AnticipationV2Settings.load_from_disk(Path(args.dataset1_path).parent / ("settings_" + hash_name_ds_1 + ".json"))
+    settings_ds_2 = AnticipationV2Settings.load_from_disk(Path(args.dataset2_path).parent / ("settings_" + hash_name_ds_2 + ".json"))
+    assert settings_ds_1.vocab == settings_ds_2.vocab
+    vocab_size = settings_ds_1.vocab.total_tokens()
 
     if args.start_phase_2_from is None:
         # PHASE 1

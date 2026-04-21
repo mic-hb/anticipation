@@ -23,7 +23,7 @@ from anticipation.v2.types import (
     MIDIProgramCode,
     MIDITick,
 )
-from anticipation.v2.config import AnticipationV2Settings
+from anticipation.v2.config import AnticipationV2Settings, Vocab
 from anticipation.v2.convert import (
     midi_to_compound,
     compound_to_events,
@@ -623,25 +623,29 @@ def tokenize(
       the given files. This will be empty if no files were ignored.
     """
     if v1_mode:
-        tokenize_v1_without_intermediates(midi_files, output, settings, idx=shard_id, convert_all_instruments_to_code=convert_all_instruments_to_code)
+        num_seq, num_rest, num_too_short, num_too_long, num_too_many_instr, num_inexpressible, num_truncated, num_given_files, ignored_files, num_tokens_lost_in_buffer, num_sep_tokens, num_files_actually_tokenized = _do_tokenize(midi_files, output, settings, idx=shard_id, convert_all_instruments_to_code=convert_all_instruments_to_code)
 
-        # these are unpopulated in v1 mode
         return TokenizationStatSummary(
-            num_given_files=0,
-            num_tokenized_files=0,
-            num_sequences=0,
-            num_times_end_was_truncated=0,
-            num_tick_tokens=0,
-            num_separator_tokens=0,
-            num_autoregress_tokens=0,
+            num_given_files=num_given_files,
+            num_tokenized_files=num_files_actually_tokenized,
+            num_sequences=num_seq,
+            num_times_end_was_truncated=num_truncated,
+            num_tick_tokens=num_rest,
+            num_separator_tokens=num_sep_tokens,
+            # ---
+            # intentional - just have AR token once per seq that was realized
+            num_autoregress_tokens=num_seq,
             num_anticipate_tokens=0,
-            num_lost_tokens_left_in_buffer=0,
+            # ---
+            num_lost_tokens_left_in_buffer=num_tokens_lost_in_buffer,
+            # --- for AR only, none of these are relevant or meaningful ---
             num_truncations_before_augmentation=0,
             num_pitch_transpose_augmentations=0,
             num_times_span_had_insufficient_time=0,
             total_time_in_midi_ticks_before_augmentation=0,
             total_time_in_midi_ticks=0,
-            ignored_files={},
+            # ---
+            ignored_files=ignored_files,
         )
 
     if shard_id == 0:
@@ -850,6 +854,147 @@ def _get_span_augmentation(
 
 
 
+
+def _do_tokenize(
+    datafiles,
+    output,
+    settings: AnticipationV2Settings,
+    idx: int = 0,
+    convert_all_instruments_to_code: Optional[int] = None,
+):
+    tokens = []
+    all_truncations = 0
+    seqcount = rest_count = 0
+
+    # (short, long, too many instruments, inexpressible)
+    stats = 4 * [0]
+
+    outfile = TokenSequenceBinaryFile(
+        output,
+        seq_len=settings.context_size,
+        vocab_size=settings.vocab.total_tokens(),
+    )
+    v: Vocab = settings.vocab
+
+    num_given_files = 0
+    num_files_actually_tokenized = 0
+    num_sep_tokens = 0
+    ignored_files = defaultdict(list)
+    augment_factor = 1
+    concatenated_tokens = []
+    for j, filename in tqdm(list(enumerate(datafiles)), desc=f'#{idx}', position=idx+1, leave=True):
+        num_given_files += 1
+        all_events, truncations, status = _maybe_tokenize(filename, settings, convert_all_instruments_to_code=convert_all_instruments_to_code)
+
+        if status is not None:
+            continue
+
+        num_files_actually_tokenized += 1
+
+        instruments = list(v2_ops.get_instruments(all_events, settings).keys())
+        end_time = v2_ops.max_time(all_events, settings, seconds=False)
+        # different random augmentations
+        # pp 24
+        # 10% without anticipation (standard AR)
+        # 10% span anticipation
+        # 40% instrument anticipation
+        # 40% random anticipation
+        for k in range(augment_factor):
+            if k % 10 == 0:
+                # no augmentation
+                events = all_events.copy()
+                controls = []
+            elif k % 10 == 1:
+                # not supported
+                # span augmentation
+                if False:
+                    lmbda = .05
+                    events, controls = extract_spans(all_events, lmbda)
+                else:
+                    continue
+            elif k % 10 < 6:
+                # not supported
+                # random augmentation
+                if False:
+                    r = np.random.randint(1,ANTICIPATION_RATES)
+                    events, controls = extract_random(all_events, r)
+                else:
+                    continue
+            else:
+                # not supported
+                if False:
+                    if len(instruments) > 1:
+                        # instrument augmentation: at least one, but not all instruments
+                        u = 1+np.random.randint(len(instruments)-1)
+                        subset = np.random.choice(instruments, u, replace=False)
+                        events, controls = extract_instruments(all_events, subset)
+                    else:
+                        # no augmentation
+                        events = all_events.copy()
+                        controls = []
+                else:
+                    continue
+
+            if len(concatenated_tokens) == 0:
+                z = v.AUTOREGRESS
+
+            all_truncations += truncations
+            events = v2_ops.pad(events, settings, end_time)
+            rest_count += sum(1 if tok == v.TICK else 0 for tok in events[2::3])
+            tokens, controls = v1_ops.anticipate(events, controls)
+            assert len(controls) == 0 # should have consumed all controls (because of padding)
+            tokens[0:0] = [v.SEPARATOR, v.SEPARATOR, v.SEPARATOR]
+            concatenated_tokens.extend(tokens)
+
+            # write out full sequences to file
+            while len(concatenated_tokens) >= settings.event_size*settings.m:
+                seq = concatenated_tokens[0:settings.event_size*settings.m]
+                concatenated_tokens = concatenated_tokens[settings.event_size*settings.m:]
+
+                # relativize time to the context
+                seq = v2_ops.translate(seq, -v2_ops.min_time(seq, settings, seconds=False), settings, seconds=False)
+                assert v2_ops.min_time(seq, settings, seconds=False) == 0
+                if v2_ops.min_time(seq, settings, seconds=False) >= settings.max_time:
+                    stats[3] += 1
+                    continue
+
+                # if seq contains SEPARATOR, global controls describe the first sequence
+                seq.insert(0, z)
+
+                _s = [int(tok) for tok in seq]
+                outfile.append(_s)
+                seqcount += 1
+
+                # grab the current augmentation controls if we didn't already
+                z = v.AUTOREGRESS
+
+
+    # concatenated_tokens may be non-empty by the time this function returns
+    # it will contain any tokens that do not exactly fit in the context size
+    # not a big deal in a large dataset
+    num_tokens_lost_in_buffer = len(concatenated_tokens)
+    num_sep_tokens -= concatenated_tokens.count(v.SEPARATOR)
+    num_sep_tokens = max(num_sep_tokens, 0)
+
+    print("Token buffer had remaining: ", num_tokens_lost_in_buffer)
+
+    outfile.close()
+    return (
+        seqcount,
+        rest_count,
+        stats[0],
+        stats[1],
+        stats[2],
+        stats[3],
+        all_truncations,
+        num_given_files,
+        dict(ignored_files),
+        num_tokens_lost_in_buffer,
+        num_sep_tokens,
+        num_files_actually_tokenized
+    )
+
+
 def tokenize_v1_without_intermediates(datafiles, output, settings: AnticipationV2Settings, augment_factor: int=1, idx=0, do_span_augmentation: bool = False, do_random_augmentation: bool = False, do_instrument_augmentation: bool = False, convert_all_instruments_to_code: Optional[int] = None):
     tokens = []
     all_truncations = 0
@@ -859,8 +1004,8 @@ def tokenize_v1_without_intermediates(datafiles, output, settings: AnticipationV
 
     outfile = TokenSequenceBinaryFile(
         output,
-        seq_len=v1_config.CONTEXT_SIZE,
-        vocab_size=v1_vocab.VOCAB_SIZE,
+        seq_len=settings.context_size,
+        vocab_size=settings.vocab.total_tokens(),
     )
 
     concatenated_tokens = []

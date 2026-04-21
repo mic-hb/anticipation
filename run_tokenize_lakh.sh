@@ -9,6 +9,8 @@
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
+# ./run_tokenize_lakh.sh
+
 
 init_conda() {
   # helper: source file if it exists
@@ -49,4 +51,4 @@ else
     echo "Warning: failed to create custom temp dir: $DIR" >&2
 fi
 
-PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type lakh --settings_json_name "ar_only_local_midi_settings_6fcc94c173552d9e87d57ecec95a1d97.json"
+PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type lakh --v1_mode

@@ -81,10 +81,13 @@ def get_instruments(
         if note >= settings.vocab.SPECIAL_OFFSET:
             continue
 
-        if note < settings.vocab.CONTROL_OFFSET:
-            note -= settings.vocab.NOTE_OFFSET
+        if settings.vocab.use_controls:
+            if note < settings.vocab.CONTROL_OFFSET:
+                note -= settings.vocab.NOTE_OFFSET
+            else:
+                note -= settings.vocab.ANOTE_OFFSET
         else:
-            note -= settings.vocab.ANOTE_OFFSET
+            note -= settings.vocab.NOTE_OFFSET
 
         instr = note // 2**7
         instruments[instr] += 1
@@ -105,12 +108,12 @@ def translate(
     if seconds:
         dt = int(settings.time_resolution * dt)
 
-    # new_tokens = []
+    new_tokens = []
     for time, dur, note in zip(tokens[0::3], tokens[1::3], tokens[2::3]):
         # stop translating after EOT
         if note == settings.vocab.SEPARATOR:
-            yield (time, dur, note)
-            # new_tokens.extend([time, dur, note])
+            #yield (time, dur, note)
+            new_tokens.extend([time, dur, note])
             dt = 0
             continue
 
@@ -120,10 +123,10 @@ def translate(
             this_time = time - settings.vocab.ATIME_OFFSET
 
         assert 0 <= this_time + dt
-        yield (time + dt, dur, note)
-        # new_tokens.extend([time + dt, dur, note])
+        #yield (time + dt, dur, note)
+        new_tokens.extend([time + dt, dur, note])
 
-    # return new_tokens
+    return new_tokens
 
 
 def add_rests(
@@ -303,9 +306,9 @@ def extract_instruments(
 
     events = []
     controls = []
-    # for time, dur, note in zip(all_events[0::3], all_events[1::3], all_events[2::3]):
-    for x in all_events:
-        time, dur, note = x
+    for time, dur, note in zip(all_events[0::3], all_events[1::3], all_events[2::3]):
+        #for x in all_events:
+        #time, dur, note = x
         assert note < settings.vocab.CONTROL_OFFSET  # shouldn't be in the sequence yet
         instr = (note - settings.vocab.NOTE_OFFSET) // 2**7
         if instr in instruments:
@@ -387,3 +390,38 @@ def get_truncated_token_groups_from_truncated_flat_token_sequence(
             truncated_token_groups.insert(0, t)
 
     return truncated_token_groups
+
+
+def pad(
+    tokens: list[Token],
+    settings: AnticipationV2Settings,
+    end_time: Optional[int] = None,
+) -> list[Token]:
+    density = settings.time_resolution
+    v = settings.vocab
+    end_time = v.TIME_OFFSET + (
+        # max time is always int if not using seconds
+        end_time if end_time else int(max_time(tokens, settings, seconds=False))
+    )
+    new_tokens = []
+    previous_time = v.TIME_OFFSET + 0
+    for time, dur, note in zip(tokens[0::3], tokens[1::3], tokens[2::3]):
+        # must pad before separation, anticipation
+        if settings.vocab.use_controls:
+            assert note < v.CONTROL_OFFSET
+
+        assert note < v.SPECIAL_OFFSET
+
+        # insert pad tokens to ensure the desired density
+        while time > previous_time + density:
+            new_tokens.extend([previous_time + density, v.DUR_OFFSET + 0, v.TICK])
+            previous_time += density
+
+        new_tokens.extend([time, dur, note])
+        previous_time = time
+
+    while end_time > previous_time + density:
+        new_tokens.extend([previous_time + density, v.DUR_OFFSET + 0, v.TICK])
+        previous_time += density
+
+    return new_tokens

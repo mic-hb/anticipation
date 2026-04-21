@@ -49,10 +49,11 @@ def test_serialize_anticipation_v2_settings() -> None:
             "SEPARATOR": 55025,
             "SPECIAL_OFFSET": 55025,
             "TIME_OFFSET": 0,
+            "use_controls": True
         },
     }
     s, _ = settings._get_as_file()
-    assert settings.md5_hash() == "b0d0dbce322fc3318387b6cc12cf096a"
+    assert settings.md5_hash() == "fc7b3eb61c09e56ce9ed5e9cd3af86ca"
 
 
 def test_save_load_settings() -> None:

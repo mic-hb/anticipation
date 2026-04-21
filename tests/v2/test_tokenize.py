@@ -20,7 +20,9 @@ from anticipation.v2.tokenize import (
     TokenizedMIDIFileResult,
     TokenStream,
     tokenize as v2_tokenize,
+    _maybe_tokenize,
 )
+from anticipation.v2 import ops as v2_ops
 from anticipation.v2.io import TokenSequenceBinaryFile
 from anticipation.v2.util import set_seed
 from conftest import TEST_DATA_PATH
@@ -2203,3 +2205,78 @@ def test_no_information_loss_for_multiple_packed_files(
         _check_is_musically_same(
             ar_token_seqs, instr_token_seqs, ar_settings, instr_settings
         )
+
+
+def test_tokenize_no_controls_with_force_piano(dense_drums_sparse_piano_midi_path: Path) -> None:
+    # --- create settings and vocabulary ---
+    max_note_duration_in_seconds = 10
+    time_resolution = 100
+    tick_token_every_n_ticks = 0
+    num_workers = 16
+    my_vocab: Vocab = make_vocab(
+        tick_token_every_n_ticks=tick_token_every_n_ticks,
+        time_resolution=time_resolution,
+        max_note_duration_in_seconds=max_note_duration_in_seconds,
+        use_controls=False,
+    )
+    # no limit, shouldn't be relevant here
+    max_instr = 10_000
+    settings = AnticipationV2Settings(
+        vocab=my_vocab,
+        delta=5,
+        context_size=1024,
+        # filter settings
+        max_track_instruments=max_instr,
+        max_note_duration_in_seconds=max_note_duration_in_seconds,
+        # data mixture and augmentation settings
+        num_autoregressive_seq_per_midi_file=1,
+        num_span_anticipation_augmentations_per_midi_file=0,
+        num_instrument_anticipation_augmentations_per_midi_file=0,
+        # system-like settings
+        num_workers_in_dataset_construction=num_workers,
+        do_clip_overlapping_durations_in_midi_conversion=False,
+        # time settings
+        tick_token_every_n_ticks=tick_token_every_n_ticks,
+        time_resolution=time_resolution,
+    )
+
+    events, _, __ = _maybe_tokenize(dense_drums_sparse_piano_midi_path, settings, convert_all_instruments_to_code=0)
+    all_midi_program_codes = list(v2_ops.get_instruments(events, settings))
+    assert all_midi_program_codes == [0]
+
+def test_tokenize_no_controls_with_force_piano_2(lmd_0_example_1_midi_path: Path) -> None:
+    # --- create settings and vocabulary ---
+    max_note_duration_in_seconds = 10
+    time_resolution = 100
+    tick_token_every_n_ticks = 0
+    num_workers = 16
+    my_vocab: Vocab = make_vocab(
+        tick_token_every_n_ticks=tick_token_every_n_ticks,
+        time_resolution=time_resolution,
+        max_note_duration_in_seconds=max_note_duration_in_seconds,
+        use_controls=False,
+    )
+    # no limit, shouldn't be relevant here
+    max_instr = 10_000
+    settings = AnticipationV2Settings(
+        vocab=my_vocab,
+        delta=5,
+        context_size=1024,
+        # filter settings
+        max_track_instruments=max_instr,
+        max_note_duration_in_seconds=max_note_duration_in_seconds,
+        # data mixture and augmentation settings
+        num_autoregressive_seq_per_midi_file=1,
+        num_span_anticipation_augmentations_per_midi_file=0,
+        num_instrument_anticipation_augmentations_per_midi_file=0,
+        # system-like settings
+        num_workers_in_dataset_construction=num_workers,
+        do_clip_overlapping_durations_in_midi_conversion=False,
+        # time settings
+        tick_token_every_n_ticks=tick_token_every_n_ticks,
+        time_resolution=time_resolution,
+    )
+
+    events, _, __ = _maybe_tokenize(lmd_0_example_1_midi_path, settings, convert_all_instruments_to_code=0)
+    all_midi_program_codes = list(v2_ops.get_instruments(events, settings))
+    assert all_midi_program_codes == [0]

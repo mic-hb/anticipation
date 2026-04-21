@@ -13,6 +13,11 @@ import random
 
 import numpy as np
 import torch
+import os
+import shutil
+import tempfile
+from contextlib import AbstractContextManager
+from pathlib import Path
 
 
 def set_seed(seed: int):
@@ -54,6 +59,114 @@ def temporary_directory(
         with tempfile.TemporaryDirectory(dir=root_path) as td:
             yield td
 
+
+
+class AtomicDirectory(AbstractContextManager["AtomicDirectory"]):
+    """
+    Stage output into a temporary directory and atomically promote it to `final_path`
+    only if the `with` block exits without exception.
+
+    Typical usage:
+        with AtomicDirectory("output/checkpoint") as txn:
+            (txn.path / "config.json").write_text("...")
+            (txn.path / "weights.bin").write_bytes(b"...")
+        # here output/checkpoint has been atomically replaced
+
+    Behavior:
+    - Work happens in a temp directory under `temp_parent` if provided,
+      otherwise next to `final_path` so promotion can use atomic rename.
+    - On success:
+        - if `overwrite=True`, replaces any existing final directory atomically
+        - if `overwrite=False`, raises FileExistsError if final_path exists
+    - On failure:
+        - deletes the temp directory by default
+        - if `keep_temp_on_error=True`, leaves it behind for inspection
+    """
+
+    def __init__(
+        self,
+        final_path: str | Path,
+        *,
+        temp_parent: str | Path | None = None,
+        overwrite: bool = False,
+        keep_temp_on_error: bool = False,
+        chmod: int | None = None,
+    ) -> None:
+        self.final_path = Path(final_path).resolve()
+        self.temp_parent = (
+            Path(temp_parent).resolve()
+            if temp_parent is not None
+            else self.final_path.parent
+        )
+        self.overwrite = overwrite
+        self.keep_temp_on_error = keep_temp_on_error
+        self.chmod = chmod
+
+        self._temp_dir: Path | None = None
+        self._backup_dir: Path | None = None
+
+    @property
+    def path(self) -> Path:
+        if self._temp_dir is None:
+            raise RuntimeError("Context has not been entered yet.")
+        return self._temp_dir
+
+    def __enter__(self) -> "AtomicDirectory":
+        self.temp_parent.mkdir(parents=True, exist_ok=True)
+
+        # Put the temp dir under temp_parent so final promotion can be done
+        # with an atomic rename when temp_parent is on the same filesystem.
+        temp_dir_str = tempfile.mkdtemp(
+            prefix=f".{self.final_path.name}.tmp.",
+            dir=str(self.temp_parent),
+        )
+        self._temp_dir = Path(temp_dir_str)
+
+        if self.chmod is not None:
+            os.chmod(self._temp_dir, self.chmod)
+
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        assert self._temp_dir is not None
+        temp_dir = self._temp_dir
+
+        if exc_type is not None:
+            if not self.keep_temp_on_error:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
+
+        final_path = self.final_path
+        backup_path = final_path.with_name(f".{final_path.name}.old")
+
+        if final_path.exists():
+            if not self.overwrite:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                raise FileExistsError(f"Destination already exists: {final_path}")
+
+            if backup_path.exists():
+                if backup_path.is_dir():
+                    shutil.rmtree(backup_path)
+                else:
+                    backup_path.unlink()
+
+            # Move existing final directory aside, then promote temp into place.
+            os.replace(final_path, backup_path)
+            try:
+                os.replace(temp_dir, final_path)
+            except Exception:
+                # Best-effort rollback.
+                os.replace(backup_path, final_path)
+                raise
+            else:
+                if backup_path.is_dir():
+                    shutil.rmtree(backup_path, ignore_errors=True)
+                else:
+                    backup_path.unlink(missing_ok=True)
+        else:
+            os.replace(temp_dir, final_path)
+
+        return False
 
 def get_book_keeping_info() -> dict[str, Any]:
     return {

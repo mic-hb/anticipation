@@ -9,12 +9,13 @@
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
+# ./run_tokenize_aria.sh
 
 # --- set up conda and activate it ---
 # assuming conda binary lives here
 CONDA_ACTIVATE_PATH="/share/apps/software/anaconda3/etc/profile.d/conda.sh"
 if source "$CONDA_ACTIVATE_PATH" 2>/dev/null; then
-  cd /home/mf867/anticipation_isolated/anticipation
+  cd /home/mf867/anticipation
   conda activate ./env
   echo "activated environment."
 else
@@ -26,4 +27,4 @@ fi
 export CUSTOM_TMP_DIR=/scratch/$USER
 mkdir -p "$CUSTOM_TMP_DIR"
 
-PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type aria --settings_json_name "ar_only_local_midi_settings_b82a7a2750e3c5836ffb9bf564720cd8.json"
+PYTHONPATH=. python train/v2/dataset_tokenize.py --dataset_type aria --v1_mode

@@ -2,6 +2,8 @@ from pathlib import Path
 
 from typing import Union
 import numpy as np
+from numpy.lib.format import open_memmap
+from tqdm.auto import tqdm
 
 from anticipation.v2.types import Token
 
@@ -122,3 +124,99 @@ def consolidate_bins(
                     if not chunk:
                         break
                     f.write(chunk)
+
+
+
+
+
+
+
+def buffered_shuffle_bin_to_npy(
+    *,
+    bin_path: Path,
+    npy_path: Path,
+    dtype: np.dtype,
+    seq_len: int,
+    seed: int,
+    buffer_rows: int = 500_000,
+    refill_rows: int = 50_000,
+) -> Path:
+    """
+    Approximate out-of-core shuffle using a bounded in-memory shuffle buffer.
+
+    Reads rows sequentially from `bin_path` and writes a shuffled `.npy` to
+    `npy_path`.
+
+    The shuffle is approximate, not a perfect uniform permutation.
+    Larger `buffer_rows` gives better mixing.
+    """
+    itemsize = np.dtype(dtype).itemsize
+    num_items = bin_path.stat().st_size // itemsize
+    if num_items % seq_len != 0:
+        raise ValueError(
+            f"Binary file size is not divisible by seq_len={seq_len}. "
+            f"Got {num_items} items."
+        )
+
+    num_rows = num_items // seq_len
+    rng = np.random.default_rng(seed)
+
+    src = np.memmap(
+        bin_path,
+        mode="r",
+        dtype=dtype,
+        shape=(num_rows, seq_len),
+    )
+
+    dst = open_memmap(
+        npy_path,
+        mode="w+",
+        dtype=dtype,
+        shape=(num_rows, seq_len),
+    )
+
+    # Fixed-size in-memory buffer.
+    buffer = np.empty((buffer_rows, seq_len), dtype=dtype)
+    buffer_count = 0
+
+    read_pos = 0
+    write_pos = 0
+
+    def fill_buffer(target_count: int) -> int:
+        nonlocal read_pos, buffer_count
+        needed = target_count - buffer_count
+        if needed <= 0 or read_pos >= num_rows:
+            return 0
+        take = min(needed, num_rows - read_pos)
+        buffer[buffer_count:buffer_count + take] = src[read_pos:read_pos + take]
+        buffer_count += take
+        read_pos += take
+        return take
+
+    # Initial fill
+    fill_buffer(buffer_rows)
+
+    while buffer_count > 0:
+        # Top back up a bit so the window keeps moving forward.
+        if buffer_count < buffer_rows and read_pos < num_rows:
+            fill_buffer(min(buffer_rows, buffer_count + refill_rows))
+
+        # Emit one row chosen uniformly from the current buffer.
+        j = rng.integers(buffer_count)
+        dst[write_pos] = buffer[j]
+        write_pos += 1
+
+        # Remove chosen row by swapping in the last live row.
+        buffer_count -= 1
+        if j != buffer_count:
+            buffer[j] = buffer[buffer_count]
+
+        if write_pos % 100_000 == 0:
+            dst.flush()
+            print(
+                f"buffered shuffle: wrote {write_pos:,}/{num_rows:,} rows "
+                f"({100.0 * write_pos / num_rows:.2f}%)"
+            )
+
+    dst.flush()
+    return npy_path

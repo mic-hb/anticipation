@@ -30,5 +30,4 @@ mkdir -p "$CUSTOM_TMP_DIR"
 
 PYTHONPATH=. python train/v2/dataset_tokenize.py \
     --dataset_type adl_piano \
-    --v1_mode \
-    --settings_json_name "ar_only_local_midi_no_instr_limit_settings_87451b329323d36a658ac64ed9a8bb81.json" \
+    --v1_mode
