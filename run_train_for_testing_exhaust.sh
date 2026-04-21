@@ -25,16 +25,17 @@ export WANDB_INIT_TIMEOUT=600
 
 CHOICE="aria2maestro"
 NUM_LAYERS=(
+    1
     2
     4
     6
     8
     10
     12
-    #16
+    14
 )
-STEPS_PER_VAL_REPORT=64
-BS=64
+STEPS_PER_VAL_REPORT=320
+BS=128
 ACCUM=4
 HEAD_DIM=64
 ASPECT_RATIO=64
@@ -69,7 +70,7 @@ case "$CHOICE" in
     n_ds1=$ARIA_TRAIN_TOTAL_SEQ
     dataset2_path=$MAESTRO_TRAIN
     val_dataset_path=$MAESTRO_VALID
-    K=(2560 5120)
+    K=(4191 8382 16765)
     SEQ_MILESTONES=(0 2560 5120 10240 20480 40960 81920 163840 327680 655360 1310720 2621440)
     ;;
   aria2adl)
@@ -119,21 +120,21 @@ COMMON_ARGS=(
     --use_wandb
 )
 # no "/" suffix
-OUTPUT_DIR_PARENT="output/checkpoints/final_exhaust_4/{$CHOICE}"
+OUTPUT_DIR_PARENT="output/checkpoints/final_exhaust_4/${CHOICE}"
 for curr_layers in "${NUM_LAYERS[@]}"; do
+    combo="${curr_layers}"
+    output_dir="${OUTPUT_DIR_PARENT}/${combo}"
+
+    # run training for phase 1
+    PYTHONPATH=. python train/v2/training_exhaust.py \
+        "${COMMON_ARGS[@]}" \
+        --seq-milestones "${SEQ_MILESTONES[@]}" \
+        --output_dir $output_dir \
+        --num_layers $curr_layers
+
+    # from each checkpoint, resume at phase 2, taking a subset of dataset 2
+    # defined by k
     for curr_k in "${K[@]}"; do
-        combo="${curr_layers}_${curr_k}"
-        output_dir="${OUTPUT_DIR_PARENT}/${combo}"
-
-        # run training for phase 1
-        PYTHONPATH=. python train/v2/training_exhaust.py \
-            "${COMMON_ARGS[@]}" \
-            --seq-milestones "${SEQ_MILESTONES[@]}" \
-            --k_ds2 $curr_k \
-            --output_dir $output_dir \
-            --num_layers $curr_layers
-
-        # from each checkpoint, resume at phase 2
         for milestone in "${SEQ_MILESTONES[@]}"; do
             CKPT_DIR="${output_dir}/phase1_seq-${milestone}"
             CKPT_PATH="${CKPT_DIR}/trainer.ckpt"

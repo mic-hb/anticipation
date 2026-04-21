@@ -949,6 +949,7 @@ def do_training(args):
     subset_seed_2 = args.dataset2_subset_seed
     if args.start_phase_2_from is None:
         # --- PHASE 1 ---
+        num_epochs_ds_1 = args.ds1_num_epochs
         total_schedule_steps = optimizer_steps_per_epoch(
             num_sequences=args.n_ds1,
             world_size=world_size,
@@ -956,7 +957,7 @@ def do_training(args):
             grad_accum_steps=grad_accum_steps,
             sampler_drop_last=True,
             loader_drop_last=True,
-        )
+        ) * num_epochs_ds_1
         lit_model = build_lm_module(
             model=model,
             train_dataset_path=Path(args.dataset1_path),
@@ -969,9 +970,9 @@ def do_training(args):
             sampler_drop_last=True,
             loader_drop_last=True,
             subset_size_train=args.n_ds1,
-            subset_size_val=max(subset_size_2 // 10, 100) if subset_size_2 is not None else None,
             subset_seed_train=args.dataset1_subset_seed,
-            subset_seed_val=subset_seed_2,
+            #subset_size_val=None, #max(subset_size_2 // 10, 100) if subset_size_2 is not None else None,
+            #subset_seed_val=subset_seed_2,
             warmup_steps=args.warmup_steps,
             total_optimizer_steps=total_schedule_steps,
             do_gradient_checkpointing=args.do_gradient_checkpointing,
@@ -1020,8 +1021,8 @@ def do_training(args):
             loader_drop_last=True,
             subset_size_train=args.k_ds2,
             subset_seed_train=args.dataset2_subset_seed,
-            subset_size_val=max(subset_size_2 // 10, 100) if subset_size_2 is not None else None,
-            subset_seed_val=subset_seed_2,
+            # subset_size_val=max(subset_size_2 // 10, 100) if subset_size_2 is not None else None,
+            # subset_seed_val=subset_seed_2,
             warmup_steps=args.warmup_steps,
             total_optimizer_steps=total_steps_budget,
             do_gradient_checkpointing=args.do_gradient_checkpointing,
@@ -1064,6 +1065,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset1_path", type=str, help="Dataset 1 (n, transcripts) numpy file")
     parser.add_argument("--dataset2_path", type=str, help="Dataset 1 (k, lakh) numpy file")
     parser.add_argument("--val_dataset_path", type=str, help="Lakh validation numpy file")
+    parser.add_argument("--ds1_num_epochs", type=int, default=1, help="Number of epochs for ds 1")
     parser.add_argument("--n_ds1", type=int, default=10, help="Number of sequences from transcripts")
     parser.add_argument("--k_ds2", type=int, default=10, help="Number of sequences from Lakh train")
     parser.add_argument("--dataset1_subset_seed", type=int, default=1234, help="Dataset 1 subset seed")

@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=128GB
 #SBATCH -t 120:00:00
-#SBATCH -J train_exhaust
+#SBATCH -J train_exhaust_lakh
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
@@ -37,70 +37,76 @@ mkdir -p "$TMPDIR"
 
 
 export USE_FA4=False
-#
-# ----
 NUM_GPUS=1
 
-# original global batch size is 512
-# set to, for 1 gpu:
-# batch_size 128
-# gradient accumulation steps 4
-
-# dataset 1 is transcripts: total 8,400,449
-# dataset 2 is lakh: total 1,704,709
-# validation dataset is lakh validation set
-
-N=(
-    25600
+NUM_LAYERS=(
+    1
+    2
+    4
+    6
+    8
+    10
+    12
+    14
 )
-
-# started at 1280
-K=(
-    2560
+LAKH_TRAIN=data/tokenized_datasets/lmd_full/ad9826395376a4e7c9be1eb6e07c45b6/train.npy
+LAKH_VALID=data/tokenized_datasets/lmd_full/ad9826395376a4e7c9be1eb6e07c45b6/valid.npy
+LAKH_TEST=data/tokenized_datasets/lmd_full/ad9826395376a4e7c9be1eb6e07c45b6/test.npy
+LAKH_TRAIN_TOTAL_SEQ=1718700
+# 1718700
+# N cannot exceed max lakh seq
+N=(
     5120
     10240
     20480
     40960
     81920
+    163840
+    327680
+    655360
 )
-NUM_LAYERS=(
-    2
-    4
-)
-DS_1_NUM_EPOCHS=1
-DS_2_NUM_EPOCHS=1000
-STEPS_PER_VAL_REPORT=64
+STEPS_PER_VAL_REPORT=320
 BS=128
 ACCUM=4
+HEAD_DIM=64
+ASPECT_RATIO=64
+# make this extremely large to ensure we overfit
+TOTAL_EPOCHS_FOR_OVERFIT=250
+COMMON_ARGS=(
+    --ds1_num_epochs $TOTAL_EPOCHS_FOR_OVERFIT \
+    --train_batch_size $BS \
+    --val_batch_size $BS \
+    --gradient_accumulation_steps $ACCUM \
+    --warmup_steps 20 \
+    --gpus_per_node $NUM_GPUS \
+    --steps_per_eval $STEPS_PER_VAL_REPORT \
+    --steps_per_checkpoint 10000 \
+    --overfit_margin 0.05 \
+    --do_torch_compile \
+    --aspect_ratio $ASPECT_RATIO \
+    --head_dim $HEAD_DIM \
+    --pos_emb rope \
+    --wandb_project "final_exhaust_4_debugging" \
+    --use_wandb
+)
+for curr_layers in "${NUM_LAYERS[@]}"; do
+    for curr_n in "${N[@]}"; do
+        combo="${curr_layers}/${curr_n}"
+        echo "Training: ${combo}"
+        output_dir="output/slurm_logs/${SLURM_JOB_ID}/${combo}"
 
-for curr_k in "${K[@]}"; do
-    for curr_layers in "${NUM_LAYERS[@]}"; do
-        for curr_n in "${N[@]}"; do
-            combo="${curr_layers}_${curr_n}_${curr_k}_exhaust"
-            echo "Training: ${combo}"
-
-            output_dir="output/slurm_logs/${SLURM_JOB_ID}/${combo}"
-
-            # run training
-            PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training_exhaust.py \
-                --dataset1_path ddata/tokenized_datasets/transcripts/7f1aadd4f9603af995abc3428289f7ec/train.npy \
-                --epochs_ds1 $DS_1_NUM_EPOCHS \
-                --n_ds1 $curr_n \
-                --dataset2_path data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a/train.npy \
-                --epochs_ds2 $DS_2_NUM_EPOCHS \
-                --k_ds2 $curr_k \
-                --val_dataset_path data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a/valid.npy \
-                --train_batch_size $BS \
-                --val_batch_size $BS \
-                --gradient_accumulation_steps $ACCUM \
-                --output_dir $output_dir \
-                --gpus_per_node $NUM_GPUS \
-                --steps_per_eval $STEPS_PER_VAL_REPORT \
-                --warmup_steps 20 \
-                --steps_per_checkpoint 10000 \
-                --wandb_project "amt_exhaustion_v2" \
-                --use_wandb \
-                --num_layers $curr_layers
-        done
+        # run training
+        # this is just phase 1, "normal" training on source dataset
+        # where we restrict how many samples from it the model can
+        # use to examine overfit behavior
+        PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training_exhaust.py \
+            "${COMMON_ARGS[@]}" \
+            --dataset1_path $LAKH_TRAIN \
+            --n_ds1 $curr_n \
+            --dataset2_path $LAKH_TRAIN \
+            --k_ds2 0 \
+            --val_dataset_path $LAKH_VALID \
+            --output_dir $output_dir \
+            --num_layers $curr_layers
     done
 done

@@ -35,98 +35,138 @@ export TEMP=$TMPDIR
 export TMP=$TMPDIR
 mkdir -p "$TMPDIR"
 
-
-export USE_FA4=False
-#
 # ----
 NUM_GPUS=1
+export USE_FA4=False
 
-# original global batch size is 512
-# set to, for 1 gpu:
-# batch_size 128
-# gradient accumulation steps 4
+# in seconds, default is 90
+export WANDB_INIT_TIMEOUT=600
 
-# dataset 1 is transcripts: total 8,400,449
-# dataset 2 is lakh: total 1,704,709
-# validation dataset is lakh validation set
-
-# transcripts
-# 0%
-# 1%
-# 10%
-N=(
-    0
-    256000
-    2560000
-    5120000
-)
-
-# lakh
-K=(
-    256000
-    512000
-    1024000
-)
+CHOICE="aria2maestro"
 NUM_LAYERS=(
+    1
+    2
     4
+    6
     8
+    10
     12
+    14
 )
-# always train on transcripts for 1 epoch only
-DS_1_NUM_EPOCHS=1
-
-# train for this many epochs on Lakh / target clean dataset for the baseline
-BASELINE_DS_2_NUM_EPOCHS=200
-STEPS_PER_VAL_REPORT=640
+STEPS_PER_VAL_REPORT=320
 BS=128
 ACCUM=4
+HEAD_DIM=64
+ASPECT_RATIO=64
 
+# --- dataset constants ----
+ARIA_TRAIN=data/tokenized_datasets/aria-midi-v1-pruned-ext/c823210ee9c21e83f8c5d233975ab85b/train.npy
+ARIA_TRAIN_TOTAL_SEQ=4307585
+
+MAESTRO_TRAIN=data/tokenized_datasets/maestro-v3.0.0/e361f9c323930538df6ba7762bf4dc9f/train.npy
+MAESTRO_VALID=data/tokenized_datasets/maestro-v3.0.0/e361f9c323930538df6ba7762bf4dc9f/valid.npy
+MAESTRO_TEST=data/tokenized_datasets/maestro-v3.0.0/e361f9c323930538df6ba7762bf4dc9f/test.npy
+MAESTRO_TRAIN_TOTAL_SEQ=16765
+
+ADL_TRAIN=data/tokenized_datasets/adl-piano-midi/c823210ee9c21e83f8c5d233975ab85b/train.npy
+ADL_VALID=data/tokenized_datasets/adl-piano-midi/c823210ee9c21e83f8c5d233975ab85b/valid.npy
+ADL_TEST=data/tokenized_datasets/adl-piano-midi/c823210ee9c21e83f8c5d233975ab85b/test.npy
+ADL_TRAIN_TOTAL_SEQ=28800
+
+LAKH_TRAIN=data/tokenized_datasets/lmd_full/ad9826395376a4e7c9be1eb6e07c45b6/train.npy
+LAKH_VALID=data/tokenized_datasets/lmd_full/ad9826395376a4e7c9be1eb6e07c45b6/valid.npy
+LAKH_TEST=data/tokenized_datasets/lmd_full/ad9826395376a4e7c9be1eb6e07c45b6/test.npy
+LAKH_TRAIN_TOTAL_SEQ=1718700
+
+TRANSCRIPTS_TRAIN=data/tokenized_datasets/transcripts/c823210ee9c21e83f8c5d233975ab85b/train.npy
+TRANSCRIPTS_TRAIN_TOTAL_SEQ=8405028
+
+# K is used to artificially restrict number of sequences per epoch in ds2
+# SEQ_MILESTONES must start with 0 (baseline) and should not exceed total sequences in ds1
+case "$CHOICE" in
+  aria2maestro)
+    dataset1_path=$ARIA_TRAIN
+    n_ds1=$ARIA_TRAIN_TOTAL_SEQ
+    dataset2_path=$MAESTRO_TRAIN
+    val_dataset_path=$MAESTRO_VALID
+    K=(4191 8382 16765)
+    SEQ_MILESTONES=(0 2560 5120 10240 20480 40960 81920 163840 327680 655360 1310720 2621440)
+    ;;
+  aria2adl)
+    dataset1_path=$ARIA_TRAIN
+    n_ds1=$ARIA_TRAIN_TOTAL_SEQ
+    dataset2_path=$ADL_TRAIN
+    val_dataset_path=$ADL_VALID
+    K=(2560 5120)
+    SEQ_MILESTONES=(0 2560 5120 10240 20480 40960 81920 163840 327680 655360 1310720 2621440)
+    ;;
+  transcripts2lakh)
+    dataset1_path=$TRANSCRIPTS_TRAIN
+    n_ds1=$TRANSCRIPTS_TRAIN_TOTAL_SEQ
+    dataset2_path=$LAKH_TRAIN
+    val_dataset_path=$LAKH_VALID
+    K=(2560 5120)
+    SEQ_MILESTONES=(0 2560 5120 10240 20480 40960 81920 163840 327680 655360 1310720 2621440 5242880)
+    ;;
+  *)
+    echo "Unknown choice: $choice" >&2
+    exit 1
+    ;;
+esac
+
+echo "CONFIG CHOICE: "
+echo "$CHOICE"
+
+# same for all configs
+COMMON_ARGS=(
+    --dataset1_path "$dataset1_path" \
+    --n_ds1 "$n_ds1" \
+    --dataset2_path "$dataset2_path" \
+    --val_dataset_path "$val_dataset_path" \
+    --train_batch_size $BS \
+    --val_batch_size $BS \
+    --gradient_accumulation_steps $ACCUM \
+    --warmup_steps 20 \
+    --gpus_per_node $NUM_GPUS \
+    --steps_per_eval $STEPS_PER_VAL_REPORT \
+    --steps_per_checkpoint 10000 \
+    --overfit_margin 0.05 \
+    --do_torch_compile \
+    --aspect_ratio $ASPECT_RATIO \
+    --head_dim $HEAD_DIM \
+    --pos_emb rope \
+    --wandb_project "final_exp_exhaust_break" \
+    --use_wandb
+)
+# no "/" suffix
+OUTPUT_DIR_PARENT="output/checkpoints/final_exp_exhaust_break/${CHOICE}"
 for curr_layers in "${NUM_LAYERS[@]}"; do
+    combo="${curr_layers}"
+    output_dir="${OUTPUT_DIR_PARENT}/${combo}"
+
+    # run training for phase 1
+    PYTHONPATH=. python train/v2/training_exhaust.py \
+        "${COMMON_ARGS[@]}" \
+        --seq-milestones "${SEQ_MILESTONES[@]}" \
+        --output_dir $output_dir \
+        --num_layers $curr_layers
+
+    # from each checkpoint, resume at phase 2, taking a subset of dataset 2
+    # defined by k
     for curr_k in "${K[@]}"; do
-        for curr_n in "${N[@]}"; do
-            TOTAL_SEQUENCES=$(( curr_k * BASELINE_DS_2_NUM_EPOCHS ))
-            DS1_SEQUENCES=$(( curr_n * DS_1_NUM_EPOCHS ))
-
-            # how many steps can we allot to dataset 2?
-            REMAINING_SEQUENCES=$(( TOTAL_SEQUENCES - DS1_SEQUENCES ))
-
-            if (( REMAINING_SEQUENCES <= 0 )); then
-                echo "Skipping: N=$N K=$K NUM_LAYERS=$NUM_LAYERS because DS_1 already exhausts the budget"
+        for milestone in "${SEQ_MILESTONES[@]}"; do
+            CKPT_DIR="${output_dir}/phase1_seq-${milestone}"
+            CKPT_PATH="${CKPT_DIR}/trainer.ckpt"
+            if [[ ! -f "${CKPT_PATH}" ]]; then
+                echo "Skipping ${milestone}: checkpoint not found at ${CKPT_PATH}"
                 continue
             fi
 
-            if (( REMAINING_SEQUENCES % curr_k != 0 )); then
-                echo "Skipping: N=$N K=$K NUM_LAYERS=$NUM_LAYERS because DS_2_NUM_EPOCHS would not be an integer"
-                echo "  TOTAL_SEQUENCES=$TOTAL_SEQUENCES, DS1_SEQUENCES=$DS1_SEQUENCES, REMAINING_SEQUENCES=$REMAINING_SEQUENCES"
-                continue
-            fi
-
-            DS_2_NUM_EPOCHS=$(( REMAINING_SEQUENCES / curr_k ))
-            echo "Running: N=$curr_n K=$curr_k NUM_LAYERS=$curr_layers DS_1_NUM_EPOCHS=$DS_1_NUM_EPOCHS DS_2_NUM_EPOCHS=$DS_2_NUM_EPOCHS"
-
-            combo="${curr_layers}_${curr_n}_${curr_k}"
-            output_dir="output/slurm_logs/${SLURM_JOB_ID}/${combo}"
-
-            # run training
             PYTHONPATH=. python train/v2/training_exhaust.py \
-                --dataset1_path data/tokenized_datasets/transcripts/7f1aadd4f9603af995abc3428289f7ec/train.npy \
-                --epochs_ds1 $DS_1_NUM_EPOCHS \
-                --n_ds1 $curr_n \
-                --dataset2_path data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a/train.npy \
-                --epochs_ds2 $DS_2_NUM_EPOCHS \
-                --k_ds2 $curr_k \
-                --val_dataset_path data/tokenized_datasets/lakh_baseline/b0d0dbce322fc3318387b6cc12cf096a/valid.npy \
-                --train_batch_size $BS \
-                --val_batch_size $BS \
-                --gradient_accumulation_steps $ACCUM \
-                --output_dir $output_dir \
-                --gpus_per_node $NUM_GPUS \
-                --steps_per_eval $STEPS_PER_VAL_REPORT \
-                --warmup_steps 20 \
-                --steps_per_checkpoint 1000 \
-                --wandb_project "amt_exhaustion_break_v2" \
-                --use_wandb \
-                --num_layers $curr_layers
+                "${COMMON_ARGS[@]}" \
+                --output_dir $CKPT_DIR \
+                --start_phase_2_from "${CKPT_DIR}" \
+                --k_ds2 $curr_k
         done
     done
 done
