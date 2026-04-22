@@ -25,8 +25,12 @@ fi
 
 
 # we run out of space if we just write to tmp
-export CUSTOM_TMP_DIR=/scratch/$USER
-mkdir -p "$CUSTOM_TMP_DIR"
+CTD=/scratch/$USER
+if mkdir -p "$CTD" 2>/dev/null && [ -d "$CTD" ] && [ -w "$CTD" ]; then
+    export CUSTOM_TMP_DIR="$CTD"
+else
+    echo "Warning: directory $CTD is not usable" >&2
+fi
 
 PYTHONPATH=. python train/v2/dataset_tokenize.py \
     --dataset_type adl_piano \

@@ -63,6 +63,8 @@ def _maybe_tokenize(
             return [], 0, MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE
         elif "Invalid chunk length" in str(e):
             return [], 0, MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE
+        elif "Unknown or unsupported status byte" in str(e):
+            return [], 0, MIDIFileIgnoredReason.INVALID_FILE_STRUCTURE
         else:
             raise e
 

@@ -1,15 +1,18 @@
 #!/bin/bash
 set -e
+# sh run_get_lakh.sh
 
 # cd to the location of this file on disk, expected to be at repo root
 cd "$(dirname -- "$0")"
 
-mkdir -p data
+DATA_DIR=data
+
+mkdir -p $DATA_DIR
 
 DL_LINK="http://hog.ee.columbia.edu/craffel/lmd/lmd_full.tar.gz"
-wget -P ./data/ "$DL_LINK" -O ./data/lmd_full.tar.gz
+wget -P $DATA_DIR "$DL_LINK" -O $DATA_DIR/lmd_full.tar.gz
 
-cd ./data/
+cd $DATA_DIR
 
 # extract files to ./data/lmd_full
 tar -xvf lmd_full.tar.gz
