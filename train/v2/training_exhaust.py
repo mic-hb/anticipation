@@ -1065,7 +1065,7 @@ def do_training(args):
             )
             * num_epochs_ds_1
         )
-        val_check_interval = min(total_schedule_steps//8, args.steps_per_eval)
+        val_check_interval = max(1, min(total_schedule_steps // 8, args.steps_per_eval))
         lit_model = build_lm_module(
             model=model,
             train_dataset_path=Path(args.dataset1_path),
@@ -1133,7 +1133,7 @@ def do_training(args):
             resume_training_state_path=resume_training_state_path,
             inherited_global_step=inherited_global_step,
         )
-        val_check_interval = min(steps_remaining//8, args.steps_per_eval)
+        val_check_interval = max(1, min(steps_remaining // 8, args.steps_per_eval))
         trainer = L.Trainer(
             accelerator="gpu",
             devices=num_devices,
