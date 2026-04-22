@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=128GB
 #SBATCH -t 200:00:00
-#SBATCH -J train_exhaust_lakh
+#SBATCH -J lakh_exhaust
 #SBATCH -e output/slurm_logs/%j/stderr.err
 #SBATCH -o output/slurm_logs/%j/stdout.out
 set -e
@@ -36,6 +36,10 @@ export TMP=$TMPDIR
 mkdir -p "$TMPDIR"
 
 export USE_FA4=False
+
+echo "SLURM JOB ID"
+echo "$SLURM_JOB_ID"
+echo "-----------"
 # --------------------------
 
 NUM_GPUS=2
@@ -76,18 +80,28 @@ for curr_layers in "${NUM_LAYERS[@]}"; do
         echo "Training: ${combo}"
         output_dir="output/experiments/lakh_exhaust/${combo}"
 
-        # run training
-        # this is just phase 1, "normal" training on source dataset
-        # where we restrict how many samples from it the model can
-        # use to examine overfit behavior
-        PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training_exhaust.py \
-            "${COMMON_ARGS[@]}" \
-            --dataset1_path $LAKH_TRAIN \
-            --n_ds1 $curr_n \
-            --dataset2_path $LAKH_TRAIN \
-            --k_ds2 0 \
-            --val_dataset_path $LAKH_VALID \
-            --output_dir $output_dir \
-            --num_layers $curr_layers
+        done_file_parent="${output_dir}/DONE"
+        if [[ -f "$done_file_parent" ]]; then
+            echo "Skipping completed run: $done_file_parent"
+        else
+            # run training
+            # this is just phase 1, "normal" training on source dataset
+            # where we restrict how many samples from it the model can
+            # use to examine overfit behavior
+            if PYTHONPATH=. torchrun --standalone --nproc_per_node=$NUM_GPUS train/v2/training_exhaust.py \
+                "${COMMON_ARGS[@]}" \
+                --dataset1_path $LAKH_TRAIN \
+                --n_ds1 $curr_n \
+                --dataset2_path $LAKH_TRAIN \
+                --k_ds2 0 \
+                --val_dataset_path $LAKH_VALID \
+                --output_dir $output_dir \
+                --num_layers $curr_layers
+            then
+                touch "$done_file_parent"
+            else
+                echo "Run failed: $output_dir" >&2
+            fi
+        fi
     done
 done
