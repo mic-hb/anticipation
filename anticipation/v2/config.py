@@ -448,4 +448,8 @@ class AnticipationV2Settings:
         if self.tick_token_every_n_ticks == 0:
             # if not using relativize, we need enough token space to represent the maximum
             # time possible
-            assert (v.DUR_OFFSET // self.time_resolution) >= self.max_seq_time_in_seconds, "Max seq time in seconds exceeds available onset token space."
+            assert (
+                v.DUR_OFFSET // self.time_resolution
+            ) >= self.max_seq_time_in_seconds, (
+                "Max seq time in seconds exceeds available onset token space."
+            )

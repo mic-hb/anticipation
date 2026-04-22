@@ -752,6 +752,11 @@ def tokenize(
         num_truncations_before_augmentation=num_truncations_before_augmentation,
         total_time_in_midi_ticks_before_augmentation=total_time_in_midi_ticks_before_augmentation,
         **buf_stats,
+        # TODO: address these later
+        num_seq_too_short=0,
+        num_seq_too_long=0,
+        num_seq_too_many_instruments=0,
+        num_seq_inexpressible=0,
     )
 
 
@@ -936,7 +941,7 @@ def _do_tokenize(
             if k % 10 == 0:
                 # no augmentation
                 events = all_events.copy()
-                #controls = []
+                # controls = []
             elif k % 10 == 1:
                 # not supported
                 # span augmentation
@@ -1006,7 +1011,9 @@ def _do_tokenize(
                 seq.insert(0, z)
 
                 _s = [int(tok) for tok in seq]
-                assert all([0 <= x < vocab_size for x in _s]), f"invalid token ID at seqcount: {seqcount}"
+                assert all([0 <= x < vocab_size for x in _s]), (
+                    f"invalid token ID at seqcount: {seqcount}"
+                )
                 outfile.append(_s)
                 seqcount += 1
 

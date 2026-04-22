@@ -24,6 +24,7 @@ def test_serialize_anticipation_v2_settings() -> None:
         "max_midi_instrument": 129,
         "max_midi_pitch": 128,
         "max_note_duration_in_seconds": 10,
+        "max_seq_time_in_seconds": 100,
         "max_track_instruments": 16,
         "max_track_time_in_seconds": 3600,
         "min_track_events": 100,
@@ -53,7 +54,7 @@ def test_serialize_anticipation_v2_settings() -> None:
         },
     }
     s, _ = settings._get_as_file()
-    assert settings.md5_hash() == "fc7b3eb61c09e56ce9ed5e9cd3af86ca"
+    assert settings.md5_hash() == "a8d1dac6612a08d8b8fbd01dc61b4fd2"
 
 
 def test_save_load_settings() -> None:

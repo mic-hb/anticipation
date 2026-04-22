@@ -243,6 +243,7 @@ class Phase2TopKCheckpoint(ModelCheckpoint):
             shutil.rmtree(path)
             print(f"Removed Phase 2 checkpoint: {step_dir}")
 
+
 class HuggingFaceCheckpoint(ModelCheckpoint):
     def __init__(self, config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -263,6 +264,7 @@ class HuggingFaceCheckpoint(ModelCheckpoint):
         raw_model.save_pretrained(
             step_dir, safe_serialization=True, max_shard_size="2GB"
         )
+
 
 class OverfitStopper(Callback):
     """
@@ -901,17 +903,23 @@ def check_dataset_vocabs(args):
     for sample in val_ds:
         c_max_token_id = sample["input_ids"].max()
         c_min_token_id = sample["input_ids"].min()
-        assert 0 <= c_min_token_id < c_max_token_id < vocab_size, f"{args.val_dataset_path} has problem: (0 <= {c_min_token_id} < {c_max_token_id} < {vocab_size}) is false."
+        assert 0 <= c_min_token_id < c_max_token_id < vocab_size, (
+            f"{args.val_dataset_path} has problem: (0 <= {c_min_token_id} < {c_max_token_id} < {vocab_size}) is false."
+        )
 
     for sample in ds_1:
         c_max_token_id = sample["input_ids"].max()
         c_min_token_id = sample["input_ids"].min()
-        assert 0 <= c_min_token_id < c_max_token_id < vocab_size, f"{args.dataset1_path} has problem: (0 <= {c_min_token_id} < {c_max_token_id} < {vocab_size}) is false."
+        assert 0 <= c_min_token_id < c_max_token_id < vocab_size, (
+            f"{args.dataset1_path} has problem: (0 <= {c_min_token_id} < {c_max_token_id} < {vocab_size}) is false."
+        )
 
     for s in ds_2:
         c_max_token_id = s["input_ids"].max()
         c_min_token_id = s["input_ids"].min()
-        assert 0 <= c_min_token_id < c_max_token_id < vocab_size, f"{args.dataset2_path} has problem: (0 <= {c_min_token_id} < {c_max_token_id} < {vocab_size}) is false."
+        assert 0 <= c_min_token_id < c_max_token_id < vocab_size, (
+            f"{args.dataset2_path} has problem: (0 <= {c_min_token_id} < {c_max_token_id} < {vocab_size}) is false."
+        )
 
     print("Total seq in ds1:", len(ds_1))
     print("Total seq in ds2:", len(ds_2))
@@ -1065,7 +1073,7 @@ def do_training(args):
             )
             * num_epochs_ds_1
         )
-        val_check_interval = min(total_schedule_steps//8, args.steps_per_eval)
+        val_check_interval = min(total_schedule_steps // 8, args.steps_per_eval)
         lit_model = build_lm_module(
             model=model,
             train_dataset_path=Path(args.dataset1_path),
@@ -1133,7 +1141,7 @@ def do_training(args):
             resume_training_state_path=resume_training_state_path,
             inherited_global_step=inherited_global_step,
         )
-        val_check_interval = min(steps_remaining//8, args.steps_per_eval)
+        val_check_interval = min(steps_remaining // 8, args.steps_per_eval)
         trainer = L.Trainer(
             accelerator="gpu",
             devices=num_devices,
@@ -1188,10 +1196,18 @@ if __name__ == "__main__":
         "--k_ds2", type=int, default=10, help="Number of sequences from Lakh train"
     )
     parser.add_argument(
-        "--dataset1_subset_seed", type=int, default=None, help="Dataset 1 subset seed", required=False,
+        "--dataset1_subset_seed",
+        type=int,
+        default=None,
+        help="Dataset 1 subset seed",
+        required=False,
     )
     parser.add_argument(
-        "--dataset2_subset_seed", type=int, default=None, help="Dataset 2 subset seed", required=False
+        "--dataset2_subset_seed",
+        type=int,
+        default=None,
+        help="Dataset 2 subset seed",
+        required=False,
     )
     parser.add_argument(
         "--seq-milestones",

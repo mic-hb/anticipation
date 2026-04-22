@@ -40,26 +40,14 @@ cd "$(dirname -- "$0")"
 conda create --prefix ./env python=3.11 --yes
 conda activate ./env
 
-# build our custom fork of symusic to prevent segfaults
-git clone https://github.com/tempoxylophone/symusic.git
-
-cd symusic/
-
-git submodule sync --recursive
-git submodule update --init --recursive
-git submodule update --remote --recursive
-pip install .
-
-cd ../
-rm -rf symusic
-
 # install requirements
-pip install pytest
+pip install symusic
 pip install mido
+pip install ruff
 pip install tqdm
 pip install pandas
-pip install ruff
 pip install plotly
+pip install pytest
 
 conda activate ./env
 conda install pytorch torchvision torchaudio --yes
