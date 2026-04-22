@@ -9,23 +9,25 @@ get_total_sequences() {
     filename="$(basename "$npy_path")"
 
     # split name (train / valid / test)
-    # might not always have all 3
     local split="${filename%.npy}"
     local stats_path="${dir}/stats_${split}.json"
+
     if [[ ! -f "$stats_path" ]]; then
-        echo "Error: stats file not found at $stats_path" >&2
-        return 1
+        echo "Warning: stats file not found at $stats_path" >&2
+        echo "-1"
+        return 0
     fi
 
-    # these are produced by the tokenization code
-    val=$(jq -r '.num_sequences // empty' "$stats_path")
+    # extract value
+    local val
+    val=$(jq -r '.num_sequences // empty' "$stats_path" 2>/dev/null)
 
     if [[ -z "$val" ]]; then
-        echo "Error: num_sequences not found in $stats_path" >&2
-        return 1
+        echo "Warning: num_sequences not found in $stats_path" >&2
+        echo "-1"
+        return 0
     fi
 
-    # return
     echo "$val"
 }
 

@@ -133,7 +133,7 @@ def _get_dataset_file_from_paths(
         max_workers=num_workers,
         total=num_workers,
         desc="Gathering Workers",
-        position=0
+        position=0,
     )
 
     # here we take all the intermediate raw binaries created by numpy and
