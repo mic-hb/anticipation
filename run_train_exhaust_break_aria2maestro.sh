@@ -120,30 +120,53 @@ for curr_layers in "${NUM_LAYERS[@]}"; do
     combo="${curr_layers}"
     output_dir="${OUTPUT_DIR_PARENT}/${combo}"
 
-    # run training for phase 1
-    PYTHONPATH=. python train/v2/training_exhaust.py \
-        "${COMMON_ARGS[@]}" \
-        --seq-milestones "${SEQ_MILESTONES[@]}" \
-        --output_dir $output_dir \
-        --num_layers $curr_layers
+    done_file_parent="${output_dir}/DONE"
+
+    if [[ -f "$done_file_parent" ]]; then
+        echo "Skipping completed run (parent): $done_file_parent"
+    else
+        # run training for phase 1
+        if PYTHONPATH=. python train/v2/training_exhaust.py \
+            "${COMMON_ARGS[@]}" \
+            --seq-milestones "${SEQ_MILESTONES[@]}" \
+            --output_dir $output_dir \
+            --num_layers $curr_layers
+        then
+            touch "$done_file_parent"
+        else
+            echo "Run failed: $output_dir" >&2
+        fi
+    fi
 
     # from each checkpoint, resume at phase 2, taking a subset of dataset 2
     # defined by k
     for curr_k in "${K[@]}"; do
         for milestone in "${SEQ_MILESTONES[@]}"; do
             CKPT_DIR="${output_dir}/phase1_seq-${milestone}"
+
+            done_file="${CKPT_DIR}/DONE"
+            if [[ -f "$done_file" ]]; then
+                echo "Skipping completed run: $CKPT_DIR"
+                continue
+            fi
+
             CKPT_PATH="${CKPT_DIR}/trainer.ckpt"
             if [[ ! -f "${CKPT_PATH}" ]]; then
                 echo "Skipping ${milestone}: checkpoint not found at ${CKPT_PATH}"
                 continue
             fi
 
-            PYTHONPATH=. python train/v2/training_exhaust.py \
+            if PYTHONPATH=. python train/v2/training_exhaust.py \
                 "${COMMON_ARGS[@]}" \
                 --output_dir $CKPT_DIR \
                 --start_phase_2_from "${CKPT_DIR}" \
                 --k_ds2 $curr_k \
                 --num_layers $curr_layers
+            then
+                touch "$done_file"
+            else
+                echo "Run failed: $CKPT_DIR" >&2
+            fi
         done
     done
 done
