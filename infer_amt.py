@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 
+import mido
 import torch
 from transformers import AutoModelForCausalLM
 
@@ -8,6 +9,7 @@ from anticipation import ops
 from anticipation.sample import generate
 from anticipation.convert import midi_to_events, events_to_midi
 from anticipation.tokenize import extract_instruments
+from anticipation.vocab import DUR_OFFSET, NOTE_OFFSET, SEPARATOR, TIME_OFFSET
 
 
 def list_instruments(events):
@@ -58,6 +60,46 @@ def sec_from_bar(bar_index_1_based, bpm, beats_per_bar=4):
     return bar0 * (60.0 / bpm) * beats_per_bar
 
 
+def midi_has_tempo_event(mid_path):
+    mid = mido.MidiFile(mid_path)
+    for track in mid.tracks:
+        for msg in track:
+            if msg.type == "set_tempo":
+                return True
+    return False
+
+
+def rescale_event_timing(events, scale):
+    if abs(scale - 1.0) < 1e-9:
+        return events
+
+    scaled = []
+    for time_tok, dur_tok, note_tok in zip(events[0::3], events[1::3], events[2::3]):
+        if note_tok == SEPARATOR:
+            scaled.extend([time_tok, dur_tok, note_tok])
+            continue
+
+        raw_time = time_tok - TIME_OFFSET
+        raw_dur = dur_tok - DUR_OFFSET
+        new_time = TIME_OFFSET + int(round(raw_time * scale))
+        new_dur = DUR_OFFSET + max(0, int(round(raw_dur * scale)))
+
+        scaled.extend([new_time, new_dur, note_tok])
+
+    return scaled
+
+
+def max_note_end_time(events):
+    max_end = 0.0
+    for time_tok, dur_tok, note_tok in zip(events[0::3], events[1::3], events[2::3]):
+        if note_tok == SEPARATOR:
+            continue
+        onset_s = (time_tok - TIME_OFFSET) / 100.0
+        dur_s = (dur_tok - DUR_OFFSET) / 100.0
+        max_end = max(max_end, onset_s + dur_s)
+    return max_end
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["continuation", "drum_from_controls"], required=True)
@@ -72,6 +114,31 @@ def main():
     parser.add_argument("--control-instr", type=int, nargs="*", default=[])
     parser.add_argument("--drum-only", action="store_true")
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument(
+        "--source-bpm",
+        type=float,
+        default=None,
+        help=(
+            "Original BPM used by the MIDI timing when tempo metadata is missing. "
+            "If omitted and no tempo event exists, defaults to 120 for auto-rescaling."
+        ),
+    )
+    parser.add_argument(
+        "--disable-auto-tempo-rescale",
+        action="store_true",
+        help=(
+            "Disable automatic timing rescale when MIDI has no tempo event and --bpm differs "
+            "from source/default 120."
+        ),
+    )
+    parser.add_argument(
+        "--allow-leading-silence",
+        action="store_true",
+        help=(
+            "Allow start bar/time to be significantly after the last input note onset. "
+            "Disabled by default to prevent accidental long silent gaps from BPM/bar mismatch."
+        ),
+    )
     args = parser.parse_args()
 
     device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
@@ -79,13 +146,42 @@ def main():
 
     model = load_model(args.model, device)
 
+    has_tempo_event = midi_has_tempo_event(args.input)
     events = midi_to_events(args.input)
+
+    if not has_tempo_event and not args.disable_auto_tempo_rescale:
+        source_bpm = args.source_bpm if args.source_bpm is not None else 120.0
+        if abs(source_bpm - args.bpm) > 1e-9:
+            scale = source_bpm / args.bpm
+            events = rescale_event_timing(events, scale)
+            print(
+                "[INFO] no tempo metadata found; auto-rescaled input timing "
+                f"by factor {scale:.3f} (source_bpm={source_bpm:.3f} -> target_bpm={args.bpm:.3f})"
+            )
+
     print(f"[INFO] loaded events={len(events)//3}")
     print(f"[INFO] instruments={list_instruments(events)}")
+    input_max_time = ops.max_time(events)
+    input_max_end_time = max_note_end_time(events)
+    print(f"[INFO] input max onset time: {input_max_time:.3f}s")
+    print(f"[INFO] input max note end time: {input_max_end_time:.3f}s")
 
     start_sec = sec_from_bar(args.start_bar, args.bpm, args.beats_per_bar)
     end_sec = sec_from_bar(args.end_bar + 1, args.bpm, args.beats_per_bar)
     print(f"[INFO] generation window: {start_sec:.3f}s -> {end_sec:.3f}s")
+    seconds_per_bar = (60.0 / args.bpm) * args.beats_per_bar
+
+    # Safety check: if start time is far after the input's last note onset,
+    # generation can produce long leading silence that usually indicates wrong BPM/bar mapping.
+    reference_time = max(input_max_time, input_max_end_time)
+    if start_sec > reference_time + 0.5 * seconds_per_bar and not args.allow_leading_silence:
+        gap = start_sec - reference_time
+        raise ValueError(
+            "Start time is significantly after the end of the input musical content. "
+            f"Requested start={start_sec:.3f}s, input_end={reference_time:.3f}s, gap={gap:.3f}s. "
+            "This usually means BPM or bar indexing is mismatched for this MIDI. "
+            "Double-check --bpm/--start-bar (or pass --allow-leading-silence if intentional)."
+        )
 
     if args.mode == "continuation":
         # only keep prompt up to start time for true continuation
