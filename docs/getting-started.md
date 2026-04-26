@@ -133,143 +133,20 @@ So:
 
 ## 6) Create a Reusable Inference Script
 
-Create file: `lib/anticipation/infer_amt.py`
+Use the maintained script at `lib/anticipation/infer_amt.py`.
 
-```python
-import argparse
-from pathlib import Path
+Important: this script has evolved significantly during debugging and now includes:
 
-import torch
-from transformers import AutoModelForCausalLM
+- model-loading safety for `safetensors` checkpoints
+- rich MIDI diagnostics logging for both input and output
+- tempo/time-signature metadata checks
+- timing safety checks for leading silence / bar-boundary mismatch
+- optional tempo-rescale behavior for MIDI files that have no tempo metadata
+- `active_end` continuation mode for non-quantized human-played input
+- optional snap-to-next-bar start for grid alignment
+- export fix that preserves absolute timing when writing BPM metadata (prevents tempo-stretch drift)
 
-from anticipation import ops
-from anticipation.sample import generate
-from anticipation.convert import midi_to_events, events_to_midi
-from anticipation.tokenize import extract_instruments
-
-
-def list_instruments(events):
-    instr_counts = ops.get_instruments(events)
-    return dict(sorted(instr_counts.items(), key=lambda x: x[0]))
-
-
-def keep_only_instruments(events, allowed_instr):
-    allowed_instr = set(allowed_instr)
-
-    def drop(token_triplet):
-        _, _, note = token_triplet
-        # skip non-musical special/control tokens conservatively
-        if note >= 30000:
-            return True
-        # decode instrument for normal events
-        from anticipation.vocab import NOTE_OFFSET, CONTROL_OFFSET
-        if note >= CONTROL_OFFSET:
-            note = note - CONTROL_OFFSET
-        note = note - NOTE_OFFSET
-        instr = note // 128
-        return instr not in allowed_instr
-
-    return ops.delete(events, drop)
-
-
-def load_model(model_name, device):
-    try:
-        model = AutoModelForCausalLM.from_pretrained(model_name)
-    except OSError as exc:
-        if "does not appear to have a file named pytorch_model.bin" in str(exc):
-            raise RuntimeError(
-                f"Failed to load '{model_name}': this checkpoint may be safetensors-only. "
-                "Install safetensors in this environment with: pip install safetensors"
-            ) from exc
-        raise RuntimeError(
-            f"Failed to load model '{model_name}'. "
-            "Try --model stanford-crfm/music-medium-800k as fallback."
-        ) from exc
-    model = model.to(device)
-    model.eval()
-    return model
-
-
-def sec_from_bar(bar_index_1_based, bpm, beats_per_bar=4):
-    # bar 1 starts at t=0
-    bar0 = bar_index_1_based - 1
-    return bar0 * (60.0 / bpm) * beats_per_bar
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["continuation", "drum_from_controls"], required=True)
-    parser.add_argument("--input", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--model", default="stanford-crfm/music-large-800k")
-    parser.add_argument("--bpm", type=float, default=120.0)
-    parser.add_argument("--beats-per-bar", type=int, default=4)
-    parser.add_argument("--start-bar", type=int, required=True)
-    parser.add_argument("--end-bar", type=int, required=True)
-    parser.add_argument("--top-p", type=float, default=0.98)
-    parser.add_argument("--control-instr", type=int, nargs="*", default=[])
-    parser.add_argument("--drum-only", action="store_true")
-    parser.add_argument("--cpu", action="store_true")
-    args = parser.parse_args()
-
-    device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
-    print(f"[INFO] device={device}")
-
-    model = load_model(args.model, device)
-
-    events = midi_to_events(args.input)
-    print(f"[INFO] loaded events={len(events)//3}")
-    print(f"[INFO] instruments={list_instruments(events)}")
-
-    start_sec = sec_from_bar(args.start_bar, args.bpm, args.beats_per_bar)
-    end_sec = sec_from_bar(args.end_bar + 1, args.bpm, args.beats_per_bar)
-    print(f"[INFO] generation window: {start_sec:.3f}s -> {end_sec:.3f}s")
-
-    if args.mode == "continuation":
-        # only keep prompt up to start time for true continuation
-        prompt_events = ops.clip(events, 0, start_sec, clip_duration=False)
-        generated = generate(
-            model,
-            start_time=start_sec,
-            end_time=end_sec,
-            inputs=prompt_events,
-            controls=None,
-            top_p=args.top_p,
-        )
-        out_events = generated
-
-    elif args.mode == "drum_from_controls":
-        if not args.control_instr:
-            raise ValueError("For drum_from_controls, pass --control-instr (e.g. 0 33).")
-        # controls = specified instruments (e.g., piano+bass)
-        non_controls, controls = extract_instruments(events, args.control_instr)
-
-        # history up to start time from non-controls
-        history = ops.clip(non_controls, 0, start_sec, clip_duration=False)
-
-        generated = generate(
-            model,
-            start_time=start_sec,
-            end_time=end_sec,
-            inputs=history,
-            controls=controls,
-            top_p=args.top_p,
-        )
-
-        if args.drum_only:
-            generated = keep_only_instruments(generated, [128])
-
-        out_events = ops.combine(generated, controls)
-
-    out_mid = events_to_midi(out_events)
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    out_mid.save(args.output)
-    print(f"[OK] saved {args.output}")
-
-
-if __name__ == "__main__":
-    main()
-```
+For the latest behavior, always read and use the current `infer_amt.py` in this repo instead of older copied snippets.
 
 ---
 
@@ -468,11 +345,14 @@ Fix:
 Cause:
 
 - Wrong BPM/time signature assumption in command.
+- Input MIDI has missing or unreliable tempo metadata.
+- Input has large leading or trailing silence in timeline.
 
 Fix:
 
 - Verify MIDI tempo/time signature in your DAW.
 - Recalculate `start-bar`/`end-bar`.
+- Use the new logs (`detected tempo events`, `first note onset`, `active musical span`, `trailing silence`) to confirm timeline assumptions.
 
 ### C) No/poor drum generation in Scenario B
 
@@ -519,6 +399,47 @@ pip install safetensors
 ```
 
 Then re-run the same `infer_amt.py` command.
+
+### G) Output has tempo drift (notes become slower/faster)
+
+Symptoms:
+
+- Output file says 80 BPM, but note onsets are stretched vs input.
+- In DAW, copied prompt notes no longer line up in absolute seconds.
+
+Cause:
+
+- Tempo metadata was written without compatible tick resolution.
+- This has been fixed in current `infer_amt.py` by setting `ticks_per_beat` to preserve absolute 10ms event timing at the target BPM.
+
+Action:
+
+- Re-run generation with current `infer_amt.py`.
+- Verify logs for output summary include tempo and `ticks_per_beat`.
+
+### H) Input is human-played / non-quantized and continuation starts off-grid
+
+Symptoms:
+
+- Continuation starts "late" or "between beats" because last played note ends off-grid.
+
+Fix (recommended for real performance input):
+
+```bash
+python infer_amt.py \
+  --mode continuation \
+  --input YOUR_INPUT.mid \
+  --output YOUR_OUTPUT.mid \
+  --model "stanford-crfm/music-large-800k" \
+  --bpm 80 \
+  --beats-per-bar 4 \
+  --top-p 0.98 \
+  --start-from active_end \
+  --generate-bars 2 \
+  --snap-start-to-next-bar
+```
+
+This starts from the active musical end and then snaps to the next full bar boundary.
 
 ---
 
@@ -1240,6 +1161,16 @@ In your current wrapper script:
 - `--start-bar`, `--end-bar`
   - generation window in bar units (converted internally to seconds)
 
+- `--start-from`
+  - `bar`: use bar-based start (`--start-bar`)
+  - `active_end`: start at the input's last note end time
+
+- `--generate-bars`
+  - generate N bars from start point; useful with `--start-from active_end`
+
+- `--snap-start-to-next-bar`
+  - when using `active_end`, move start to next full bar boundary for grid alignment
+
 - `--top-p`
   - diversity/coherence control
 
@@ -1251,6 +1182,16 @@ In your current wrapper script:
 
 - `--cpu`
   - force CPU inference (slower, useful fallback)
+
+- `--auto-tempo-rescale` and `--source-bpm`
+  - optional timing rescale for files missing tempo metadata
+  - use carefully; can overcorrect some human-played files
+
+- `--allow-leading-silence`
+  - bypass safety guard if you intentionally want generation to start after long silence
+
+- `--align-bars-to-input-length`, `--input-bars`
+  - map bars to observed file span when metadata is unreliable
 
 ### 16.14 Debugging conditioning mistakes (most common)
 
@@ -1326,6 +1267,44 @@ python infer_amt.py \
   --bpm 120 \
   --beats-per-bar 4 \
   --top-p 0.98
+```
+
+### Human-played input (recommended stable continuation)
+
+```bash
+python infer_amt.py \
+  --mode continuation \
+  --input data/inference/continuation/02-10000-reasons-7bars-input.mid \
+  --output data/inference/out/02-10000-reasons-7bars-output-next2bars.mid \
+  --model "stanford-crfm/music-large-800k" \
+  --bpm 80 \
+  --beats-per-bar 4 \
+  --top-p 0.98 \
+  --start-from active_end \
+  --generate-bars 2 \
+  --snap-start-to-next-bar
+```
+
+### Diagnose MIDI timing metadata quickly
+
+```bash
+python - <<'PY'
+import mido
+p = "YOUR.mid"
+m = mido.MidiFile(p)
+print("ticks_per_beat", m.ticks_per_beat, "length_sec", round(m.length, 3))
+tempos, timesigs = [], []
+for ti, tr in enumerate(m.tracks):
+    t = 0
+    for msg in tr:
+        t += msg.time
+        if msg.type == "set_tempo":
+            tempos.append((ti, t, round(mido.tempo2bpm(msg.tempo), 3)))
+        if msg.type == "time_signature":
+            timesigs.append((ti, t, f"{msg.numerator}/{msg.denominator}"))
+print("tempo_events", tempos)
+print("time_signatures", timesigs)
+PY
 ```
 
 ### Controlled drum generation from piano+bass
