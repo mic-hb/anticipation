@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 from collections import Counter
+import math
 
 import mido
 import torch
@@ -136,6 +137,44 @@ def seconds_to_bar_beat(seconds, bpm, beats_per_bar):
     bar = int(total_beats // beats_per_bar) + 1
     beat_in_bar = (total_beats % beats_per_bar) + 1.0
     return bar, beat_in_bar
+
+
+def parse_quantize_fraction(fraction_text):
+    try:
+        num_str, den_str = fraction_text.split("/")
+        num = int(num_str)
+        den = int(den_str)
+    except Exception as exc:
+        raise ValueError(f"Invalid quantization value '{fraction_text}'. Use values like 1/4, 1/8, 1/16.") from exc
+    if num != 1 or den <= 0:
+        raise ValueError(f"Unsupported quantization value '{fraction_text}'. Use 1/N (e.g. 1/8, 1/16).")
+    return den
+
+
+def quantize_events_to_grid(events, bpm, note_fraction, beats_per_bar):
+    # For 4/4-style counting used in this script:
+    # whole note = 4 beats, so grid in beats is 4/n for note value 1/n.
+    beat_len = 60.0 / bpm
+    grid_beats = 4.0 / note_fraction
+    grid_seconds = beat_len * grid_beats
+    grid_ticks = max(1, int(round(grid_seconds * 100.0)))
+    min_duration_ticks = grid_ticks
+
+    quantized = []
+    for time_tok, dur_tok, note_tok in zip(events[0::3], events[1::3], events[2::3]):
+        if note_tok == SEPARATOR:
+            quantized.extend([time_tok, dur_tok, note_tok])
+            continue
+        raw_time = time_tok - TIME_OFFSET
+        raw_dur = dur_tok - DUR_OFFSET
+
+        q_time = int(round(raw_time / grid_ticks)) * grid_ticks
+        q_dur = int(round(raw_dur / grid_ticks)) * grid_ticks
+        q_dur = max(min_duration_ticks, q_dur)
+
+        quantized.extend([TIME_OFFSET + q_time, DUR_OFFSET + q_dur, note_tok])
+
+    return ops.sort(quantized), grid_seconds
 
 
 def write_tempo_metadata(mid, bpm, beats_per_bar):
@@ -294,6 +333,19 @@ def main():
             "at --bpm/--beats-per-bar. Helps keep continuation on DAW grid."
         ),
     )
+    parser.add_argument(
+        "--human-perf-quantize-pipeline",
+        action="store_true",
+        help=(
+            "For human-played (non-quantized) MIDI: quantize a copy of input for model conditioning, "
+            "generate continuation, keep only new generated notes, then append to original input notes."
+        ),
+    )
+    parser.add_argument(
+        "--quantize-value",
+        default="1/16",
+        help="Quantization value for --human-perf-quantize-pipeline. Examples: 1/2, 1/4, 1/8, 1/16, 1/32.",
+    )
     args = parser.parse_args()
     if args.start_from == "bar" and args.start_bar is None:
         raise ValueError("--start-bar is required when --start-from bar.")
@@ -303,6 +355,8 @@ def main():
         raise ValueError("--generate-bars must be > 0.")
     if args.generate_bars is None and args.end_bar is None:
         raise ValueError("Provide either --end-bar or --generate-bars.")
+    if args.human_perf_quantize_pipeline:
+        parse_quantize_fraction(args.quantize_value)
 
     device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
     print(f"[INFO] device={device}")
@@ -312,7 +366,8 @@ def main():
 
     tempos, timesigs = midi_tempo_and_timesig_info(args.input)
     has_tempo_event = midi_has_tempo_event(args.input)
-    events = midi_to_events(args.input)
+    original_events = midi_to_events(args.input)
+    events = original_events
 
     if not has_tempo_event:
         if args.auto_tempo_rescale:
@@ -428,9 +483,20 @@ def main():
             "Double-check --bpm/--start-bar (or pass --allow-leading-silence if intentional)."
         )
 
+    model_events = events
+    if args.human_perf_quantize_pipeline:
+        note_fraction = parse_quantize_fraction(args.quantize_value)
+        model_events, grid_seconds = quantize_events_to_grid(
+            events, args.bpm, note_fraction, args.beats_per_bar
+        )
+        print(
+            "[INFO] human-perf quantize pipeline enabled: "
+            f"quantize_value={args.quantize_value}, grid={grid_seconds:.3f}s"
+        )
+
     if args.mode == "continuation":
         # only keep prompt up to start time for true continuation
-        prompt_events = ops.clip(events, 0, start_sec, clip_duration=False)
+        prompt_events = ops.clip(model_events, 0, start_sec, clip_duration=False)
         generated = generate(
             model,
             start_time=start_sec,
@@ -445,7 +511,7 @@ def main():
         if not args.control_instr:
             raise ValueError("For drum_from_controls, pass --control-instr (e.g. 0 33).")
         # controls = specified instruments (e.g., piano+bass)
-        non_controls, controls = extract_instruments(events, args.control_instr)
+        non_controls, controls = extract_instruments(model_events, args.control_instr)
 
         # history up to start time from non-controls
         history = ops.clip(non_controls, 0, start_sec, clip_duration=False)
@@ -463,6 +529,21 @@ def main():
             generated = keep_only_instruments(generated, [128])
 
         out_events = ops.combine(generated, controls)
+
+    # In quantized human-performance pipeline, keep only generated continuation
+    # and append it onto original (unquantized) input timeline.
+    if args.human_perf_quantize_pipeline:
+        generated_only = ops.clip(
+            out_events,
+            start_sec + 0.01,
+            ops.max_time(out_events),
+            clip_duration=False,
+        )
+        out_events = ops.sort(original_events + generated_only)
+        print(
+            f"[INFO] appended generated continuation onto original input: "
+            f"original_events={len(original_events)//3}, generated_new_events={len(generated_only)//3}"
+        )
 
     out_mid = events_to_midi(out_events)
     if not args.skip_write_tempo_meta:
