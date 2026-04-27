@@ -1253,7 +1253,198 @@ The strongest outcomes usually come from combining:
 
 ---
 
-## 17) Fast Command Reference
+## 17) Exhaustive Generation Parameter Reference
+
+This section is a full reference for generation-related parameters in `infer_amt.py`, including what each flag does, why it exists, and how it interacts with other flags.
+
+### 17.1 Core execution parameters
+
+- `--mode {continuation, drum_from_controls}`  
+  Selects generation workflow:
+  - `continuation`: continue from prompt/history.
+  - `drum_from_controls`: split instruments into controls vs generated stream.
+
+- `--input PATH.mid`  
+  Input MIDI file to tokenize and condition on.
+
+- `--output PATH.mid`  
+  Output MIDI file destination.
+
+- `--model REPO_OR_PATH`  
+  Hugging Face checkpoint (default `stanford-crfm/music-large-800k`).
+
+- `--cpu`  
+  Force CPU inference. Useful fallback for GPU OOM, but slower.
+
+### 17.2 Musical timeline parameters
+
+- `--bpm FLOAT`  
+  Target BPM for:
+  - bar-to-seconds conversion
+  - output tempo metadata
+  - bar/beat diagnostic log interpretation
+
+- `--beats-per-bar INT`  
+  Meter numerator used by conversion and logs (e.g. `4` for 4/4).
+
+- `--start-bar INT`  
+  Start bar index (1-based). Required when `--start-from bar`.
+
+- `--end-bar INT`  
+  End bar index (inclusive).  
+  If `--generate-bars` is provided, `--generate-bars` takes precedence.
+
+- `--start-from {bar,active_end}`  
+  Start reference:
+  - `bar`: use `--start-bar` clock location
+  - `active_end`: use last note end in the input performance
+
+- `--generate-bars FLOAT`  
+  Generate this many bars from selected start reference.  
+  Most useful with `--start-from active_end` for human-played input.
+
+- `--snap-start-to-next-bar`  
+  Valid only with `--start-from active_end`.  
+  Snaps off-grid active end to the next exact bar boundary.
+
+Why these exist:
+
+- human-played MIDI often starts late (pickup) and ends off-grid
+- strict bar-based continuation can produce strange alignment in those cases
+- `active_end` + optional snap usually gives more stable practical behavior
+
+### 17.3 Sampling / creativity parameter
+
+- `--top-p FLOAT`  
+  Nucleus sampling threshold.
+  - lower (`0.90-0.95`): safer, more conservative, fewer surprises
+  - medium (`0.96-0.98`): balanced default zone
+  - high (`0.99+`): more novelty, higher instability risk
+
+No single best value. A/B sample and curate by ear.
+
+### 17.4 Instrument-control parameters
+
+- `--control-instr ID [ID ...]`  
+  Used in `drum_from_controls` mode.  
+  Instruments in this list become controls; remaining instruments are generated.
+
+- `--drum-only`  
+  Post-filter generated stream to drum instrument ID (`128`) before recombining.
+
+Usage pattern:
+
+1. inspect IDs with `ops.get_instruments`
+2. choose control instruments (e.g. piano + bass)
+3. generate complementary part (e.g. drums)
+
+### 17.5 Tempo metadata and timing resilience parameters
+
+- `--auto-tempo-rescale`  
+  When tempo metadata is missing, optionally rescale event timing from source basis to target `--bpm`.
+
+- `--source-bpm FLOAT`  
+  Source timing basis used only when auto-rescale is enabled and metadata is missing.
+
+- `--align-bars-to-input-length`  
+  Alternative bar mapping mode: derive seconds-per-bar from observed input span instead of pure BPM formula.
+
+- `--input-bars INT`  
+  Required with `--align-bars-to-input-length`.
+
+- `--allow-leading-silence`  
+  Bypass safety guard that prevents start time from being far after active note end.
+
+- `--skip-write-tempo-meta`  
+  Skip writing output tempo/time-signature metadata (normally not recommended).
+
+Important practical notes:
+
+- If input has valid tempo metadata, prefer straightforward settings first.
+- If input has missing/weird metadata, use diagnostics logs before forcing rescale.
+- For non-quantized performances, try `--start-from active_end --generate-bars N`.
+
+### 17.6 Parameter precedence and interaction rules
+
+The most important interactions:
+
+1. `--start-from active_end` changes how `start_sec` is computed.
+2. `--generate-bars` overrides end-time derivation from `--end-bar`.
+3. `--snap-start-to-next-bar` only works with `active_end`.
+4. `--align-bars-to-input-length` applies only in bar-start mode.
+5. `--auto-tempo-rescale` only affects files without tempo metadata.
+
+Mental model:
+
+- first choose **start reference** (`bar` vs `active_end`)
+- then choose **duration** (`generate-bars` or `end-bar`)
+- then choose **stability/creativity** (`top-p`)
+- finally tune **timing edge-case flags** only if diagnostics indicate mismatch
+
+### 17.7 Logs you should always read after each run
+
+The script now logs high-value diagnostics. Check these every time:
+
+- detected tempo events
+- detected time signatures
+- first note onset (bar/beat estimate)
+- input max onset and max note end
+- active musical span and trailing silence warning
+- generation window start/end
+- input/output MIDI summaries:
+  - tracks
+  - channels
+  - programs
+  - ticks_per_beat
+
+Why this matters:
+
+- most bad runs are not "model quality failures"; they are timing-model mismatch failures
+- these logs tell you exactly where mismatch begins
+
+### 17.8 Recommended presets (copy-paste strategy)
+
+Preset A: clean quantized continuation
+
+- `--start-from bar`
+- `--start-bar N --end-bar M`
+- `--top-p 0.96-0.98`
+
+Preset B: human-played continuation (recommended)
+
+- `--start-from active_end`
+- `--generate-bars 2` (or desired)
+- optionally `--snap-start-to-next-bar`
+- `--top-p 0.95-0.98`
+
+Preset C: controlled drum generation
+
+- `--mode drum_from_controls`
+- `--control-instr ...`
+- optionally `--drum-only`
+- `--top-p 0.93-0.97`
+
+### 17.9 Common misconfiguration patterns
+
+- Passing `--source-bpm` without enabling `--auto-tempo-rescale` and expecting change.
+- Using strict `--start-bar` on a file with pickup start and long trailing silence.
+- Ignoring warning about large trailing silence and then interpreting delayed generation as model failure.
+- Setting very high `--top-p` and expecting strict rhythmic consistency.
+- Assuming output BPM metadata alone can fix bad internal timing basis.
+
+### 17.10 Quick decision tree
+
+If output sounds off-grid:
+
+1. Check tempo/time-signature logs.
+2. Check first onset and last note end positions.
+3. If human-played and off-grid, switch to `active_end`.
+4. If you need bar alignment, add `--snap-start-to-next-bar`.
+5. If metadata is missing, evaluate `--auto-tempo-rescale` carefully.
+
+---
+
+## 18) Fast Command Reference
 
 ### Continuation
 
@@ -1325,7 +1516,7 @@ python infer_amt.py \
 
 ---
 
-## 18) Verified Environment Matrix
+## 19) Verified Environment Matrix
 
 The following environment was tested and confirmed to load and run `stanford-crfm/music-large-800k` successfully:
 
@@ -1348,7 +1539,7 @@ If your environment differs significantly and the model fails to load, first ver
 
 ---
 
-## 19) Next Recommended Improvements
+## 20) Next Recommended Improvements
 
 - Add batch generation option (`--n 5`) to create multiple versions automatically.
 - Add automatic tempo extraction from MIDI (instead of fixed BPM input).
