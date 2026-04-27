@@ -11,3 +11,4 @@ tmp
 .hypothesis
 *.egg-info
 build
+data
