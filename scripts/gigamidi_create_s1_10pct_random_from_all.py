@@ -63,12 +63,6 @@ def main():
         default=None,
         help="Limit number of files to process (for testing)",
     )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=4,
-        help="Number of parallel workers for data loading (default: 4)",
-    )
 
     args = parser.parse_args()
 
@@ -81,7 +75,6 @@ def main():
     print("=" * 70)
     print(f"Sample Size:  {args.sample_size * 100:.1f}%")
     print(f"Seed:     {args.seed}")
-    print(f"Workers:   {args.workers}")
     print(f"Output:   {args.output}")
     if args.limit:
         print(f"Limit:    {args.limit:,} files (testing mode)")
@@ -97,7 +90,6 @@ def main():
         "v2.0.0",
         split="train",
         streaming=True,
-        num_proc=args.workers,
     )
 
     # Stage 2: Collect file metadata
