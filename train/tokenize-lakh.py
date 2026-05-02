@@ -32,8 +32,9 @@ def main(args):
 
     # parallel tokenization drops the last chunk of < M tokens
     # if concerned about waste: process larger groups of datafiles
+    workers = getattr(args, "workers", PREPROC_WORKERS) or PREPROC_WORKERS
     func = tokenize_ia if args.interarrival else tokenize
-    with Pool(processes=PREPROC_WORKERS, initargs=(RLock(),), initializer=tqdm.set_lock) as pool:
+    with Pool(processes=workers, initargs=(RLock(),), initializer=tqdm.set_lock) as pool:
         results = pool.starmap(func, zip(files, outputs, augment, range(len(LAKH_SPLITS))))
 
     seq_count, rest_count, too_short, too_long, too_manyinstr, discarded_seqs, truncations \
@@ -63,5 +64,12 @@ if __name__ == '__main__':
     parser.add_argument('-i', '--interarrival',
             action='store_true',
             help='request interarrival-time enocoding (default to arrival-time encoding)')
+    parser.add_argument(
+        '-w',
+        '--workers',
+        type=int,
+        default=PREPROC_WORKERS,
+        help="number of parallel workers",
+    )
 
     main(parser.parse_args())

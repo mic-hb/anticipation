@@ -23,12 +23,25 @@ Features:
 
 import argparse
 import json
+import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from datasets import load_dataset
 from tqdm import tqdm
+
+
+def download_single(args_tuple):
+    """Download a single file. Called by thread pool."""
+    md5, output_dir, skip_existing = args_tuple
+
+    existing_file = output_dir / f"{md5}.mid"
+    if skip_existing and existing_file.exists():
+        return md5, existing_file.stat().st_size, True
+
+    return md5, 0, False
 
 
 def main():
@@ -59,6 +72,12 @@ def main():
         default=True,
         help="Skip files that already exist (default: True)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Number of parallel download workers (default: 8)",
+    )
 
     args = parser.parse_args()
 
@@ -67,46 +86,142 @@ def main():
     start_time = time.time()
 
     print("=" * 70)
-    print("GigaMIDI Subset Downloader (All Splits)")
+    print("GigaMIDI Subset Downloader (All Splits) - Parallel")
     print("=" * 70)
     print(f"Input:    {args.input}")
     print(f"Output:   {args.output}")
+    print(f"Workers: {args.workers}")
     if args.limit:
         print(f"Limit:   {args.limit:,} files (testing mode)")
     print(f"Skip existing: {args.skip_existing}")
     print("-" * 70)
     sys.stdout.flush()
 
-    # Load md5 list
-    print("\n[Stage 1/4] Loading MD5 list...")
+    # Stage 1: Load md5 list and create download tasks
+    print("\n[Stage 1/4] Loading MD5 list and building download queue...")
     stage_start = time.time()
 
     with open(args.input) as f:
         file_list = json.load(f)
 
-    # Group by split for efficient downloading
-    splits = {"train": set(), "validation": set(), "test": set()}
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
+    download_queue = []
     for item in file_list:
         md5 = item.get("md5", "")
-        split = item.get("split", "train")
-        if split not in splits:
-            split = "train"
-        splits[split].add(md5)
+        if not md5 or (args.limit and len(download_queue) >= args.limit):
+            continue
+        download_queue.append((md5, output_dir, args.skip_existing))
 
-    total_target = len(file_list)
-    train_target = len(splits["train"])
-    valid_target = len(splits["validation"])
-    test_target = len(splits["test"])
-
-    print(f"  Total files to download: {total_target:,}")
-    print(f"    - Train:      {train_target:,}")
-    print(f"    - Valid:     {valid_target:,}")
-    print(f"    - Test:      {test_target:,}")
-
-    load_time = time.time() - stage_start
-    print(f"  Loaded in {load_time:.1f}s")
+    queue_size = len(download_queue)
+    stage_time = time.time() - stage_start
+    print(f"  Built queue with {queue_size:,} files in {stage_time:.1f}s")
     sys.stdout.flush()
+
+    # Check existing files to skip
+    if args.skip_existing:
+        print("\n[Stage 2/4] Checking existing files...")
+        stage_start = time.time()
+
+        existing_md5s = {f.stem for f in output_dir.glob("*.mid")}
+        new_queue = [t for t in download_queue if t[0] not in existing_md5s]
+        skipped = len(download_queue) - len(new_queue)
+
+        stage_time = time.time() - stage_start
+        print(f"  Skipping {skipped:,} existing files")
+        print(f"  Remaining: {len(new_queue):,}")
+        download_queue = new_queue
+
+    # Stage 3: Download with thread pool
+    print(f"\n[Stage 3/4] Downloading with {args.workers} workers...")
+    stage_start = time.time()
+
+    downloaded = 0
+    failed = 0
+    total_size = 0
+
+    def download_with_dataset(args_tuple):
+        md5, output_dir, skip = args_tuple
+        try:
+            for split_name in ["train", "validation", "test"]:
+                ds = load_dataset(
+                    "Metacreation/GigaMIDI", "v2.0.0", split=split_name, streaming=True
+                )
+                for row in ds:
+                    if row.get("md5", "") != md5:
+                        continue
+                    music_data = row.get("music")
+                    if not music_data:
+                        return md5, 0, False
+                    midi_bytes = music_data.get("bytes")
+                    if not midi_bytes:
+                        return md5, 0, False
+                    existing_file = output_dir / f"{md5}.mid"
+                    with open(existing_file, "wb") as f:
+                        f.write(midi_bytes)
+                    return md5, len(midi_bytes), True
+        except Exception:
+            pass
+        return md5, 0, False
+
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {executor.submit(download_with_dataset, t): t for t in download_queue}
+
+        with tqdm(total=len(futures), desc="Downloading", unit="files") as pbar:
+            for future in as_completed(futures):
+                md5, size, success = future.result()
+                if success:
+                    downloaded += 1
+                    total_size += size
+                else:
+                    failed += 1
+                pbar.update(1)
+
+                if downloaded % 1000 == 0:
+                    elapsed = time.time() - stage_start
+                    rate = downloaded / elapsed if elapsed > 0 else 0
+                    remaining = len(futures) - downloaded - failed
+                    eta = remaining / rate if rate > 0 else 0
+                    pbar.set_postfix(
+                        {"rate": f"{rate:.0f}f/s", "ETA": f"{eta / 60:.1f}m"}
+                    )
+
+    download_time = time.time() - stage_start
+    rate = downloaded / download_time if download_time > 0 else 0
+    print(
+        f"\n  Downloaded: {downloaded:,} files in {download_time:.1f}s ({rate:.0f} files/s)"
+    )
+    print(f"  Failed:   {failed:,}")
+    print(f"  Total size: {total_size / (1024**3):.2f} GB")
+    sys.stdout.flush()
+
+    # Stage 4: Verify
+    print("\n[Stage 4/4] Verifying downloads...")
+    stage_start = time.time()
+
+    actual_files = list(output_dir.glob("*.mid"))
+    verified = len(actual_files)
+
+    verify_time = time.time() - stage_start
+    print(f"  Verified: {verified:,} files")
+    sys.stdout.flush()
+
+    # Summary
+    total_time = time.time() - start_time
+    print("\n" + "=" * 70)
+    print("COMPLETE - Summary")
+    print("=" * 70)
+    print(f"  Files downloaded:    {downloaded:,}")
+    print(f"  Files verified:  {verified:,}")
+    print(f"  Total size:   {total_size / (1024**3):.2f} GB")
+    print(f"  Output:     {output_dir}")
+    print(f"  Total time: {total_time:.1f}s ({total_time / 60:.1f} min)")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
 
     # Create output directory
     output_dir = Path(args.output)

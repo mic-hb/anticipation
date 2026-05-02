@@ -87,6 +87,8 @@ def main():
         str(input_dir),
         "--augment",
         str(args.augment),
+        "--workers",
+        str(args.workers),
     ]
 
     if args.interarrival:

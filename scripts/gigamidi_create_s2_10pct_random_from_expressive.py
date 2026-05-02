@@ -24,6 +24,7 @@ Usage:
 
 Features:
 - Progress bar with tqdm
+- Parallel collection from all splits (concurrent)
 - Time estimates
 - NOMML threshold filtering
 - Deterministic sorting before sampling (reproducibility)
@@ -35,10 +36,54 @@ import json
 import random
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from datasets import load_dataset
 from tqdm import tqdm
+
+
+def collect_expressive_split(args_tuple):
+    """Collect expressive metadata from a single split. Called by thread pool."""
+    split_name, limit, nomml_threshold = args_tuple
+
+    ds = load_dataset(
+        "Metacreation/GigaMIDI",
+        "v2.0.0",
+        split=split_name,
+        streaming=True,
+    )
+
+    files = []
+    for row in ds:
+        num_tracks = row.get("num_tracks", 0) or 0
+        if num_tracks < 1 or num_tracks > 16:
+            continue
+
+        nomml = row.get("NOMML", []) or []
+        has_expressive = any(n >= nomml_threshold for n in nomml)
+
+        if not has_expressive:
+            continue
+
+        files.append(
+            {
+                "md5": row.get("md5", ""),
+                "split": split_name,
+                "nomml": nomml,
+                "num_tracks": num_tracks,
+                "title": row.get("title", ""),
+                "artist": row.get("artist", ""),
+                "duration": row.get("duration", 0),
+                "time_signature": row.get("time_signature", ""),
+                "tempo": row.get("tempo", 0),
+            }
+        )
+
+        if limit and len(files) >= limit:
+            break
+
+    return split_name, files
 
 
 def main():
@@ -75,6 +120,12 @@ def main():
         default=None,
         help="Limit number of files per split to process (for testing)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=3,
+        help="Number of parallel workers for split collection (default: 3)",
+    )
 
     args = parser.parse_args()
 
@@ -89,6 +140,7 @@ def main():
     print(f"NOMML Threshold: >= {args.nomml_threshold}")
     print(f"Seed:         {args.seed}")
     print(f"Output:       {args.output}")
+    print(f"Workers:      {args.workers}")
     if args.limit:
         print(f"Limit:        {args.limit:,} files per split (testing mode)")
     print("-" * 70)
@@ -99,72 +151,56 @@ def main():
 
     all_files = []
 
-    for split_name in ["train", "validation", "test"]:
-        print(f"\n[Collecting] {split_name} split...")
+    # Stage 1: Collect from all splits in parallel
+    print("\n[Stage 1/4] Collecting from all splits (parallel)...")
+    stage_start = time.time()
 
-        ds = load_dataset(
-            "Metacreation/GigaMIDI",
-            "v2.0.0",
-            split=split_name,
-            streaming=True,
-        )
+    splits = ["train", "validation", "test"]
+    tasks = [(split, args.limit, args.nomml_threshold) for split in splits]
 
-        split_count = 0
-        expressive_count = 0
+    split_results = {}
 
-        with tqdm(
-            desc=f"{split_name}", unit="files", unit_scale=True, unit_divisor=1000
-        ) as pbar:
-            for row in ds:
-                split_count += 1
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {executor.submit(collect_expressive_split, t): t[0] for t in tasks}
+
+        with tqdm(total=len(futures), desc="Split collection", unit="splits") as pbar:
+            for future in as_completed(futures):
+                split_name = futures[future]
+                name, files = future.result()
+                split_results[name] = files
                 pbar.update(1)
 
-                num_tracks = row.get("num_tracks", 0) or 0
-                if num_tracks < 1 or num_tracks > 16:
-                    continue
+    for split_name in splits:
+        all_files.extend(split_results[split_name])
 
-                nomml = row.get("NOMML", []) or []
-                has_expressive = any(n >= args.nomml_threshold for n in nomml)
+    train_count = len(split_results.get("train", []))
+    valid_count = len(split_results.get("validation", []))
+    test_count = len(split_results.get("test", []))
 
-                if not has_expressive:
-                    continue
-
-                all_files.append(
-                    {
-                        "md5": row.get("md5", ""),
-                        "split": split_name,
-                        "nomml": nomml,
-                        "num_tracks": num_tracks,
-                        "title": row.get("title", ""),
-                        "artist": row.get("artist", ""),
-                        "duration": row.get("duration", 0),
-                        "time_signature": row.get("time_signature", ""),
-                        "tempo": row.get("tempo", 0),
-                    }
-                )
-                expressive_count += 1
-
-                if args.limit and expressive_count >= args.limit:
-                    break
-
-                if split_count % 10000 == 0:
-                    pbar.set_postfix({"expressive": expressive_count})
-
-        print(
-            f"  {split_name}: {split_count:,} scanned, {expressive_count:,} expressive"
-        )
+    collect_time = time.time() - stage_start
+    print(f"  Collected in {collect_time:.1f}s")
+    print(f"    - Train:      {train_count:,}")
+    print(f"    - Valid:     {valid_count:,}")
+    print(f"    - Test:      {test_count:,}")
+    sys.stdout.flush()
 
     total_files = len(all_files)
     print(f"\n  Total expressive files: {total_files:,}")
     sys.stdout.flush()
 
-    # Sort by md5 for reproducibility
-    print("\n[Sorting] by MD5 for reproducibility...")
+    # Stage 2: Sort by md5 for reproducibility
+    print("\n[Stage 2/4] Sorting by MD5 for reproducibility...")
+    stage_start = time.time()
+
+    print(f"  Sorting {total_files:,} files by MD5...")
     all_files.sort(key=lambda x: x["md5"])
     print(f"  Sorted {total_files:,} files")
+    sys.stdout.flush()
 
-    # Random sampling
-    print("\n[Sampling] Random sampling...")
+    # Stage 3: Random sampling
+    print("\n[Stage 3/4] Random sampling...")
+    stage_start = time.time()
+
     random.seed(args.seed)
     sample_size = int(total_files * args.sample_size)
 
@@ -189,8 +225,8 @@ def main():
     print(f"    - Valid (e):   {valid_result:,}")
     print(f"    - Test (f):    {test_result:,}")
 
-    # Save output
-    print("\n[Saving] Writing output file...")
+    # Stage 4: Save output
+    print("\n[Stage 4/4] Writing output file...")
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

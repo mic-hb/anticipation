@@ -89,6 +89,8 @@ def main():
             sys.executable,
             str(TRAIN_DIR / "midi-preprocess.py"),
             str(split_dir),
+            "--workers",
+            str(args.workers),
         ]
 
         print(f"  Running: {' '.join(cmd)}")

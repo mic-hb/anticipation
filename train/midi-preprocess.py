@@ -29,8 +29,10 @@ def main(args):
     filenames = glob(args.dir + '/**/*.mid', recursive=True) \
             + glob(args.dir + '/**/*.midi', recursive=True)
 
-    print(f'Preprocessing {len(filenames)} files with {PREPROC_WORKERS} workers')
-    with ProcessPoolExecutor(max_workers=PREPROC_WORKERS) as executor:
+    workers = getattr(args, 'workers', PREPROC_WORKERS) or PREPROC_WORKERS
+
+    print(f'Preprocessing {len(filenames)} files with {workers} workers')
+    with ProcessPoolExecutor(max_workers=workers) as executor:
         results = list(tqdm(executor.map(convert_midi, filenames), desc='Preprocess', total=len(filenames)))
 
     discards = round(100*sum(results)/float(len(filenames)),2)
@@ -39,4 +41,10 @@ def main(args):
 if __name__ == '__main__':
     parser = ArgumentParser(description='prepares a MIDI dataset')
     parser.add_argument('dir', help='directory containing .mid files for training')
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=PREPROC_WORKERS,
+        help='number of parallel workers',
+    )
     main(parser.parse_args())
