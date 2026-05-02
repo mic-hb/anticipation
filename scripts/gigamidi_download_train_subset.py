@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-GigaMIDI Download Script
+GigaMIDI Train Subset Downloader
 
-Downloads MIDI files from GigaMIDI dataset based on md5 list from subset creation.
+Downloads MIDI files from GigaMIDI train split based on md5 list from subset creation.
 
 Usage:
-    python scripts/gigamidi_download.py --input data/gigamidi_s1_10pct_random.json --output data/gigamidi_s1_random/
+    python scripts/gigamidi_download_train_subset.py \
+        --input data/gigamidi_s1_10pct_random_from_all.json \
+        --output data/gigamidi_s1_10pct_random_from_all/
 """
 
 import argparse
@@ -19,7 +21,7 @@ from datasets import load_dataset
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download MIDI files from GigaMIDI using md5 list"
+        description="Download MIDI files from GigaMIDI train split using md5 list"
     )
     parser.add_argument(
         "--input",
