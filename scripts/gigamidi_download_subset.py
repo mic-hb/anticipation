@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-GigaMIDI Train Subset Downloader
+GigaMIDI Subset Downloader (All Splits)
 
-Downloads MIDI files from GigaMIDI train split based on md5 list from subset creation.
+Downloads MIDI files from GigaMIDI based on md5 list from subset creation.
+Handles files from ALL splits (train, validation, test).
+
+The JSON should contain a "split" field indicating which GigaMIDI split each file came from.
 
 Usage:
-    python scripts/gigamidi_download_train_subset.py \
+    python scripts/gigamidi_download_subset.py \
         --input data/gigamidi_s1_10pct_random_from_all.json \
-        --output data/gigamidi_s1_10pct_random_from_all/ \
-        --limit 1000
+        --output data/gigamidi_s1_10pct_random_from_all/
 
 Features:
 - Progress bar with tqdm
@@ -16,6 +18,7 @@ Features:
 - Download speed tracking
 - File size tracking
 - Resumable (skips existing files)
+- Downloads from appropriate split based on JSON metadata
 """
 
 import argparse
@@ -30,7 +33,7 @@ from tqdm import tqdm
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download MIDI files from GigaMIDI train split using md5 list"
+        description="Download MIDI files from GigaMIDI using md5 list (all splits)"
     )
     parser.add_argument(
         "--input",
@@ -43,13 +46,6 @@ def main():
         type=str,
         required=True,
         help="Output directory to save MIDI files",
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="train",
-        choices=["train", "validation", "test"],
-        help="Which GigaMIDI split to download from (default: train)",
     )
     parser.add_argument(
         "--limit",
@@ -71,11 +67,10 @@ def main():
     start_time = time.time()
 
     print("=" * 70)
-    print("GigaMIDI Train Subset Downloader")
+    print("GigaMIDI Subset Downloader (All Splits)")
     print("=" * 70)
     print(f"Input:    {args.input}")
     print(f"Output:   {args.output}")
-    print(f"Split:   {args.split}")
     if args.limit:
         print(f"Limit:   {args.limit:,} files (testing mode)")
     print(f"Skip existing: {args.skip_existing}")
@@ -83,17 +78,34 @@ def main():
     sys.stdout.flush()
 
     # Load md5 list
-    print("\n[Stage 1/3] Loading MD5 list...")
+    print("\n[Stage 1/4] Loading MD5 list...")
     stage_start = time.time()
 
     with open(args.input) as f:
         file_list = json.load(f)
 
-    target_md5s = {item["md5"] for item in file_list}
-    total_target = len(target_md5s)
+    # Group by split for efficient downloading
+    splits = {"train": set(), "validation": set(), "test": set()}
+
+    for item in file_list:
+        md5 = item.get("md5", "")
+        split = item.get("split", "train")
+        if split not in splits:
+            split = "train"
+        splits[split].add(md5)
+
+    total_target = len(file_list)
+    train_target = len(splits["train"])
+    valid_target = len(splits["validation"])
+    test_target = len(splits["test"])
+
+    print(f"  Total files to download: {total_target:,}")
+    print(f"    - Train:      {train_target:,}")
+    print(f"    - Valid:     {valid_target:,}")
+    print(f"    - Test:      {test_target:,}")
 
     load_time = time.time() - stage_start
-    print(f"  Loaded {total_target:,} MD5s in {load_time:.1f}s")
+    print(f"  Loaded in {load_time:.1f}s")
     sys.stdout.flush()
 
     # Create output directory
@@ -104,32 +116,34 @@ def main():
     existing = len(list(output_dir.glob("*.mid")))
     if args.skip_existing and existing > 0:
         print(f"  Found {existing:,} existing files (skipping)")
-        target_md5s = target_md5s - {f.stem for f in output_dir.glob("*.mid")}
-        total_target = len(target_md5s)
+        for split in splits:
+            splits[split] = splits[split] - {f.stem for f in output_dir.glob("*.mid")}
+        total_target = sum(len(v) for v in splits.values())
         print(f"  Remaining to download: {total_target:,}")
 
     print("-" * 70)
 
-    # Download from GigaMIDI
-    print("\n[Stage 2/3] Downloading MIDI files...")
+    # Download from each split
+    print("\n[Stage 2/4] Downloading MIDI files...")
     stage_start = time.time()
     sys.stdout.flush()
-
-    ds = load_dataset(
-        "Metacreation/GigaMIDI", "v2.0.0", split=args.split, streaming=True
-    )
 
     downloaded = 0
     skipped = 0
     total_size = 0
 
-    with tqdm(
-        total=total_target,
-        desc="Downloading",
-        unit="files",
-        unit_scale=True,
-        unit_divisor=1000,
-    ) as pbar:
+    for split_name, target_md5s in splits.items():
+        if not target_md5s:
+            continue
+
+        print(
+            f"\n  Downloading from {split_name} split ({len(target_md5s):,} files)..."
+        )
+
+        ds = load_dataset(
+            "Metacreation/GigaMIDI", "v2.0.0", split=split_name, streaming=True
+        )
+
         for row in ds:
             md5 = row.get("md5", "")
 
@@ -141,21 +155,16 @@ def main():
                 skipped += 1
                 total_size += existing_file.stat().st_size
                 downloaded += 1
-                pbar.update(1)
-                if args.limit and downloaded >= args.limit:
-                    break
                 continue
 
             music_data = row.get("music")
             if not music_data:
                 skipped += 1
-                pbar.update(1)
                 continue
 
             midi_bytes = music_data.get("bytes")
             if not midi_bytes:
                 skipped += 1
-                pbar.update(1)
                 continue
 
             with open(existing_file, "wb") as f:
@@ -165,19 +174,13 @@ def main():
             total_size += file_size
             downloaded += 1
 
-            pbar.update(1)
-
-            if downloaded % 1000 == 0 or downloaded == total_target:
+            if downloaded % 1000 == 0:
                 elapsed = time.time() - stage_start
                 rate = downloaded / elapsed if elapsed > 0 else 0
                 remaining = total_target - downloaded
                 eta = remaining / rate if rate > 0 else 0
-                pbar.set_postfix(
-                    {
-                        "rate": f"{rate:.0f}f/s",
-                        "size": f"{total_size / (1024**3):.2f}GB",
-                        "ETA": f"{eta / 60:.1f}m" if eta > 0 else "done",
-                    }
+                print(
+                    f"    {downloaded:,}/{total_target:,} | {rate:.0f}f/s | ETA: {eta / 60:.1f}m"
                 )
 
             if args.limit and downloaded >= args.limit:
@@ -186,14 +189,17 @@ def main():
             if downloaded >= total_target + skipped:
                 break
 
+        if args.limit and downloaded >= args.limit:
+            break
+
     download_time = time.time() - stage_start
     print(f"\n  Downloaded: {downloaded:,} files in {download_time:.1f}s")
     print(f"  Skipped:   {skipped:,} files")
-    print(f"  Speed:    {(downloaded) / download_time:.0f} files/s")
+    print(f"  Speed:    {downloaded / download_time:.0f} files/s")
     sys.stdout.flush()
 
     # Verify
-    print("\n[Stage 3/3] Verifying downloads...")
+    print("\n[Stage 3/4] Verifying downloads...")
     stage_start = time.time()
 
     actual_files = list(output_dir.glob("*.mid"))
@@ -218,6 +224,8 @@ def main():
     print(f"  Output:          {output_dir}")
     print(f"  Total time:       {total_time:.1f}s ({total_time / 60:.1f} min)")
     print("=" * 70)
+    print("\nNote: After download, use restructure script for hash-based splitting:")
+    print("       0-d -> train/, e -> valid/, f -> test/")
 
 
 if __name__ == "__main__":

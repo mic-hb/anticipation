@@ -9,8 +9,8 @@ Usage:
         --input data/gigamidi_s1_10pct_random_from_all/ \
         --output data/gigamidi_s1_10pct_random_from_all_structured/ \
         --train_split_chars 0123456789abcd \
-        --valid_split_chars "" \
-        --test_split_chars ""
+        --valid_split_chars e \
+        --test_split_chars f
 
 Features:
 - Progress bar with tqdm
