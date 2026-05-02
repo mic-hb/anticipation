@@ -124,11 +124,9 @@ def main():
             if i > 0 and i % 10000 == 0:
                 elapsed = time.time() - stage_start
                 rate = i / elapsed
-                remaining = (len(ds) - i) / rate if args.limit is None else 0
                 pbar.set_postfix(
                     {
                         "files/s": f"{rate:.0f}",
-                        "ETA": f"{remaining / 60:.1f}m" if remaining > 0 else "done",
                     }
                 )
 
