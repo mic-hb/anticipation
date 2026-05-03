@@ -64,24 +64,11 @@ LORA_CONFIGS = {
     "L7": {"rank": 16, "alpha": 32, "dropout": 0.0, "target_modules": "all"},
 }
 
+# GPT-2 style model uses c_attn (combined QKV) and c_proj
 TARGET_MODULE_PRESETS = {
-    "qkv": ["c_attn"],  # GPT-2: combined Q, K, V projection
-    "qkvo": ["c_attn", "c_proj"],  # QKV + output
+    "qkv": ["c_attn"],  # Combined Q, K, V projection
+    "qkvo": ["c_attn", "c_proj"],  # QKV + output projection
     "all": ["c_attn", "c_proj", "mlp.c_fc", "mlp.c_proj"],  # All linear layers
-}
-
-TARGET_MODULE_PRESETS = {
-    "qkv": ["q_proj", "v_proj", "k_proj"],
-    "qkvo": ["q_proj", "v_proj", "k_proj", "o_proj"],
-    "all": [
-        "q_proj",
-        "v_proj",
-        "k_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-    ],
 }
 
 
@@ -318,7 +305,8 @@ def main():
     logger.info(f"LoRA alpha: {args.lora_alpha}")
     logger.info(f"LoRA dropout: {args.lora_dropout}")
     logger.info(f"Target modules: {target_modules}")
-    logger.info(f"Trainable params: {est_params_str}")
+
+    # Log info
     logger.info(f"Learning rate: {args.learning_rate}")
     logger.info(f"Batch size: {args.per_device_train_batch_size}")
     logger.info(f"Gradient accumulation: {args.gradient_accumulation_steps}")
@@ -405,7 +393,8 @@ def main():
         remove_unused_columns=False,
         label_names=["labels"],
         optim="adamw_torch",
-        max_grad_norm=1.0,
+        weight_decay=0.1,  # Paper: 0.1
+        max_grad_norm=1.0,  # Paper: gradient clipping norm 1
         bf16=torch.cuda.is_available(),
         fp16=False,
         logging_first_step=True,
