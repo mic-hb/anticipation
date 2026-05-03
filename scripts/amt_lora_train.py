@@ -172,13 +172,13 @@ def parse_args():
     parser.add_argument(
         "--train_data",
         type=str,
-        default="data/lmd_10pct/train.txt",
+        default="datdata/gigamidi_s1_10pct_random_from_all/train-shuffled.txt",
         help="Training data file",
     )
     parser.add_argument(
         "--valid_data",
         type=str,
-        default="data/lmd_10pct/valid.txt",
+        default="data/gigamidi_s1_10pct_random_from_all/valid.txt",
         help="Validation data file",
     )
     parser.add_argument(
