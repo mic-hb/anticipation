@@ -89,7 +89,7 @@ class TokenDataset(Dataset):
         with open(self.filepath, "r", encoding="utf-8") as f:
             for i, line in enumerate(tqdm(f, desc="Loading", unit=" lines")):
                 tokens = [int(t) for t in line.split()]
-                if len(tokens) >= 2:
+                if len(tokens) > 10:
                     tokens = tokens[: self.max_length]
                     self.sequences.append(tokens)
         logger.info(f"Loaded {len(self.sequences)} sequences")
@@ -170,6 +170,12 @@ def parse_args():
     parser.add_argument(
         "--max_seq_length", type=int, default=1024, help="Maximum sequence length"
     )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=None,
+        help="Learning rate (default: 1e-4 for large, 3e-4 for small/medium)",
+    )
 
     # LoRA arguments (used if --config not specified)
     parser.add_argument("--lora_rank", type=int, default=16, help="LoRA rank (r)")
@@ -203,8 +209,8 @@ def parse_args():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=3e-4,
-        help="Learning rate (paper Medium: 3e-4)",
+        default=None,
+        help="Learning rate (default: 1e-4 for large, 3e-4 for small/medium)",
     )
     parser.add_argument(
         "--warmup_steps",
@@ -306,6 +312,14 @@ def main():
     logger.info(f"LoRA dropout: {args.lora_dropout}")
     logger.info(f"Target modules: {target_modules}")
 
+    # Auto-select learning rate based on model size if not provided
+    if args.learning_rate is None:
+        if "large" in args.model_path.lower():
+            args.learning_rate = 1e-4
+        else:
+            args.learning_rate = 3e-4
+        logger.info(f"Auto-selected learning rate for model: {args.learning_rate}")
+
     # Log info
     logger.info(f"Learning rate: {args.learning_rate}")
     logger.info(f"Batch size: {args.per_device_train_batch_size}")
@@ -338,17 +352,25 @@ def main():
     # Load model first to get vocab_size
     logger.info("Loading model...")
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+    # For LoRA, load on CPU first to avoid device placement issues, then wrap with PEFT
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         trust_remote_code=True,
-        dtype=dtype,
-        device_map="auto",
+        torch_dtype=dtype,
     )
     vocab_size = model.config.vocab_size
     logger.info(f"Model vocab size: {vocab_size}")
-    # Since we're training on pre-tokenized integer sequences, we don't need tokenizer
-    # Just set pad_token_id for model config
-    model.config.pad_token_id = vocab_size - 1
+
+    # Get proper pad_token_id from model config or use eos_token
+    if getattr(model.config, "pad_token_id", None) is not None:
+        pad_id = model.config.pad_token_id
+    elif getattr(model.config, "eos_token_id", None) is not None:
+        pad_id = model.config.eos_token_id
+    else:
+        pad_id = vocab_size - 1
+    model.config.pad_token_id = pad_id
+    logger.info(f"Using pad_token_id: {pad_id}")
 
     # Configure LoRA
     logger.info("Configuring LoRA...")
