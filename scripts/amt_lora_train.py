@@ -61,7 +61,13 @@ LORA_CONFIGS = {
         "dropout": 0.1,
         "target_modules": ["c_attn", "c_proj"],
     },
-    "L7": {"rank": 16, "alpha": 32, "dropout": 0.0, "target_modules": "all"},
+    "L7": {
+        "rank": 16,
+        "alpha": 32,
+        "dropout": 0.0,
+        # "all" expands to every linear layer below; kept as list for explicit PEFT compat.
+        "target_modules": ["c_attn", "c_proj", "mlp.c_fc", "mlp.c_proj"],
+    },
 }
 
 # AMT/GPT-2 uses transformer.h.{layer}.attn.c_attn and transformer.h.{layer}.attn.c_proj
@@ -246,8 +252,8 @@ def parse_args():
     parser.add_argument(
         "--per_device_eval_batch_size",
         type=int,
-        default=2,
-        help="Eval batch size per device",
+        default=1,
+        help="Eval batch size per device (keep at 1 for 16GB GPU; 2+ will OOM at seq_len=1024)",
     )
     parser.add_argument(
         "--learning_rate",
@@ -278,6 +284,36 @@ def parse_args():
     )
     parser.add_argument(
         "--eval_steps", type=int, default=500, help="Evaluate every N steps"
+    )
+
+    # LoRA arguments (required when not using --config preset)
+    parser.add_argument(
+        "--lora_rank",
+        type=int,
+        default=16,
+        help="LoRA rank r (ignored when --config is set)",
+    )
+    parser.add_argument(
+        "--lora_alpha",
+        type=int,
+        default=32,
+        help="LoRA alpha scaling factor (ignored when --config is set)",
+    )
+    parser.add_argument(
+        "--lora_dropout",
+        type=float,
+        default=0.0,
+        help="LoRA dropout probability (ignored when --config is set)",
+    )
+    parser.add_argument(
+        "--target_modules",
+        type=str,
+        default="qkv",
+        help=(
+            "Target module preset: qkv | qkvo | all, "
+            "or comma-separated raw names e.g. c_attn,c_proj "
+            "(ignored when --config is set)"
+        ),
     )
 
     # Other arguments
@@ -317,16 +353,14 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    # Apply config preset if specified
+    # Apply config preset if specified (overrides manual LoRA flags)
     if args.config and args.config in LORA_CONFIGS:
         cfg = LORA_CONFIGS[args.config]
         args.lora_rank = cfg["rank"]
         args.lora_alpha = cfg["alpha"]
         args.lora_dropout = cfg["dropout"]
-        if isinstance(cfg["target_modules"], str) and cfg["target_modules"] == "all":
-            args.target_modules = "all"
-        else:
-            args.target_modules = ",".join(cfg["target_modules"])
+        # target_modules is always a list in LORA_CONFIGS now
+        args.target_modules = ",".join(cfg["target_modules"])
         logger.info(f"Applied config preset: {args.config}")
 
     # Resolve target modules
@@ -469,12 +503,47 @@ def main():
         save_total_limit=3,
     )
 
+    # Data collator: pads sequences to the longest in each batch.
+    # AMT tokens are plain integers — no tokenizer object available, so we
+    # implement a minimal pad collator inline.
+    def pad_collate(batch):
+        """Pad input_ids and labels to the longest sequence in the batch."""
+        max_len = max(len(item["input_ids"]) for item in batch)
+        input_ids_padded = []
+        labels_padded = []
+        attention_masks = []
+        for item in batch:
+            seq = item["input_ids"]
+            seq_len = len(seq)
+            pad_len = max_len - seq_len
+            # Pad input_ids with pad_id; labels with -100 so loss ignores padding
+            input_ids_padded.append(
+                torch.cat([seq, torch.full((pad_len,), pad_id, dtype=torch.long)])
+            )
+            labels_padded.append(
+                torch.cat([seq, torch.full((pad_len,), -100, dtype=torch.long)])
+            )
+            attention_masks.append(
+                torch.cat(
+                    [
+                        torch.ones(seq_len, dtype=torch.long),
+                        torch.zeros(pad_len, dtype=torch.long),
+                    ]
+                )
+            )
+        return {
+            "input_ids": torch.stack(input_ids_padded),
+            "labels": torch.stack(labels_padded),
+            "attention_mask": torch.stack(attention_masks),
+        }
+
     # Create trainer
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=valid_dataset,
+        data_collator=pad_collate,
     )
 
     # Configure callbacks
