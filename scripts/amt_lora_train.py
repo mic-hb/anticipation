@@ -64,9 +64,10 @@ LORA_CONFIGS = {
     "L7": {"rank": 16, "alpha": 32, "dropout": 0.0, "target_modules": "all"},
 }
 
-# GPT-2 style model uses c_attn (combined QKV) and c_proj
+# AMT/GPT-2 uses transformer.h.{layer}.attn.c_attn and transformer.h.{layer}.attn.c_proj
+# PEFT uses just themodule name without the transformer.h.{n}. prefix
 TARGET_MODULE_PRESETS = {
-    "qkv": ["c_attn"],  # Combined Q, K, V projection
+    "qkv": ["c_attn"],  # Combined Q, K, V projection (standard for GPT-2/AMT)
     "qkvo": ["c_attn", "c_proj"],  # QKV + output projection
     "all": ["c_attn", "c_proj", "mlp.c_fc", "mlp.c_proj"],  # All linear layers
 }
@@ -169,25 +170,6 @@ def parse_args():
     )
     parser.add_argument(
         "--max_seq_length", type=int, default=1024, help="Maximum sequence length"
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=None,
-        help="Learning rate (default: 1e-4 for large, 3e-4 for small/medium)",
-    )
-
-    # LoRA arguments (used if --config not specified)
-    parser.add_argument("--lora_rank", type=int, default=16, help="LoRA rank (r)")
-    parser.add_argument(
-        "--lora_alpha", type=int, default=32, help="LoRA alpha (scaling)"
-    )
-    parser.add_argument("--lora_dropout", type=float, default=0.0, help="LoRA dropout")
-    parser.add_argument(
-        "--target_modules",
-        type=str,
-        default="qkv",
-        help="Target modules: qkv, qkvo, or all (comma-separated)",
     )
 
     # Training arguments
