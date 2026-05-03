@@ -6,10 +6,23 @@ Runs tokenize-lakh.py on preprocessed GigaMIDI data to convert compound tokens t
 
 Usage:
     python scripts/gigamidi_tokenize_events.py \
-        --input data/gigamidi_s1_10pct_random_from_all_structured/
+        --input data/gigamidi_s1_10pct_random_from_all/ \
+        --augment 1 \
+        --workers 16
 
 This runs the standard tokenization on hex folder structure.
 It expects:
+
+Supports TWO folder structures:
+1. Flat hex folders (from gigamidi_create_subset_unified.py):
+    input/
+        0/
+        1/
+        ...
+        d/
+        e/
+
+2. Nested train/valid/test structure:
     input/
         train/
             0/
