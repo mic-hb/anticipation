@@ -285,6 +285,15 @@ def parse_args():
     parser.add_argument(
         "--eval_steps", type=int, default=500, help="Evaluate every N steps"
     )
+    parser.add_argument(
+        "--skip_merge",
+        action="store_true",
+        help=(
+            "Skip the post-training merge step. The 'final/' directory will contain "
+            "the adapter only (not a standalone model). Use merge_adapter.py manually "
+            "afterwards. By default, merge runs automatically after training."
+        ),
+    )
 
     # LoRA arguments (required when not using --config preset)
     parser.add_argument(
@@ -555,10 +564,76 @@ def main():
     checkpoint = args.resume_from_checkpoint
     trainer.train(resume_from_checkpoint=checkpoint)
 
-    # Save final model
-    logger.info("Saving final model...")
+    # Save final adapter (PEFT weights only — lightweight, resumable)
+    logger.info("Saving final LoRA adapter to 'final/'...")
     trainer.save_model(str(output_dir / "final"))
     trainer.save_state()
+    logger.info("Adapter saved. final/ contains adapter_config.json + adapter_model.safetensors only.")
+
+    # --- Automatic merge step ---
+    # Merges LoRA matrices (W + B*A) into the base model weights.
+    # Produces a standalone model compatible with eval-loss.py and from_pretrained().
+    # The step-{N}/hf/ layout is required by eval-loss.py's checkpoint scanning logic.
+    if not args.skip_merge:
+        try:
+            from peft import PeftModel
+            final_step = training_args.max_steps if training_args.max_steps > 0 else -1
+            logger.info("" + "=" * 60)
+            logger.info("Merging LoRA adapter into base model (W + B*A)...")
+            logger.info("This produces a standalone model usable by eval-loss.py.")
+
+            # Reload base model fresh to avoid any training-state side effects
+            merge_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+            logger.info(f"Loading fresh base model for merge ({merge_dtype})...")
+            base_for_merge = AutoModelForCausalLM.from_pretrained(
+                args.model_path,
+                trust_remote_code=True,
+                torch_dtype=merge_dtype,
+            )
+            peft_for_merge = PeftModel.from_pretrained(
+                base_for_merge, str(output_dir / "final")
+            )
+            merged = peft_for_merge.merge_and_unload()
+            logger.info("Merge complete.")
+
+            # Save standalone (usable with from_pretrained)
+            standalone_path = output_dir / "merged" / "standalone"
+            standalone_path.mkdir(parents=True, exist_ok=True)
+            merged.save_pretrained(str(standalone_path))
+            logger.info(f"Standalone merged model saved to: {standalone_path}")
+
+            # Save eval-loss.py compatible layout: step-{N}/hf/
+            # eval-loss.py scans for dirs starting with 'step-' and appends '/hf'
+            step_label = final_step if final_step > 0 else 9999
+            eval_fmt_path = output_dir / "merged" / f"step-{step_label}" / "hf"
+            eval_fmt_path.mkdir(parents=True, exist_ok=True)
+            merged.save_pretrained(str(eval_fmt_path))
+            logger.info(f"eval-loss.py compatible model saved to: {eval_fmt_path}")
+
+            logger.info("" + "=" * 60)
+            logger.info("MERGE COMPLETE. To run eval-loss.py:")
+            logger.info(f"  python scripts/eval-loss.py \\")
+            logger.info(f"      -f data/gigamidi_s1_10pct_random_from_all/valid.txt \\")
+            logger.info(f"      -m {output_dir / 'merged'} \\")
+            logger.info(f"      -o {output_dir / 'merged' / 'eval_results.csv'} \\")
+            logger.info(f"      --bpe -s 1")
+            logger.info("" + "=" * 60)
+
+            del base_for_merge, peft_for_merge, merged
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.warning(f"Automatic merge failed: {e}")
+            logger.warning("Run merge_adapter.py manually after training.")
+            logger.warning(
+                f"  python scripts/merge_adapter.py "
+                f"--adapter_dir {output_dir / 'final'} "
+                f"--output_dir {output_dir / 'merged'} "
+                f"--step {final_step if final_step > 0 else 0}"
+            )
+    else:
+        logger.info("--skip_merge set: skipping automatic merge. Run merge_adapter.py manually.")
 
     # Save training metrics
     metrics = {
