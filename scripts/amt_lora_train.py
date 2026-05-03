@@ -29,7 +29,6 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from transformers import (
     AutoModelForCausalLM,
-    AutoTokenizer,
     Trainer,
     TrainerCallback,
     TrainingArguments,
@@ -46,43 +45,29 @@ logger = logging.getLogger(__name__)
 
 
 LORA_CONFIGS = {
-    "L1": {
-        "rank": 8,
-        "alpha": 16,
-        "dropout": 0.0,
-        "target_modules": ["q_proj", "v_proj", "k_proj"],
-    },
-    "L2": {
-        "rank": 16,
-        "alpha": 32,
-        "dropout": 0.0,
-        "target_modules": ["q_proj", "v_proj", "k_proj"],
-    },
-    "L3": {
-        "rank": 32,
-        "alpha": 64,
-        "dropout": 0.0,
-        "target_modules": ["q_proj", "v_proj", "k_proj"],
-    },
-    "L4": {
-        "rank": 64,
-        "alpha": 128,
-        "dropout": 0.0,
-        "target_modules": ["q_proj", "v_proj", "k_proj"],
-    },
+    "L1": {"rank": 8, "alpha": 16, "dropout": 0.0, "target_modules": ["c_attn"]},
+    "L2": {"rank": 16, "alpha": 32, "dropout": 0.0, "target_modules": ["c_attn"]},
+    "L3": {"rank": 32, "alpha": 64, "dropout": 0.0, "target_modules": ["c_attn"]},
+    "L4": {"rank": 64, "alpha": 128, "dropout": 0.0, "target_modules": ["c_attn"]},
     "L5": {
         "rank": 16,
         "alpha": 32,
         "dropout": 0.0,
-        "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
+        "target_modules": ["c_attn", "c_proj"],
     },
     "L6": {
         "rank": 32,
         "alpha": 64,
         "dropout": 0.1,
-        "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
+        "target_modules": ["c_attn", "c_proj"],
     },
     "L7": {"rank": 16, "alpha": 32, "dropout": 0.0, "target_modules": "all"},
+}
+
+TARGET_MODULE_PRESETS = {
+    "qkv": ["c_attn"],  # GPT-2: combined Q, K, V projection
+    "qkvo": ["c_attn", "c_proj"],  # QKV + output
+    "all": ["c_attn", "c_proj", "mlp.c_fc", "mlp.c_proj"],  # All linear layers
 }
 
 TARGET_MODULE_PRESETS = {
@@ -172,19 +157,19 @@ def parse_args():
     parser.add_argument(
         "--train_data",
         type=str,
-        default="datdata/gigamidi_s1_10pct_random_from_all/train-shuffled.txt",
-        help="Training data file",
+        default="",  # Must be provided
+        help="Training data file (pre-tokenized integer sequences)",
     )
     parser.add_argument(
         "--valid_data",
         type=str,
-        default="data/gigamidi_s1_10pct_random_from_all/valid.txt",
+        default="",  # Must be provided
         help="Validation data file",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="outputs/amt-lora-default",
+        default="outputs/amt-lora",
         help="Output directory",
     )
 
@@ -283,52 +268,27 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Validate required arguments
+    if not args.train_data:
+        raise ValueError("--train_data is required")
+    if not args.valid_data:
+        raise ValueError("--valid_data is required")
+
     set_seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
     script_dir = Path(__file__).parent.resolve()
-    data_dir = script_dir / ".." / "data"
+
+    # Use path exactly as provided - trust the user knows where their data is
+    train_data_path = Path(args.train_data)
+    valid_data_path = Path(args.valid_data)
+
+    # Output directory
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():
         output_dir = script_dir / output_dir
 
-    train_data_path = Path(args.train_data)
-    if not train_data_path.is_absolute():
-        train_data_path = data_dir / train_data_path
-
-    valid_data_path = Path(args.valid_data)
-    if not valid_data_path.is_absolute():
-        valid_data_path = data_dir / valid_data_path
-
-    # Apply config preset if specified
-    if args.config and args.config in LORA_CONFIGS:
-        cfg = LORA_CONFIGS[args.config]
-        args.lora_rank = cfg["rank"]
-        args.lora_alpha = cfg["alpha"]
-        args.lora_dropout = cfg["dropout"]
-        if isinstance(cfg["target_modules"], str) and cfg["target_modules"] == "all":
-            args.target_modules = "all"
-        else:
-            args.target_modules = ",".join(cfg["target_modules"])
-        logger.info(f"Applied config preset: {args.config}")
-
-    # Resolve target modules
-    if args.target_modules in TARGET_MODULE_PRESETS:
-        target_modules = TARGET_MODULE_PRESETS[args.target_modules]
-    else:
-        target_modules = args.target_modules.split(",")
-
-    # Calculate trainable parameters estimate
-    # Approximate: 2 * rank * hidden_dim * num_layers * len(target_modules)
-    # For 780M model: ~1024 hidden, 36 layers
-    est_params = 2 * args.lora_rank * 1024 * 36 * len(target_modules)
-    est_params_str = f"~{est_params / 1e6:.1f}M"
-
-    logger.info("=" * 60)
-    logger.info("AMT LoRA Fine-Tuning Configuration")
-    logger.info("=" * 60)
-    logger.info(f"Model: {args.model_path}")
     logger.info(f"Train data: {train_data_path}")
     logger.info(f"Valid data: {valid_data_path}")
     logger.info(f"Output dir: {output_dir}")
@@ -366,24 +326,20 @@ def main():
     with open(output_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
-    # Load tokenizer
-    logger.info("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_path,
-        trust_remote_code=True,
-        padding_side="left",
-    )
-    tokenizer.pad_token = tokenizer.eos_token
-
-    # Load model
+    # Load model first to get vocab_size
     logger.info("Loading model...")
+    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         trust_remote_code=True,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        dtype=dtype,
         device_map="auto",
     )
-    model.config.pad_token_id = tokenizer.eos_token_id
+    vocab_size = model.config.vocab_size
+    logger.info(f"Model vocab size: {vocab_size}")
+    # Since we're training on pre-tokenized integer sequences, we don't need tokenizer
+    # Just set pad_token_id for model config
+    model.config.pad_token_id = vocab_size - 1
 
     # Configure LoRA
     logger.info("Configuring LoRA...")
