@@ -12,3 +12,4 @@ tmp
 *.egg-info
 build
 data
+**/experiments
