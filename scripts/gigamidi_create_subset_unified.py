@@ -96,19 +96,15 @@ def get_hex_folder(md5: str) -> str:
 
 
 def write_midi_file(args_tuple):
-    """Write a single MIDI file to the correct folder structure."""
+    """Write a single MIDI file to hex folder (flat structure like Lakh)."""
     midi_bytes, md5, output_base = args_tuple
 
     split = get_split_from_hash(md5)
+    # Flat structure: md5 first char determines hex folder
     hex_folder = get_hex_folder(md5)
 
-    if split == "train":
-        folder = output_base / "train" / hex_folder
-    elif split == "valid":
-        folder = output_base / "valid" / "e"
-    else:
-        folder = output_base / "test" / "f"
-
+    # Write directly to hex folder (not nested under train/valid/test)
+    folder = output_base / hex_folder
     folder.mkdir(parents=True, exist_ok=True)
 
     midi_path = folder / f"{md5}.mid"
