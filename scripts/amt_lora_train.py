@@ -278,6 +278,24 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    # Apply config preset if specified
+    if args.config and args.config in LORA_CONFIGS:
+        cfg = LORA_CONFIGS[args.config]
+        args.lora_rank = cfg["rank"]
+        args.lora_alpha = cfg["alpha"]
+        args.lora_dropout = cfg["dropout"]
+        if isinstance(cfg["target_modules"], str) and cfg["target_modules"] == "all":
+            args.target_modules = "all"
+        else:
+            args.target_modules = ",".join(cfg["target_modules"])
+        logger.info(f"Applied config preset: {args.config}")
+
+    # Resolve target modules
+    if args.target_modules in TARGET_MODULE_PRESETS:
+        target_modules = TARGET_MODULE_PRESETS[args.target_modules]
+    else:
+        target_modules = args.target_modules.split(",")
+
     script_dir = Path(__file__).parent.resolve()
 
     # Use path exactly as provided - trust the user knows where their data is
@@ -286,7 +304,10 @@ def main():
 
     # Output directory
     output_dir = Path(args.output_dir)
-    if not output_dir.is_absolute():
+    # Only add script_dir if it's a plain relative path not starting with experiments/ or outputs/
+    if not output_dir.is_absolute() and not output_dir.parts[0].startswith(
+        ("exp", "out")
+    ):
         output_dir = script_dir / output_dir
 
     logger.info(f"Train data: {train_data_path}")
