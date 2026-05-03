@@ -387,7 +387,7 @@ def main():
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
         max_steps=args.max_steps if args.max_steps > 0 else -1,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         save_strategy="steps",
         load_best_model_at_end=False,
         logging_dir=str(output_dir / "logs"),
