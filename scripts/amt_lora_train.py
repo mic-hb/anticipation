@@ -74,26 +74,87 @@ TARGET_MODULE_PRESETS = {
 
 
 class TokenDataset(Dataset):
-    """Dataset that loads token sequences from text file."""
+    """Dataset that loads token sequences from text file with binary cache."""
 
-    def __init__(self, filepath: str, max_length: int = 1024):
+    def __init__(self, filepath: str, max_length: int = 1024, use_cache: bool = True):
         self.filepath = filepath
         self.max_length = max_length
+        self.use_cache = use_cache
         self.sequences = []
         self._load_sequences()
+
+    def _get_cache_path(self):
+        """Get binary cache path."""
+        return self.filepath + ".bin"
+
+    def _load_from_cache(self):
+        """Load from binary cache (much faster)."""
+        import struct
+
+        cache_path = self._get_cache_path()
+        if not os.path.exists(cache_path):
+            return None
+
+        logger.info(f"Loading from cache: {cache_path}")
+        with open(cache_path, "rb") as f:
+            # Read number of sequences
+            num_seqs = struct.unpack("I", f.read(4))[0]
+            self.sequences = []
+            for _ in range(num_seqs):
+                # Read sequence length
+                seq_len = struct.unpack("I", f.read(4))[0]
+                # Read tokens
+                tokens = list(struct.unpack(f"{seq_len}i", f.read(4 * seq_len)))
+                self.sequences.append(tokens)
+
+        logger.info(f"Loaded {len(self.sequences)} sequences from cache")
+        return True
+
+    def _save_to_cache(self):
+        """Save to binary cache for faster loading next time."""
+        import struct
+
+        cache_path = self._get_cache_path()
+        logger.info(f"Saving to cache: {cache_path}")
+
+        with open(cache_path, "wb") as f:
+            # Write number of sequences
+            f.write(struct.pack("I", len(self.sequences)))
+            for tokens in tqdm(self.sequences, desc="Caching", unit=" seqs"):
+                # Write sequence length
+                f.write(struct.pack("I", len(tokens)))
+                # Write tokens
+                f.write(struct.pack(f"{len(tokens)}i", *tokens))
+
+        logger.info(f"Cached {len(self.sequences)} sequences")
 
     def _load_sequences(self):
         logger.info(f"Loading sequences from {self.filepath}")
         file_size_mb = os.path.getsize(self.filepath) / (1024 * 1024)
         logger.info(f"File size: {file_size_mb:.1f} MB")
 
+        # Try cache first
+        if self.use_cache and self._load_from_cache():
+            return
+
+        # Load from text file
+        logger.info("Reading file...")
         with open(self.filepath, "r", encoding="utf-8") as f:
-            for i, line in enumerate(tqdm(f, desc="Loading", unit=" lines")):
-                tokens = [int(t) for t in line.split()]
-                if len(tokens) > 10:
-                    tokens = tokens[: self.max_length]
-                    self.sequences.append(tokens)
+            lines = f.readlines()
+
+        logger.info(f"Parsing {len(lines)} lines...")
+        for line in tqdm(lines, desc="Loading", unit=" lines"):
+            tokens = [int(t) for t in line.split()]
+            if len(tokens) > 10:
+                tokens = tokens[: self.max_length]
+                self.sequences.append(tokens)
+
+        del lines
         logger.info(f"Loaded {len(self.sequences)} sequences")
+
+        # Save to cache for next time
+        if self.use_cache:
+            self._save_to_cache()
 
     def __len__(self):
         return len(self.sequences)
@@ -179,13 +240,13 @@ def parse_args():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=4,
-        help="Training batch size per device",
+        default=1,
+        help="Training batch size per device (default 1 for 16GB GPU)",
     )
     parser.add_argument(
         "--per_device_eval_batch_size",
         type=int,
-        default=8,
+        default=2,
         help="Eval batch size per device",
     )
     parser.add_argument(
@@ -222,7 +283,10 @@ def parse_args():
     # Other arguments
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
-        "--dataloader_num_workers", type=int, default=4, help="DataLoader workers"
+        "--dataloader_num_workers",
+        type=int,
+        default=8,
+        help="DataLoader workers (default 8)",
     )
     parser.add_argument(
         "--resume_from_checkpoint",
