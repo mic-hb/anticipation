@@ -2,31 +2,30 @@
 """
 GigaMIDI Preprocess to Compound Tokens
 
-Runs midi-preprocess.py on restructured GigaMIDI data to convert MIDI to compound tokens.
+Runs midi-preprocess.py on GigaMIDI data to convert MIDI to compound tokens.
 
-Usage:
-    python scripts/gigamidi_preprocess_to_compound.py \
-        --input data/gigamidi_s1_10pct_random_from_all_structured/
+Supports TWO folder structures:
+1. Flat hex folders (NEW - from gigamidi_create_subset_unified.py):
+    input/
+        0/
+        1/
+        ...
+        d/
+        e/
 
-This runs the standard anticipation preprocessing on the hex folder structure.
-It expects:
+2. Nested train/valid/test structure (OLD - from restructured downloads):
     input/
         train/
             0/
-            1/
-            ...
         valid/
             e/
         test/
             f/
 
-And produces:
-    input/
-        train/
-            0/
-                file.mid
-                file.mid.compound.txt
-        ...
+Usage:
+    python scripts/gigamidi_preprocess_to_compound.py \
+        --input data/gigamidi_s1_10pct_random_from_all/ \
+        --workers 16
 """
 
 import argparse
@@ -68,52 +67,109 @@ def main():
 
     input_dir = Path(args.input)
 
-    # Find all splits
-    splits = []
-    for split in ["train", "valid", "test"]:
-        split_path = input_dir / split
-        if split_path.exists():
-            splits.append(split)
+    # Detect folder structure
+    # Check if flat hex structure (has 0-f folders directly)
+    # or nested (has train/valid/test subdirs)
+    has_flat_structure = (input_dir / "0").exists()
+    has_nested_structure = (input_dir / "train").exists()
 
-    print(f"Found splits: {splits}")
-    print("-" * 60)
-    sys.stdout.flush()
-
-    # Run preprocessing on each split
-    for split in splits:
-        split_dir = input_dir / split
-        print(f"Processing {split}/...")
-
-        # Build find command for midi files
-        cmd = [
-            sys.executable,
-            str(TRAIN_DIR / "midi-preprocess.py"),
-            str(split_dir),
-            "--workers",
-            str(args.workers),
-        ]
-
-        print(f"  Running: {' '.join(cmd)}")
-
-        # Run the preprocessing script
-        os.chdir(ANTICIPATION_DIR)
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(ANTICIPATION_DIR)
-
-        import subprocess
-
-        result = subprocess.run(
-            cmd,
-            env=env,
-            cwd=str(ANTICIPATION_DIR),
-        )
-
-        if result.returncode != 0:
-            print(f"  Error: preprocessing failed with code {result.returncode}")
-            sys.exit(result.returncode)
-
-        print(f"  {split}/ complete")
+    if has_flat_structure:
+        print("Detected: FLAT hex folder structure")
+        # Process all hex folders directly
+        hex_folders = []
+        for hex_char in "0123456789abcdef":
+            hex_path = input_dir / hex_char
+            if hex_path.exists():
+                hex_folders.append(hex_char)
+        print(f"Hex folders found: {hex_folders}")
+        print("-" * 60)
         sys.stdout.flush()
+
+        # Process each hex folder
+        for hex_char in hex_folders:
+            hex_dir = input_dir / hex_char
+            print(f"Processing {hex_char}/...")
+
+            cmd = [
+                sys.executable,
+                str(TRAIN_DIR / "midi-preprocess.py"),
+                str(hex_dir),
+                "--workers",
+                str(args.workers),
+            ]
+
+            print(f"  Running: {' '.join(cmd)}")
+
+            os.chdir(ANTICIPATION_DIR)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ANTICIPATION_DIR)
+
+            import subprocess
+
+            result = subprocess.run(
+                cmd,
+                env=env,
+                cwd=str(ANTICIPATION_DIR),
+            )
+
+            if result.returncode != 0:
+                print(f"  Error: preprocessing failed with code {result.returncode}")
+                sys.exit(result.returncode)
+
+            print(f"  {hex_char}/ complete")
+            sys.stdout.flush()
+
+    elif has_nested_structure:
+        print("Detected: NESTED train/valid/test structure")
+        # Process train/valid/test split directories
+        splits = []
+        for split in ["train", "valid", "test"]:
+            split_path = input_dir / split
+            if split_path.exists():
+                splits.append(split)
+
+        print(f"Found splits: {splits}")
+        print("-" * 60)
+        sys.stdout.flush()
+
+        # Run preprocessing on each split
+        for split in splits:
+            split_dir = input_dir / split
+            print(f"Processing {split}/...")
+
+            cmd = [
+                sys.executable,
+                str(TRAIN_DIR / "midi-preprocess.py"),
+                str(split_dir),
+                "--workers",
+                str(args.workers),
+            ]
+
+            print(f"  Running: {' '.join(cmd)}")
+
+            os.chdir(ANTICIPATION_DIR)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ANTICIPATION_DIR)
+
+            import subprocess
+
+            result = subprocess.run(
+                cmd,
+                env=env,
+                cwd=str(ANTICIPATION_DIR),
+            )
+
+            if result.returncode != 0:
+                print(f"  Error: preprocessing failed with code {result.returncode}")
+                sys.exit(result.returncode)
+
+            print(f"  {split}/ complete")
+            sys.stdout.flush()
+    else:
+        print(
+            "ERROR: Unknown folder structure. Expected flat hex folders (0-f) or nested train/valid/test"
+        )
+        sys.exit(1)
 
     print("-" * 60)
     print("Preprocessing complete!")
