@@ -56,10 +56,15 @@ def load_model(model_name, device):
     return model
 
 
-def sec_from_bar(bar_index_1_based, bpm, beats_per_bar=4):
+def sec_from_bar(bar_index_1_based, bpm, numerator=4, denominator=4):
     # bar 1 starts at t=0
     bar0 = bar_index_1_based - 1
-    return bar0 * (60.0 / bpm) * beats_per_bar
+    # Duration of one bar in seconds:
+    # (60/bpm) is seconds per quarter note.
+    # A bar has 'numerator' beats of 'denominator' note value.
+    # If denominator is 4, it's just numerator quarter notes.
+    # If denominator is 8, it's numerator eighth notes (0.5 * numerator quarter notes).
+    return bar0 * (60.0 / bpm) * numerator * (4.0 / denominator)
 
 
 def midi_has_tempo_event(mid_path):
