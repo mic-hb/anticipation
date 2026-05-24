@@ -92,7 +92,8 @@ def stream_and_write(output_path, workers, nomml_threshold=12, dry_run=False, li
 
             # Genre filter: gospel OR latin
             curated = row.get("music_styles_curated", []) or []
-            scraped = row.get("music_style_scraped", []) or []
+            scraped = row.get("music_style_scraped", "") or ""
+            scraped = [scraped] if isinstance(scraped, str) else scraped
             styles = set(s.lower() for s in curated + scraped)
             if not any(s in styles for s in ("gospel", "latin")):
                 continue
