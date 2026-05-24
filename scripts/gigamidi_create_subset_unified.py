@@ -2,7 +2,7 @@
 """
 GigaMIDI Unified Subset Creator (Direct from Cache)
 
-This script creates GigaMIDI subsets (S1, S2, S3, S4) by loading the ENTIRE
+This script creates GigaMIDI subsets (S1-S11) by loading the ENTIRE
 dataset at once (including MIDI binaries), filtering/sampling, and writing directly
 to the CORRECT folder structure (train/valid/test by hash).
 
@@ -51,6 +51,19 @@ Usage:
         --subset s4 \
         --nomml_threshold 12 \
         --output data/gigamidi_s4_all_expressive/ \
+        --workers 8
+
+    # S8: Gospel + Latin genre
+    python gigamidi_create_subset_unified.py \
+        --subset s8 \
+        --output data/gigamidi_s8_gospel_latin/ \
+        --workers 8
+
+    # S11: Gospel + Latin Expressive (genre + NOMML >= 12)
+    python gigamidi_create_subset_unified.py \
+        --subset s11 \
+        --nomml_threshold 12 \
+        --output data/gigamidi_s11_gospel_latin_expressive/ \
         --workers 8
 
 Features:
@@ -121,6 +134,8 @@ def get_subset_description(subset: str, sample_size: float) -> str:
         "s2": f"{int(sample_size * 100)}% random from expressive",
         "s3": f"{int(sample_size * 100)}% random from ALL",
         "s4": "ALL expressive files",
+        "s8": "Gospel + Latin genre",
+        "s11": "Gospel + Latin Expressive (genre + NOMML >= 12)",
     }
     return descriptions.get(subset, subset)
 
@@ -133,8 +148,8 @@ def main():
         "--subset",
         type=str,
         required=True,
-        choices=["s1", "s2", "s3", "s4"],
-        help="Subset to create (s1, s2, s3, s4)",
+        choices=["s1", "s2", "s3", "s4", "s8", "s11"],
+        help="Subset to create (s1, s2, s3, s4, s8, s11)",
     )
     parser.add_argument(
         "--output",
@@ -191,13 +206,18 @@ def main():
     if args.subset in ["s1", "s2", "s3"] and args.sample_size is None:
         parser.error(f"--sample_size required for subset {args.subset}")
 
+    # S8 and S11 are genre-based, not sampled
+    if args.subset in ["s8", "s11"]:
+        if args.sample_size is not None:
+            print(f"Note: --sample_size ignored for subset {args.subset.upper()} (genre-based, not sampled)")
+
     sys.stdout.reconfigure(line_buffering=True)
 
     start_time = time.time()
 
     # Set sample size
     sample_size_val = args.sample_size if args.sample_size else 1.0
-    if args.subset == "s4":
+    if args.subset in ["s4", "s8", "s11"]:
         sample_size_val = 1.0
 
     print("=" * 70)
@@ -302,6 +322,32 @@ def main():
                 nomml = row.get("NOMML", []) or []
                 has_expressive = any(n >= args.nomml_threshold for n in nomml)
 
+                if not has_expressive:
+                    pbar.update(1)
+                    continue
+
+            # S8: Gospel + Latin genre filter
+            if args.subset == "s8":
+                styles = row.get("music_styles_curated", []) or []
+                has_gospel_or_latin = any(
+                    s.lower() in ("gospel", "latin") for s in styles
+                )
+                if not has_gospel_or_latin:
+                    pbar.update(1)
+                    continue
+
+            # S11: Gospel + Latin genre AND NOMML >= 12
+            if args.subset == "s11":
+                styles = row.get("music_styles_curated", []) or []
+                has_gospel_or_latin = any(
+                    s.lower() in ("gospel", "latin") for s in styles
+                )
+                if not has_gospel_or_latin:
+                    pbar.update(1)
+                    continue
+
+                nomml = row.get("NOMML", []) or []
+                has_expressive = any(n >= args.nomml_threshold for n in nomml)
                 if not has_expressive:
                     pbar.update(1)
                     continue
