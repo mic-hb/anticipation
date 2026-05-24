@@ -65,7 +65,7 @@ def write_midi_file(args_tuple):
     return md5_val, split
 
 
-def stream_and_write(output_path, workers, nomml_threshold=12, limit=None):
+def stream_and_write(output_path, workers, nomml_threshold=12, dry_run=False, limit=None):
     """Stream all splits, filter for gospel/latin + NOMML>=threshold, write immediately."""
     written = {"train": 0, "valid": 0, "test": 0}
     errors = 0
@@ -105,6 +105,11 @@ def stream_and_write(output_path, workers, nomml_threshold=12, limit=None):
                 continue
 
             tasks.append((midi_bytes, md5_val, output_path))
+
+        if dry_run:
+            print(f"  [{split_name}] DRY RUN — would write {len(tasks):,} files")
+            del ds
+            continue
 
         print(f"  [{split_name}] Writing {len(tasks):,} files...")
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -150,6 +155,11 @@ def main():
         default=None,
         help="Limit records per split (TEST MODE)",
     )
+    parser.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="Scan and print statistics without downloading or writing any files",
+    )
     args = parser.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -168,11 +178,14 @@ def main():
         print(f"Limit:          {args.limit:,} per split (TEST MODE)")
     print("-" * 70)
     print("Streaming: one split at a time, immediate write, minimal RAM")
-    print("Filter: style = gospel OR latin AND NOMML >= {args.nomml_threshold}")
+    print(f"Filter: style = gospel OR latin AND NOMML >= {args.nomml_threshold}")
+    if args.dry_run:
+        print("*** DRY RUN MODE — no files will be written ***")
     print("=" * 70)
 
     written, errors = stream_and_write(
-        output_path, args.workers, args.nomml_threshold, args.limit
+        output_path, args.workers, nomml_threshold=args.nomml_threshold,
+        dry_run=args.dry_run, limit=args.limit,
     )
     elapsed = time.time() - start_time
 

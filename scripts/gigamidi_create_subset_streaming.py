@@ -124,7 +124,7 @@ def filter_record(row, subset, nomml_threshold, min_tracks, max_tracks):
 
 def stream_split_write(split_name, subset, output_base, nomml_threshold,
                       min_tracks, max_tracks, workers, sample_size=None,
-                      seed=42, limit=None):
+                      seed=42, dry_run=False, limit=None):
     """
     Stream a single GigaMIDI split, filter, write immediately.
     For sampled subsets (s1/s3): writes all, then deletes oversample.
@@ -217,6 +217,10 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
         if not passed:
             continue
 
+        if dry_run:
+            written += 1
+            continue
+
         # Write immediately
         try:
             folder = output_base / get_hex_folder(md5_val)
@@ -230,6 +234,9 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
 
     del ds
     gc.collect()
+    if dry_run:
+        print(f"  [{split_name}] DRY RUN — would write {written:,} files")
+        return 0, 0, 0
     return written, errors, 0  # 0 = no sampling
 
 
@@ -274,6 +281,10 @@ def main():
         "--limit", type=int, default=None,
         help="Limit records per split (TEST MODE — for quick validation)",
     )
+    parser.add_argument(
+        "--dry_run", action="store_true",
+        help="Scan and print statistics without downloading or writing any files",
+    )
     args = parser.parse_args()
 
     # Validate
@@ -310,6 +321,8 @@ def main():
         print(f"Limit:        {args.limit:,} per split (TEST MODE)")
     print("-" * 70)
     print("Streaming: one split at a time, immediate write, minimal RAM")
+    if args.dry_run:
+        print("*** DRY RUN MODE — no files will be written ***")
     print("=" * 70)
 
     total_written = 0
@@ -326,12 +339,24 @@ def main():
             workers=args.workers,
             sample_size=args.sample_size,
             seed=args.seed,
+            dry_run=args.dry_run,
             limit=args.limit,
         )
         total_written += w
         total_errors += e
 
     elapsed = time.time() - start_time
+
+    if args.dry_run:
+        print("\n" + "=" * 70)
+        print("DRY RUN COMPLETE — no files were written")
+        print("=" * 70)
+        print(f"  Scanned:  all 3 splits")
+        print(f"  Would write: {total_written:,} files")
+        print(f"  Time:     {elapsed:.1f}s ({elapsed / 60:.1f} min)")
+        print("=" * 70)
+        print("\nRun without --dry_run to download and write files.")
+        return
 
     # Final counts
     train_count = (

@@ -64,7 +64,7 @@ def write_midi_file(args_tuple):
     return md5_val, split
 
 
-def stream_and_write(output_path, workers, limit=None):
+def stream_and_write(output_path, workers, dry_run=False, limit=None):
     """Stream all splits, filter for gospel/latin, write immediately."""
     written = {"train": 0, "valid": 0, "test": 0}
     errors = 0
@@ -98,6 +98,11 @@ def stream_and_write(output_path, workers, limit=None):
                 continue
 
             tasks.append((midi_bytes, md5_val, output_path))
+
+        if dry_run:
+            print(f"  [{split_name}] DRY RUN — would write {len(tasks):,} files")
+            del ds
+            continue
 
         print(f"  [{split_name}] Writing {len(tasks):,} files...")
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -137,6 +142,11 @@ def main():
         default=None,
         help="Limit records per split (TEST MODE)",
     )
+    parser.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="Scan and print statistics without downloading or writing any files",
+    )
     args = parser.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -155,9 +165,11 @@ def main():
     print("-" * 70)
     print("Streaming: one split at a time, immediate write, minimal RAM")
     print("Filter: music_styles_curated contains 'gospel' OR 'latin'")
+    if args.dry_run:
+        print("*** DRY RUN MODE — no files will be written ***")
     print("=" * 70)
 
-    written, errors = stream_and_write(output_path, args.workers, args.limit)
+    written, errors = stream_and_write(output_path, args.workers, dry_run=args.dry_run, limit=args.limit)
     elapsed = time.time() - start_time
 
     total_written = sum(written.values())
