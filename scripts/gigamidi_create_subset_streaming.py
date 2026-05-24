@@ -48,13 +48,11 @@ temporary disk usage = subset_size × file_size. For 10% sampling of
 """
 
 import argparse
-import os
+import gc
 import random
-import shutil
 import sys
-import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from datasets import load_dataset
@@ -172,7 +170,7 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
 
         print(f"  [{split_name}] Sampled {sample_count:,} files. Writing...")
         del ds
-        import gc; gc.collect()
+        gc.collect()
 
         # Pass 2: re-stream and write only sampled
         ds = load_dataset(
@@ -199,7 +197,7 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
                 except Exception:
                     errors += 1
         del ds
-        import gc; gc.collect()
+        gc.collect()
         return written, errors, sample_count
 
     # Single-pass for non-sampled subsets (s4, s8, s11)
@@ -231,7 +229,7 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             errors += 1
 
     del ds
-    import gc; gc.collect()
+    gc.collect()
     return written, errors, 0  # 0 = no sampling
 
 
@@ -288,10 +286,11 @@ def main():
     output_path = Path(args.output)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    _pct = f"{int(args.sample_size * 100)}%" if args.sample_size else "ALL"
     subset_descs = {
-        "s1": f"10% random from all",
-        "s2": f"{int(args.sample_size * 100)}% random from expressive",
-        "s3": f"{int(args.sample_size * 100)}% random from all",
+        "s1": "10% random from all",
+        "s2": f"{_pct} random from expressive",
+        "s3": f"{_pct} random from all",
         "s4": "ALL expressive files",
         "s8": "Gospel + Latin genre",
         "s11": "Gospel + Latin Expressive (genre + NOMML >= 12)",
@@ -335,20 +334,22 @@ def main():
     elapsed = time.time() - start_time
 
     # Final counts
-    train_count = len(list(output_path.glob("0/*"))) + \
-                  len(list(output_path.glob("1/*"))) + \
-                  len(list(output_path.glob("2/*"))) + \
-                  len(list(output_path.glob("3/*"))) + \
-                  len(list(output_path.glob("4/*"))) + \
-                  len(list(output_path.glob("5/*"))) + \
-                  len(list(output_path.glob("6/*"))) + \
-                  len(list(output_path.glob("7/*"))) + \
-                  len(list(output_path.glob("8/*"))) + \
-                  len(list(output_path.glob("9/*"))) + \
-                  len(list(output_path.glob("a/*"))) + \
-                  len(list(output_path.glob("b/*"))) + \
-                  len(list(output_path.glob("c/*"))) + \
-                  len(list(output_path.glob("d/*")))
+    train_count = (
+        len(list(output_path.glob("0/*"))) +
+        len(list(output_path.glob("1/*"))) +
+        len(list(output_path.glob("2/*"))) +
+        len(list(output_path.glob("3/*"))) +
+        len(list(output_path.glob("4/*"))) +
+        len(list(output_path.glob("5/*"))) +
+        len(list(output_path.glob("6/*"))) +
+        len(list(output_path.glob("7/*"))) +
+        len(list(output_path.glob("8/*"))) +
+        len(list(output_path.glob("9/*"))) +
+        len(list(output_path.glob("a/*"))) +
+        len(list(output_path.glob("b/*"))) +
+        len(list(output_path.glob("c/*"))) +
+        len(list(output_path.glob("d/*")))
+    )
     valid_count = len(list(output_path.glob("e/*")))
     test_count = len(list(output_path.glob("f/*")))
 
@@ -356,12 +357,12 @@ def main():
     print("COMPLETE - Summary")
     print("=" * 70)
     print(f"  Files written:  {total_written:,}")
-    print(f"  Write errors:   {total_errors:,}")
-    print(f"    Train (0-d):  {train_count:,}")
-    print(f"    Valid (e):    {valid_count:,}")
-    print(f"    Test (f):     {test_count:,}")
-    print(f"  Output:         {output_path}")
-    print(f"  Time:           {elapsed:.1f}s ({elapsed / 60:.1f} min)")
+    print(f"  Write errors:  {total_errors:,}")
+    print(f"    Train (0-d): {train_count:,}")
+    print(f"    Valid (e):   {valid_count:,}")
+    print(f"    Test (f):   {test_count:,}")
+    print(f"  Output:        {output_path}")
+    print(f"  Time:          {elapsed:.1f}s ({elapsed / 60:.1f} min)")
     print("=" * 70)
     print("\nNext steps:")
     print("  1. Preprocess: python gigamidi_preprocess_to_compound.py --input <output>/")
