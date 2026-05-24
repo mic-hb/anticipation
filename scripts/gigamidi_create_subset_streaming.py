@@ -92,13 +92,17 @@ def filter_record(row, subset, nomml_threshold, min_tracks, max_tracks):
         return False, None, None
 
     if subset == "s8":
-        styles = row.get("music_styles_curated", []) or []
-        if not any(s.lower() in ("gospel", "latin") for s in styles):
+        curated = row.get("music_styles_curated", []) or []
+        scraped = row.get("music_style_scraped", []) or []
+        styles = set(s.lower() for s in curated + scraped)
+        if not any(s in styles for s in ("gospel", "latin")):
             return False, None, None
 
     elif subset == "s11":
-        styles = row.get("music_styles_curated", []) or []
-        if not any(s.lower() in ("gospel", "latin") for s in styles):
+        curated = row.get("music_styles_curated", []) or []
+        scraped = row.get("music_style_scraped", []) or []
+        styles = set(s.lower() for s in curated + scraped)
+        if not any(s in styles for s in ("gospel", "latin")):
             return False, None, None
         nomml = row.get("NOMML", []) or []
         if not any(n >= nomml_threshold for n in nomml):

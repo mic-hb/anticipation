@@ -89,8 +89,10 @@ def stream_and_write(output_path, workers, dry_run=False, limit=None):
             if not md5_val:
                 continue
 
-            styles = row.get("music_styles_curated", []) or []
-            if not any(s.lower() in ("gospel", "latin") for s in styles):
+            curated = row.get("music_styles_curated", []) or []
+            scraped = row.get("music_style_scraped", []) or []
+            styles = set(s.lower() for s in curated + scraped)
+            if not any(s in styles for s in ("gospel", "latin")):
                 continue
 
             midi_bytes = row.get("music", b"")
