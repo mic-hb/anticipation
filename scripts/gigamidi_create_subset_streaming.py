@@ -152,7 +152,9 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
 
         # Pass 1: collect accepted md5s
         scanned = 0
-        for row in tqdm(ds, desc=f"  Scan {split_name}", total=limit, leave=True):
+        matched = 0
+        pbar = tqdm(ds, desc=f"  Scan {split_name}", total=limit, leave=True)
+        for row in pbar:
             if limit and scanned >= limit:
                 break
             scanned += 1
@@ -162,6 +164,8 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             )
             if passed:
                 all_accepted.append(md5_val)
+                matched += 1
+            pbar.set_postfix(matched=matched)
 
         print(f"  [{split_name}] Accepted {len(all_accepted):,} files (scanned {scanned:,})")
 
@@ -211,8 +215,10 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
     written = 0
     errors = 0
     scanned = 0
+    matched = 0
 
-    for row in tqdm(ds, desc=f"  {split_name}", total=limit, leave=True):
+    pbar = tqdm(ds, desc=f"  {split_name}", total=limit, leave=True)
+    for row in pbar:
         if limit and scanned >= limit:
             break
         scanned += 1
@@ -221,10 +227,14 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             row, subset, nomml_threshold, min_tracks, max_tracks
         )
         if not passed:
+            pbar.set_postfix(matched=matched)
             continue
+
+        matched += 1
 
         if dry_run:
             written += 1
+            pbar.set_postfix(matched=matched)
             continue
 
         # Write immediately
@@ -237,6 +247,7 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             written += 1
         except Exception:
             errors += 1
+        pbar.set_postfix(matched=matched)
 
     del ds
     gc.collect()
