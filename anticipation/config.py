@@ -21,6 +21,10 @@ MAX_PITCH = 128                    # 128 MIDI pitches
 MAX_INSTR = 129                    # 129 MIDI instruments (128 + drums)
 MAX_NOTE = MAX_PITCH*MAX_INSTR     # note = pitch x instrument
 
+# velocity extension for expressive performance
+VEL_BINS = 4                       # number of velocity bins: soft, medium, loud, very_loud
+VEL_RESOLUTION = 128 // VEL_BINS   # = 32 per bin
+
 MAX_INTERARRIVAL_IN_SECONDS = 10   # maximum interarrival time (for MIDI-like encoding)
 
 # preprocessing settings

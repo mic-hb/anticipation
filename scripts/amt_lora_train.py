@@ -78,6 +78,15 @@ TARGET_MODULE_PRESETS = {
     "all": ["c_attn", "c_proj", "mlp.c_fc", "mlp.c_proj"],  # All linear layers
 }
 
+# Velocity extension configuration
+VEL_BINS = 4
+MAX_NOTE = 128 * 129  # 16512
+
+# New vocabulary size with velocity-embedded note tokens
+# Time: 10000, Duration: 1000, Event Note: VEL_BINS*MAX_NOTE, Rest: 1
+# Control Time: 10000, Control Duration: 1000, Control Note: VEL_BINS*MAX_NOTE, Special: 3
+NEW_VOCAB_SIZE = 154100  # 2.8x original 55030
+
 
 class TokenDataset(Dataset):
     """Dataset that loads token sequences from text file with binary cache."""
@@ -294,6 +303,11 @@ def parse_args():
             "afterwards. By default, merge runs automatically after training."
         ),
     )
+    parser.add_argument(
+        "--extend_vocab",
+        action="store_true",
+        help="Extend vocabulary to include velocity tokens (for expressive MIDI fine-tuning)",
+    )
 
     # LoRA arguments (required when not using --config preset)
     parser.add_argument(
@@ -450,6 +464,14 @@ def main():
     )
     vocab_size = model.config.vocab_size
     logger.info(f"Model vocab size: {vocab_size}")
+
+    # Resize embeddings for velocity extension if requested
+    if args.extend_vocab:
+        logger.info(f"Resizing embeddings for velocity extension...")
+        logger.info(f"Original vocab: {vocab_size}, New vocab: {NEW_VOCAB_SIZE}")
+        model.resize_token_embeddings(NEW_VOCAB_SIZE)
+        logger.info(f"Resized embedding shape: {model.transformer.wte.weight.shape}")
+        logger.info(f"Resized LM head shape: {model.lm_head.weight.shape}")
 
     # Get proper pad_token_id from model config or use eos_token
     if getattr(model.config, "pad_token_id", None) is not None:

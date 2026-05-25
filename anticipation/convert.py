@@ -155,12 +155,14 @@ def midi_to_compound(midifile, debug=False):
                 # time quantization
                 time_in_ticks = round(TIME_RESOLUTION*time)
 
-                # Our compound word is: (time, duration, note, instr, velocity)
+                # Our compound word is: (time, duration, note, instr, velocity_bin)
+                # Velocity is binned: 0-31→0, 32-63→1, 64-95→2, 96-127→3
+                vel_bin = min(message.velocity // VEL_RESOLUTION, VEL_BINS - 1)
                 tokens.append(time_in_ticks) # 5ms resolution
                 tokens.append(-1) # placeholder (we'll fill this in later)
                 tokens.append(message.note)
                 tokens.append(instr)
-                tokens.append(message.velocity)
+                tokens.append(vel_bin) # store bin instead of raw velocity
 
                 open_notes[(instr,message.note,message.channel)].append((note_idx, time))
                 note_idx += 1
@@ -263,16 +265,28 @@ def compound_to_events(tokens, stats=False):
     assert len(tokens) % 5 == 0
     tokens = tokens.copy()
 
-    # remove velocities
-    del tokens[4::5]
+    # Embed velocity into note token:
+    # note_with_velocity = NOTE_OFFSET + VEL_BINS * MAX_NOTE + (128*instr + pitch) * VEL_BINS + vel_bin
+    # This preserves velocity information through the tokenization pipeline
+    new_tokens = []
+    for i in range(0, len(tokens), 5):
+        time = tokens[i]
+        dur = tokens[i + 1]
+        pitch = tokens[i + 2]
+        instr = tokens[i + 3]
+        raw_vel = tokens[i + 4]
+        vel_bin = raw_vel // VEL_RESOLUTION  # bin the velocity
 
-    # combine (note, instrument)
-    assert all(-1 <= tok < 2**7 for tok in tokens[2::4])
-    assert all(-1 <= tok < 129 for tok in tokens[3::4])
-    tokens[2::4] = [SEPARATOR if note == -1 else MAX_PITCH*instr + note
-                    for note, instr in zip(tokens[2::4],tokens[3::4])]
-    tokens[2::4] = [NOTE_OFFSET + tok for tok in tokens[2::4]]
-    del tokens[3::4]
+        if pitch == -1:
+            note_with_vel = SEPARATOR
+        else:
+            note_id = 128 * instr + pitch  # original note encoding
+            note_with_vel = NOTE_OFFSET + VEL_BINS * MAX_NOTE + note_id * VEL_BINS + vel_bin
+
+        new_tokens.extend([time, dur, note_with_vel])
+
+    tokens = new_tokens
+    assert len(tokens) % 3 == 0
 
     # max duration cutoff and set unknown durations to 250ms
     truncations = sum([1 for tok in tokens[1::3] if tok >= MAX_DUR])
@@ -282,8 +296,6 @@ def compound_to_events(tokens, stats=False):
 
     assert min(tokens[0::3]) >= 0
     tokens[0::3] = [TIME_OFFSET + tok for tok in tokens[0::3]]
-
-    assert len(tokens) % 3 == 0
 
     if stats:
         return tokens, truncations
@@ -295,7 +307,10 @@ def events_to_compound(tokens, debug=False):
     tokens = unpad(tokens)
 
     # move all tokens to zero-offset for synthesis
-    tokens = [tok - CONTROL_OFFSET if tok >= CONTROL_OFFSET and tok != SEPARATOR else tok
+    # Note: With velocity extension, event note tokens (77048+) are >= CONTROL_OFFSET (27513),
+    # so we must check if tok >= CONTROL_OFFSET + VEL_BINS*MAX_NOTE to avoid incorrectly
+    # subtracting CONTROL_OFFSET from event tokens
+    tokens = [tok - CONTROL_OFFSET if tok >= CONTROL_OFFSET + VEL_BINS * MAX_NOTE and tok != SEPARATOR else tok
               for tok in tokens]
 
     # remove type offsets
@@ -323,9 +338,26 @@ def events_to_compound(tokens, debug=False):
     out = 5*(len(tokens)//3)*[0]
     out[0::5] = tokens[0::3]
     out[1::5] = tokens[1::3]
-    out[2::5] = [tok - (2**7)*(tok//2**7) for tok in tokens[2::3]]
-    out[3::5] = [tok//2**7 for tok in tokens[2::3]]
-    out[4::5] = (len(tokens)//3)*[72] # default velocity
+
+    # Decode velocity from note_with_velocity token
+    # note_with_velocity = VEL_BINS * MAX_NOTE + 128*instr + pitch + vel_bin
+    for i, note_with_vel in enumerate(tokens[2::3]):
+        if note_with_vel >= VEL_BINS * MAX_NOTE:
+            # New format with velocity embedded
+            residual = note_with_vel - VEL_BINS * MAX_NOTE
+            vel_bin = residual % VEL_BINS
+            residual = residual // VEL_BINS
+            instr = residual // 128
+            pitch = residual % 128
+        else:
+            # Old format without velocity (backwards compatibility)
+            instr = note_with_vel // 128
+            pitch = note_with_vel % 128
+            vel_bin = 1  # default medium (bin 1 = velocity ~48)
+
+        out[5*i + 2] = pitch
+        out[5*i + 3] = instr
+        out[5*i + 4] = vel_bin * VEL_RESOLUTION  # Convert bin to actual velocity
 
     assert max(out[1::5]) < MAX_DUR
     assert max(out[2::5]) < MAX_PITCH
