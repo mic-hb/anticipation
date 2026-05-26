@@ -63,6 +63,16 @@ TRAIN_HASHES = set("0123456789abcd")
 VALID_HASHES = set("e")
 TEST_HASHES = set("f")
 
+# Full GigaMIDI split totals (from Final-Metadata-Extended-GigaMIDI-Dataset-updated.csv)
+# Derived from file_path prefix: training-V1.1-80%, validation-V1.1-10%, test-V1.1-10%
+# NOTE: GigaMIDI does NOT use the Lakh hash-based split (0-d=train, e=valid, f=test).
+# Used as tqdm total when --limit is not specified, enabling ETA for full runs.
+FULL_SPLIT_COUNTS = {
+    "train": 1_708_973,
+    "validation": 213_621,
+    "test": 213_624,
+}
+
 
 def get_hex_folder(md5: str) -> str:
     return md5[0].lower()
@@ -151,7 +161,7 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
     """
     Stream a single GigaMIDI split, filter, write immediately.
     For sampled subsets (s1/s3): writes all, then deletes oversample.
-    Returns (written, errors, sampled_and_kept) counts.
+    Returns (written, errors, sampled_and_kept, skipped_existing) counts.
     """
     print(f"\n  [{split_name}] Opening streaming dataset...")
     ds = load_dataset(
@@ -170,7 +180,8 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
         # Pass 1: collect accepted md5s
         scanned = 0
         matched = 0
-        pbar = tqdm(ds, desc=f"  Scan {split_name}", total=limit, leave=True)
+        scan_total = limit if limit else FULL_SPLIT_COUNTS.get(split_name, 0)
+        pbar = tqdm(ds, desc=f"  Scan {split_name}", total=scan_total, leave=True)
         for row in pbar:
             if limit and scanned >= limit:
                 break
@@ -244,7 +255,9 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
     matched = 0
     pbar_start = time.time()
 
-    pbar = tqdm(ds, desc=f"  {split_name}", total=limit, leave=True)
+    # Use full split count as total when no limit set — enables ETA
+    pbar_total = limit if limit else FULL_SPLIT_COUNTS.get(split_name, 0)
+    pbar = tqdm(ds, desc=f"  {split_name}", total=pbar_total, leave=True)
     for row in pbar:
         if limit and scanned >= limit:
             break
@@ -257,7 +270,7 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             # Time estimation: scanned rate
             elapsed = time.time() - pbar_start
             rate = scanned / elapsed if elapsed > 0 else 0
-            remaining = (limit - scanned) / rate if rate > 0 and limit else 0
+            remaining = (pbar_total - scanned) / rate if rate > 0 else 0
             pbar.set_postfix(matched=matched, written=written, skipped=skipped_existing,
                               eta=f"{int(remaining)}s" if remaining else "—")
             continue
@@ -268,7 +281,7 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             written += 1
             elapsed = time.time() - pbar_start
             rate = scanned / elapsed if elapsed > 0 else 0
-            remaining = (limit - scanned) / rate if rate > 0 and limit else 0
+            remaining = (pbar_total - scanned) / rate if rate > 0 else 0
             pbar.set_postfix(matched=matched, written=written, eta=f"{int(remaining)}s" if remaining else "—")
             continue
 
@@ -290,7 +303,7 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
         # Time estimation: matched rate as proxy for processing speed
         elapsed = time.time() - pbar_start
         rate = matched / elapsed if elapsed > 0 else 0
-        remaining = (limit - scanned) / rate if rate > 0 and limit else 0
+        remaining = (pbar_total - scanned) / rate if rate > 0 else 0
         pbar.set_postfix(matched=matched, written=written, skipped=skipped_existing,
                           eta=f"{int(remaining)}s" if remaining else "—")
 
@@ -381,6 +394,11 @@ def main():
     print(f"Track range:  {args.min_tracks}-{args.max_tracks}")
     if args.limit:
         print(f"Limit:        {args.limit:,} per split (TEST MODE)")
+    else:
+        print(f"Full run — ETA enabled via known split totals:")
+        print(f"            train={FULL_SPLIT_COUNTS['train']:,}  "
+              f"valid={FULL_SPLIT_COUNTS['validation']:,}  "
+              f"test={FULL_SPLIT_COUNTS['test']:,}")
     print("-" * 70)
     print("Streaming: one split at a time, immediate write, minimal RAM")
     if args.dry_run:
