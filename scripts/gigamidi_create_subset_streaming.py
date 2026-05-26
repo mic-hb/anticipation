@@ -68,13 +68,30 @@ def get_hex_folder(md5: str) -> str:
     return md5[0].lower()
 
 
-def write_midi_file(args_tuple):
-    """Write a single MIDI file to hex folder (flat Lakh-style structure)."""
+def write_midi_file(args_tuple, skip_existing=True):
+    """Write a single MIDI file to hex folder (flat Lakh-style structure).
+
+    Args:
+        args_tuple: (midi_bytes, md5, output_base)
+        skip_existing: if True, skip files that already exist (idempotent)
+
+    Returns:
+        (md5, split, skipped) — skipped is True when file was not written due to existing
+    """
     midi_bytes, md5, output_base = args_tuple
     hex_folder = get_hex_folder(md5)
     folder = output_base / hex_folder
     folder.mkdir(parents=True, exist_ok=True)
     midi_path = folder / f"{md5}.mid"
+
+    if skip_existing and midi_path.exists():
+        split = (
+            "train" if md5[0].lower() in TRAIN_HASHES else
+            "valid" if md5[0].lower() in VALID_HASHES else
+            "test"
+        )
+        return md5, split, True
+
     with open(midi_path, "wb") as f:
         f.write(midi_bytes)
     split = (
@@ -82,7 +99,7 @@ def write_midi_file(args_tuple):
         "valid" if md5[0].lower() in VALID_HASHES else
         "test"
     )
-    return md5, split
+    return md5, split, False
 
 
 def filter_record(row, subset, nomml_threshold, min_tracks, max_tracks):
@@ -170,7 +187,7 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
         print(f"  [{split_name}] Accepted {len(all_accepted):,} files (scanned {scanned:,})")
 
         if not all_accepted:
-            return 0, 0, 0
+            return 0, 0, 0, 0
 
         # Random sample
         random.seed(seed)
@@ -190,7 +207,10 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             streaming=True,
         )
         written = 0
+        skipped_existing = 0
         errors = 0
+        pbar_start = time.time()
+
         for row in tqdm(ds, desc=f"  Write {split_name}", total=sample_count, leave=True):
             if row.get("md5", "") not in sampled_md5s:
                 continue
@@ -198,24 +218,31 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             midi_bytes = row.get("music", b"")
             if not midi_bytes:
                 continue
-            tasks = [(midi_bytes, md5_val, output_base)]
-            with ThreadPoolExecutor(max_workers=1) as ex:
-                f = ex.submit(write_midi_file, tasks[0])
-                try:
-                    f.result()
-                    written += 1
-                except Exception:
-                    errors += 1
+
+            _, _, skipped = write_midi_file((midi_bytes, md5_val, output_base))
+            if skipped:
+                skipped_existing += 1
+            else:
+                written += 1
+
+            # Time estimation
+            elapsed = time.time() - pbar_start
+            rate = (written + skipped_existing) / elapsed if elapsed > 0 else 0
+            remaining = (sample_count - written - skipped_existing) / rate if rate > 0 else 0
+            pbar.set_postfix(written=written, skipped=skipped_existing,
+                              eta=f"{int(remaining)}s" if remaining else "—")
         del ds
         gc.collect()
-        return written, errors, sample_count
+        return written, errors, sample_count, skipped_existing
 
     # Single-pass for non-sampled subsets (s4, s8, s11)
     print(f"  [{split_name}] Single-pass filter+write...")
     written = 0
     errors = 0
+    skipped_existing = 0
     scanned = 0
     matched = 0
+    pbar_start = time.time()
 
     pbar = tqdm(ds, desc=f"  {split_name}", total=limit, leave=True)
     for row in pbar:
@@ -227,34 +254,52 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             row, subset, nomml_threshold, min_tracks, max_tracks
         )
         if not passed:
-            pbar.set_postfix(matched=matched)
+            # Time estimation: scanned rate
+            elapsed = time.time() - pbar_start
+            rate = scanned / elapsed if elapsed > 0 else 0
+            remaining = (limit - scanned) / rate if rate > 0 and limit else 0
+            pbar.set_postfix(matched=matched, written=written, skipped=skipped_existing,
+                              eta=f"{int(remaining)}s" if remaining else "—")
             continue
 
         matched += 1
 
         if dry_run:
             written += 1
-            pbar.set_postfix(matched=matched)
+            elapsed = time.time() - pbar_start
+            rate = scanned / elapsed if elapsed > 0 else 0
+            remaining = (limit - scanned) / rate if rate > 0 and limit else 0
+            pbar.set_postfix(matched=matched, written=written, eta=f"{int(remaining)}s" if remaining else "—")
             continue
 
-        # Write immediately
+        # Write immediately (idempotent — skips existing)
         try:
             folder = output_base / get_hex_folder(md5_val)
             folder.mkdir(parents=True, exist_ok=True)
             midi_path = folder / f"{md5_val}.mid"
-            with open(midi_path, "wb") as f:
-                f.write(midi_bytes)
-            written += 1
+
+            if midi_path.exists():
+                skipped_existing += 1
+            else:
+                with open(midi_path, "wb") as f:
+                    f.write(midi_bytes)
+                written += 1
         except Exception:
             errors += 1
-        pbar.set_postfix(matched=matched)
+
+        # Time estimation: matched rate as proxy for processing speed
+        elapsed = time.time() - pbar_start
+        rate = matched / elapsed if elapsed > 0 else 0
+        remaining = (limit - scanned) / rate if rate > 0 and limit else 0
+        pbar.set_postfix(matched=matched, written=written, skipped=skipped_existing,
+                          eta=f"{int(remaining)}s" if remaining else "—")
 
     del ds
     gc.collect()
     if dry_run:
         print(f"  [{split_name}] DRY RUN — would write {written:,} files")
-        return 0, 0, 0
-    return written, errors, 0  # 0 = no sampling
+        return 0, 0, 0, 0
+    return written, errors, 0, skipped_existing  # 0 = no sampling
 
 
 def main():
@@ -344,9 +389,10 @@ def main():
 
     total_written = 0
     total_errors = 0
+    total_skipped = 0
 
     for split_name in ["train", "validation", "test"]:
-        w, e, _ = stream_split_write(
+        w, e, _, skipped = stream_split_write(
             split_name=split_name,
             subset=args.subset,
             output_base=output_path,
@@ -361,6 +407,7 @@ def main():
         )
         total_written += w
         total_errors += e
+        total_skipped += skipped
 
     elapsed = time.time() - start_time
 
@@ -368,9 +415,10 @@ def main():
         print("\n" + "=" * 70)
         print("DRY RUN COMPLETE — no files were written")
         print("=" * 70)
-        print(f"  Scanned:  all 3 splits")
+        print(f"  Scanned:     all 3 splits")
         print(f"  Would write: {total_written:,} files")
-        print(f"  Time:     {elapsed:.1f}s ({elapsed / 60:.1f} min)")
+        print(f"  Already on disk: {total_skipped:,} files (idempotent — will be skipped)")
+        print(f"  Time:        {elapsed:.1f}s ({elapsed / 60:.1f} min)")
         print("=" * 70)
         print("\nRun without --dry_run to download and write files.")
         return
@@ -398,14 +446,17 @@ def main():
     print("\n" + "=" * 70)
     print("COMPLETE - Summary")
     print("=" * 70)
-    print(f"  Files written:  {total_written:,}")
-    print(f"  Write errors:  {total_errors:,}")
-    print(f"    Train (0-d): {train_count:,}")
-    print(f"    Valid (e):   {valid_count:,}")
-    print(f"    Test (f):   {test_count:,}")
-    print(f"  Output:        {output_path}")
-    print(f"  Time:          {elapsed:.1f}s ({elapsed / 60:.1f} min)")
+    print(f"  Files written:      {total_written:,}")
+    print(f"  Already on disk:     {total_skipped:,} (idempotent — skipped)")
+    print(f"  Write errors:       {total_errors:,}")
+    print(f"    Train (0-d):      {train_count:,}")
+    print(f"    Valid (e):        {valid_count:,}")
+    print(f"    Test (f):        {test_count:,}")
+    print(f"  Output:             {output_path}")
+    print(f"  Time:               {elapsed:.1f}s ({elapsed / 60:.1f} min)")
     print("=" * 70)
+    if total_skipped > 0:
+        print(f"\n  Note: {total_skipped:,} files were skipped (already exist) — reruns are idempotent")
     print("\nNext steps:")
     print("  1. Preprocess: python gigamidi_preprocess_to_compound.py --input <output>/")
     print("  2. Tokenize:   python gigamidi_tokenize_events.py --input <output>/")
