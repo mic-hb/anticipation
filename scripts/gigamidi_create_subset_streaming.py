@@ -80,6 +80,27 @@ def get_hex_folder(md5: str) -> str:
     return md5[0].lower()
 
 
+def scan_existing_output(output_path: Path) -> set[str]:
+    """Walk output hex-folders and build set of md5s already on disk.
+
+    One-time scan at startup: O(N) os calls, result is an in-memory set.
+    Every subsequent row check becomes O(1) set lookup instead of O(I/O) stat().
+    """
+    existing = set()
+    if not output_path.exists():
+        return existing
+
+    for hex_folder in output_path.iterdir():
+        if not hex_folder.is_dir():
+            continue
+        for fpath in hex_folder.iterdir():
+            if fpath.suffix == ".mid":
+                # filename without .mid is the md5
+                existing.add(fpath.stem)
+
+    return existing
+
+
 def _parse_python_list(val: str):
     """Parse a Python list literal like "['Reed', 'Bass']" or "[12, -1]" safely."""
     if not val or val in ("[]", ""):
@@ -188,32 +209,52 @@ def scan_csv_for_targets(csv_path: str, subset: str, nomml_threshold: int,
     return set(all_target_md5s), {"train": train, "validation": valid, "test": test_}
 
 
-def write_midi_file(args_tuple, skip_existing=True):
+def write_midi_file(midi_bytes, md5, output_base, existing_md5s=None):
     """Write a single MIDI file to hex folder (flat Lakh-style structure).
 
     Args:
-        args_tuple: (midi_bytes, md5, output_base)
-        skip_existing: if True, skip files that already exist (idempotent)
+        midi_bytes: raw MIDI binary
+        md5: md5 string (used as filename)
+        output_base: output root Path
+        existing_md5s: if provided, O(1) in-memory set lookup replaces disk stat.
+                       After successful write, md5 is removed from the set.
 
     Returns:
-        (md5, split, skipped) — skipped is True when file was not written due to existing
+        (md5, split, skipped) — skipped is True when file was skipped (already in set)
     """
-    midi_bytes, md5, output_base = args_tuple
-    hex_folder = get_hex_folder(md5)
-    folder = output_base / hex_folder
+    # O(1) in-memory check when set is provided
+    if existing_md5s is not None:
+        if md5 in existing_md5s:
+            split = (
+                "train" if md5[0].lower() in TRAIN_HASHES else
+                "valid" if md5[0].lower() in VALID_HASHES else
+                "test"
+            )
+            return md5, split, True
+        # Not in set — write, then add to set so subsequent rows skip it
+        written = True
+    else:
+        # Fallback to disk check when no set provided
+        midi_path = output_base / get_hex_folder(md5) / f"{md5}.mid"
+        if midi_path.exists():
+            split = (
+                "train" if md5[0].lower() in TRAIN_HASHES else
+                "valid" if md5[0].lower() in VALID_HASHES else
+                "test"
+            )
+            return md5, split, True
+        written = False
+
+    folder = output_base / get_hex_folder(md5)
     folder.mkdir(parents=True, exist_ok=True)
     midi_path = folder / f"{md5}.mid"
 
-    if skip_existing and midi_path.exists():
-        split = (
-            "train" if md5[0].lower() in TRAIN_HASHES else
-            "valid" if md5[0].lower() in VALID_HASHES else
-            "test"
-        )
-        return md5, split, True
-
     with open(midi_path, "wb") as f:
         f.write(midi_bytes)
+
+    if existing_md5s is not None:
+        existing_md5s.discard(md5)  # mark as written — skip if encountered again
+
     split = (
         "train" if md5[0].lower() in TRAIN_HASHES else
         "valid" if md5[0].lower() in VALID_HASHES else
@@ -223,12 +264,15 @@ def write_midi_file(args_tuple, skip_existing=True):
 
 
 def write_filtered_targets(target_md5s: set[str], split_name: str, output_base: Path,
-                            dry_run: bool):
+                            dry_run: bool, existing_md5s: set[str]):
     """Stream HuggingFace split, writing ONLY rows whose md5 is in target_md5s.
 
     CSV-guided mode: we already know the exact md5s to fetch. We iterate all
     rows (to maintain streaming), but ONLY access row["music"] for md5s in
     target_md5s. Non-matching rows: no binary download.
+
+    existing_md5s: in-memory set of md5s already on disk. Checked before write
+    to avoid disk I/O. Updated in-place after each write.
 
     Returns:
         (written, errors, skipped_existing) — matches stream_split_write signature
@@ -259,7 +303,7 @@ def write_filtered_targets(target_md5s: set[str], split_name: str, output_base: 
             pbar.update(1)
             continue
 
-        _, _, skipped = write_midi_file((midi_bytes, md5_val, output_base))
+        _, _, skipped = write_midi_file(midi_bytes, md5_val, output_base, existing_md5s)
         if skipped:
             skipped_existing += 1
         else:
@@ -327,10 +371,13 @@ def filter_record(row, subset, nomml_threshold, min_tracks, max_tracks):
 
 def stream_split_write(split_name, subset, output_base, nomml_threshold,
                       min_tracks, max_tracks, workers, sample_size=None,
-                      seed=42, dry_run=False, limit=None):
+                      seed=42, dry_run=False, limit=None, existing_md5s=None):
     """
     Stream a single GigaMIDI split, filter, write immediately.
     For sampled subsets (s1/s3): writes all, then deletes oversample.
+
+    existing_md5s: in-memory set of md5s already on disk (O(1) skip, no stat I/O).
+                   After successful write, md5 is removed from the set.
     Returns (written, errors, sampled_and_kept, skipped_existing) counts.
     """
     print(f"\n  [{split_name}] Opening streaming dataset...")
@@ -400,7 +447,7 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             if not midi_bytes:
                 continue
 
-            _, _, skipped = write_midi_file((midi_bytes, md5_val, output_base))
+            _, _, skipped = write_midi_file(midi_bytes, md5_val, output_base, existing_md5s)
             if skipped:
                 skipped_existing += 1
             else:
@@ -455,17 +502,12 @@ def stream_split_write(split_name, subset, output_base, nomml_threshold,
             pbar.set_postfix(matched=matched, written=written, eta=f"{int(remaining)}s" if remaining else "—")
             continue
 
-        # Write immediately (idempotent — skips existing)
+        # Write immediately (idempotent — skips existing via existing_md5s set)
         try:
-            folder = output_base / get_hex_folder(md5_val)
-            folder.mkdir(parents=True, exist_ok=True)
-            midi_path = folder / f"{md5_val}.mid"
-
-            if midi_path.exists():
+            _, _, skipped = write_midi_file(midi_bytes, md5_val, output_base, existing_md5s)
+            if skipped:
                 skipped_existing += 1
             else:
-                with open(midi_path, "wb") as f:
-                    f.write(midi_bytes)
                 written += 1
         except Exception:
             errors += 1
@@ -593,6 +635,12 @@ def main():
     total_errors = 0
     total_skipped = 0
 
+    # Build in-memory set of md5s already on disk — O(1) skip, zero I/O per row
+    existing_md5s = scan_existing_output(output_path)
+    print(f"\n  Existing on disk: {len(existing_md5s):,} files")
+    if existing_md5s and not args.dry_run:
+        print(f"  → Will skip already-written files (idempotent, O(1) set lookup)")
+
     if args.csv_path:
         # ---- CSV-guided mode: filter on metadata, fetch only matched rows ----
         print("\n[CSV mode] Scanning metadata CSV to build target md5 set...")
@@ -633,6 +681,7 @@ def main():
                 split_name,
                 output_path,
                 args.dry_run,
+                existing_md5s,
             )
             total_written += w
             total_errors += e
@@ -652,11 +701,11 @@ def main():
                 seed=args.seed,
                 dry_run=args.dry_run,
                 limit=args.limit,
+                existing_md5s=existing_md5s,
             )
             total_written += w
             total_errors += e
             total_skipped += skipped
-
     elapsed = time.time() - start_time
 
     if args.dry_run:
