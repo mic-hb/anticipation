@@ -48,8 +48,10 @@ temporary disk usage = subset_size × file_size. For 10% sampling of
 """
 
 import argparse
+import csv
 import gc
 import random
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -76,6 +78,114 @@ FULL_SPLIT_COUNTS = {
 
 def get_hex_folder(md5: str) -> str:
     return md5[0].lower()
+
+
+def _parse_python_list(val: str):
+    """Parse a Python list literal like "['Reed', 'Bass']" or "[12, -1]" safely."""
+    if not val or val in ("[]", ""):
+        return []
+    # Match integers or single-quoted strings
+    strings = re.findall(r"'([^']*)'", val)
+    if strings:
+        return strings
+    ints = [int(x) for x in re.findall(r"-?\d+", val)]
+    return ints
+
+
+def scan_csv_for_targets(csv_path: str, subset: str, nomml_threshold: int,
+                         min_tracks: int, max_tracks: int,
+                         sample_size, seed: int):
+    """Scan the GigaMIDI metadata CSV and return the set of md5s to fetch.
+
+    Reads CSV in one pass (chunked). Applies the same filter logic as the
+    HuggingFace streaming path, but only touches lightweight metadata fields.
+    The returned set is the EXACT list of rows whose music binary will be
+    downloaded from HuggingFace (idempotent: already-downloaded files are
+    skipped during write via write_midi_file).
+
+    Returns:
+        (target_md5s: set[str], split_counts: dict[str, int])
+        target_md5s: set of md5 strings that pass the subset filter
+        split_counts: {"train": N, "validation": N, "test": N} of matched rows
+    """
+    csv.field_size_limit(1_000_000)
+
+    all_target_md5s = []
+
+    with open(csv_path, "r") as f:
+        reader = csv.DictReader(f)
+        for row in tqdm(reader, desc="  CSV scan", unit="rows", leave=True):
+            file_path = row.get("file_path", "")
+
+            # Detect split from path prefix (GigaMIDI convention)
+            if "training-V1.1-80%" in file_path:
+                row_split = "train"
+            elif "validation-V1.1-10%" in file_path:
+                row_split = "validation"
+            elif "test-V1.1-10%" in file_path:
+                row_split = "test"
+            else:
+                continue  # unknown split
+
+            md5_val = row.get("md5", "")
+            if not md5_val:
+                continue
+
+            # --- Subset-specific filtering (same logic as filter_record) ---
+
+            if subset == "s8":
+                styles_curated = _parse_python_list(row.get("music_styles_curated", ""))
+                scraped_raw = row.get("music_style_scraped", "") or ""
+                scraped = _parse_python_list(scraped_raw)
+                styles = set(s.lower() for s in styles_curated + scraped)
+                if not any(s in styles for s in ("gospel", "latin")):
+                    continue
+
+            elif subset == "s11":
+                styles_curated = _parse_python_list(row.get("music_styles_curated", ""))
+                scraped_raw = row.get("music_style_scraped", "") or ""
+                scraped = _parse_python_list(scraped_raw)
+                styles = set(s.lower() for s in styles_curated + scraped)
+                if not any(s in styles for s in ("gospel", "latin")):
+                    continue
+                nomml = _parse_python_list(row.get("NOMML", "[]"))
+                if not any(n >= nomml_threshold for n in nomml):
+                    continue
+
+            elif subset in ("s2", "s4"):
+                num_tracks = int(row.get("num_tracks", 0) or 0)
+                if num_tracks < min_tracks or num_tracks > max_tracks:
+                    continue
+                nomml = _parse_python_list(row.get("NOMML", "[]"))
+                if not any(n >= nomml_threshold for n in nomml):
+                    continue
+
+            # s1/s3: accept all (sampling handled below)
+
+            all_target_md5s.append(md5_val)
+
+    total = len(all_target_md5s)
+    if total == 0:
+        return set(), {"train": 0, "validation": 0, "test": 0}
+
+    # Split counts for ETA (based on md5 leading char, Lakh hex folder convention)
+    train = sum(1 for m in all_target_md5s if m[0].lower() in TRAIN_HASHES)
+    valid = sum(1 for m in all_target_md5s if m[0].lower() in VALID_HASHES)
+    test_ = sum(1 for m in all_target_md5s if m[0].lower() in TEST_HASHES)
+
+    # For sampled subsets: random sample from the full filtered set
+    if sample_size and sample_size < 1.0:
+        random.seed(seed)
+        sample_count = max(1, int(total * sample_size))
+        sampled = set(random.sample(all_target_md5s, k=sample_count))
+        print(f"  Sampled {sample_count:,} from {total:,} filtered ({sample_size*100:.1f}%)")
+        # Recompute split counts for sampled set
+        train = sum(1 for m in sampled if m[0].lower() in TRAIN_HASHES)
+        valid = sum(1 for m in sampled if m[0].lower() in VALID_HASHES)
+        test_ = sum(1 for m in sampled if m[0].lower() in TEST_HASHES)
+        return sampled, {"train": train, "validation": valid, "test": test_}
+
+    return set(all_target_md5s), {"train": train, "validation": valid, "test": test_}
 
 
 def write_midi_file(args_tuple, skip_existing=True):
@@ -110,6 +220,66 @@ def write_midi_file(args_tuple, skip_existing=True):
         "test"
     )
     return md5, split, False
+
+
+def write_filtered_targets(target_md5s: set[str], split_name: str, output_base: Path,
+                            dry_run: bool):
+    """Stream HuggingFace split, writing ONLY rows whose md5 is in target_md5s.
+
+    CSV-guided mode: we already know the exact md5s to fetch. We iterate all
+    rows (to maintain streaming), but ONLY access row["music"] for md5s in
+    target_md5s. Non-matching rows: no binary download.
+
+    Returns:
+        (written, errors, skipped_existing) — matches stream_split_write signature
+    """
+    print(f"\n  [{split_name}] Streaming to write {len(target_md5s):,} files...")
+
+    ds = load_dataset(
+        "Metacreation/GigaMIDI",
+        "v2.0.0",
+        split=split_name,
+        streaming=True,
+    )
+
+    written = 0
+    errors = 0
+    skipped_existing = 0
+    pbar_start = time.time()
+
+    pbar = tqdm(total=len(target_md5s), desc=f"  {split_name}", leave=True)
+    for row in ds:
+        md5_val = row.get("md5", "")
+        if md5_val not in target_md5s:
+            continue  # *** music NOT accessed — no binary download ***
+
+        midi_bytes = row.get("music", b"")
+        if not midi_bytes:
+            errors += 1
+            pbar.update(1)
+            continue
+
+        _, _, skipped = write_midi_file((midi_bytes, md5_val, output_base))
+        if skipped:
+            skipped_existing += 1
+        else:
+            written += 1
+
+        elapsed = time.time() - pbar_start
+        rate = (written + skipped_existing) / elapsed if elapsed > 0 else 0
+        remaining = (len(target_md5s) - written - skipped_existing) / rate if rate > 0 else 0
+        pbar.set_postfix(written=written, skipped=skipped_existing,
+                          eta=f"{int(remaining)}s" if remaining else "—")
+        pbar.update(1)
+
+    pbar.close()
+    del ds
+    gc.collect()
+
+    if dry_run:
+        print(f"  [{split_name}] DRY RUN — would write {written:,} files")
+        return 0, 0, 0
+    return written, errors, skipped_existing
 
 
 def filter_record(row, subset, nomml_threshold, min_tracks, max_tracks):
@@ -357,6 +527,13 @@ def main():
         help="Limit records per split (TEST MODE — for quick validation)",
     )
     parser.add_argument(
+        "--csv_path", type=str, default=None,
+        help="Path to Final-Metadata-Extended-GigaMIDI-Dataset-updated.csv. "
+             "When provided, CSV is scanned first to build the exact set of md5s to fetch, "
+             "then only matching rows download their music binary from HuggingFace. "
+             "Much faster than pure streaming for subsets with high filter selectivity.",
+    )
+    parser.add_argument(
         "--dry_run", action="store_true",
         help="Scan and print statistics without downloading or writing any files",
     )
@@ -394,13 +571,20 @@ def main():
     print(f"Track range:  {args.min_tracks}-{args.max_tracks}")
     if args.limit:
         print(f"Limit:        {args.limit:,} per split (TEST MODE)")
-    else:
+    elif not args.csv_path:
         print(f"Full run — ETA enabled via known split totals:")
         print(f"            train={FULL_SPLIT_COUNTS['train']:,}  "
               f"valid={FULL_SPLIT_COUNTS['validation']:,}  "
               f"test={FULL_SPLIT_COUNTS['test']:,}")
     print("-" * 70)
-    print("Streaming: one split at a time, immediate write, minimal RAM")
+
+    if args.csv_path:
+        print(f"CSV mode:     {args.csv_path}")
+        print(f"  → CSV scan builds exact target md5 set, only matching rows fetch binary")
+        print(f"  → Non-target rows: NO music download (zero network waste)")
+    else:
+        print("Streaming: one split at a time, immediate write, minimal RAM")
+
     if args.dry_run:
         print("*** DRY RUN MODE — no files will be written ***")
     print("=" * 70)
@@ -409,23 +593,69 @@ def main():
     total_errors = 0
     total_skipped = 0
 
-    for split_name in ["train", "validation", "test"]:
-        w, e, _, skipped = stream_split_write(
-            split_name=split_name,
-            subset=args.subset,
-            output_base=output_path,
-            nomml_threshold=args.nomml_threshold,
-            min_tracks=args.min_tracks,
-            max_tracks=args.max_tracks,
-            workers=args.workers,
-            sample_size=args.sample_size,
-            seed=args.seed,
-            dry_run=args.dry_run,
-            limit=args.limit,
+    if args.csv_path:
+        # ---- CSV-guided mode: filter on metadata, fetch only matched rows ----
+        print("\n[CSV mode] Scanning metadata CSV to build target md5 set...")
+        target_md5s, split_counts = scan_csv_for_targets(
+            args.csv_path,
+            args.subset,
+            args.nomml_threshold,
+            args.min_tracks,
+            args.max_tracks,
+            args.sample_size,
+            args.seed,
         )
-        total_written += w
-        total_errors += e
-        total_skipped += skipped
+        total_targets = len(target_md5s)
+        print(f"  → Total target md5s: {total_targets:,}  "
+              f"(train={split_counts['train']:,}  "
+              f"valid={split_counts['validation']:,}  "
+              f"test={split_counts['test']:,})")
+
+        if total_targets == 0:
+            print("  → No matching files found. Exiting.")
+            return
+
+        for split_name in ["train", "validation", "test"]:
+            # Partition target_md5s by split (Lakh hex folder convention)
+            if split_name == "train":
+                targets_in_split = {m for m in target_md5s if m[0].lower() in TRAIN_HASHES}
+            elif split_name == "validation":
+                targets_in_split = {m for m in target_md5s if m[0].lower() in VALID_HASHES}
+            else:
+                targets_in_split = {m for m in target_md5s if m[0].lower() in TEST_HASHES}
+
+            if not targets_in_split:
+                print(f"\n  [{split_name}] No files in this split — skipping")
+                continue
+
+            w, e, skipped = write_filtered_targets(
+                targets_in_split,
+                split_name,
+                output_path,
+                args.dry_run,
+            )
+            total_written += w
+            total_errors += e
+            total_skipped += skipped
+    else:
+        # ---- Original streaming mode (filter on-the-fly) ----
+        for split_name in ["train", "validation", "test"]:
+            w, e, _, skipped = stream_split_write(
+                split_name=split_name,
+                subset=args.subset,
+                output_base=output_path,
+                nomml_threshold=args.nomml_threshold,
+                min_tracks=args.min_tracks,
+                max_tracks=args.max_tracks,
+                workers=args.workers,
+                sample_size=args.sample_size,
+                seed=args.seed,
+                dry_run=args.dry_run,
+                limit=args.limit,
+            )
+            total_written += w
+            total_errors += e
+            total_skipped += skipped
 
     elapsed = time.time() - start_time
 
@@ -433,7 +663,6 @@ def main():
         print("\n" + "=" * 70)
         print("DRY RUN COMPLETE — no files were written")
         print("=" * 70)
-        print(f"  Scanned:     all 3 splits")
         print(f"  Would write: {total_written:,} files")
         print(f"  Already on disk: {total_skipped:,} files (idempotent — will be skipped)")
         print(f"  Time:        {elapsed:.1f}s ({elapsed / 60:.1f} min)")
