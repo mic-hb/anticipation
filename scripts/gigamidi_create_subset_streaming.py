@@ -277,7 +277,9 @@ def write_filtered_targets(target_md5s: set[str], split_name: str, output_base: 
     Returns:
         (written, errors, skipped_existing) — matches stream_split_write signature
     """
-    print(f"\n  [{split_name}] Streaming to write {len(target_md5s):,} files...")
+    total_split = FULL_SPLIT_COUNTS.get(split_name, 0)
+    print(f"\n  [{split_name}] Streaming all {total_split:,} rows, "
+          f"{len(target_md5s):,} are S4 targets...")
 
     ds = load_dataset(
         "Metacreation/GigaMIDI",
@@ -289,18 +291,25 @@ def write_filtered_targets(target_md5s: set[str], split_name: str, output_base: 
     written = 0
     errors = 0
     skipped_existing = 0
+    total_seen = 0      # all rows scanned from this HuggingFace split
+    total_matched = 0   # rows that were S4 targets (in target_md5s)
     pbar_start = time.time()
 
-    pbar = tqdm(total=len(target_md5s), desc=f"  {split_name}", leave=True)
+    # tqdm tracks all rows seen against full split size
+    pbar = tqdm(total=total_split, desc=f"  {split_name}", leave=True)
     for row in ds:
         md5_val = row.get("md5", "")
+        total_seen += 1
+        pbar.update(1)
+
         if md5_val not in target_md5s:
             continue  # *** music NOT accessed — no binary download ***
+
+        total_matched += 1
 
         midi_bytes = row.get("music", b"")
         if not midi_bytes:
             errors += 1
-            pbar.update(1)
             continue
 
         _, _, skipped = write_midi_file(midi_bytes, md5_val, output_base, existing_md5s)
@@ -310,11 +319,14 @@ def write_filtered_targets(target_md5s: set[str], split_name: str, output_base: 
             written += 1
 
         elapsed = time.time() - pbar_start
-        rate = (written + skipped_existing) / elapsed if elapsed > 0 else 0
-        remaining = (len(target_md5s) - written - skipped_existing) / rate if rate > 0 else 0
-        pbar.set_postfix(written=written, skipped=skipped_existing,
-                          eta=f"{int(remaining)}s" if remaining else "—")
-        pbar.update(1)
+        rate = total_seen / elapsed if elapsed > 0 else 0
+        remaining = (total_split - total_seen) / rate if rate > 0 else 0
+        pbar.set_postfix(
+            matched=f"{total_matched}/{len(target_md5s)}",
+            written=written,
+            skipped=skipped_existing,
+            eta=f"{int(remaining)}s" if remaining else "—",
+        )
 
     pbar.close()
     del ds
