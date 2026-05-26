@@ -165,8 +165,6 @@ def main():
         required=True,
         choices=["s1", "s2", "s3", "s4", "s8", "s11"],
         help="Subset to create (s1, s2, s3, s4, s8, s11)",
-        choices=["s1", "s2", "s3", "s4", "s8", "s11"],
-        help="Subset to create (s1, s2, s3, s4, s8, s11)",
     )
     parser.add_argument(
         "--output",
@@ -239,7 +237,6 @@ def main():
 
     # Set sample size
     sample_size_val = args.sample_size if args.sample_size else 1.0
-    if args.subset in ["s4", "s8", "s11"]:
     if args.subset in ["s4", "s8", "s11"]:
         sample_size_val = 1.0
 
