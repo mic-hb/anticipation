@@ -50,8 +50,10 @@ temporary disk usage = subset_size × file_size. For 10% sampling of
 import argparse
 import csv
 import gc
+import os
 import random
 import re
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -99,6 +101,103 @@ def scan_existing_output(output_path: Path) -> set[str]:
                 existing.add(fpath.stem)
 
     return existing
+
+
+def _build_local_md5_map(local_path: Path) -> dict[str, Path]:
+    """Recursively scan local GigaMIDI folder and build md5 → local_path map.
+
+    Uses globbing with wildcards to handle arbitrary version names.
+    Pattern: {local_path}/*/training-*/{category}/{hex}/*.mid
+
+    Example matching path:
+        Final_GigaMIDI_V2.0_Final/training-V2.0-80%/no-drums/0/81a8984f7cac6fac511e917fe6d307de.mid
+
+    Checks instrument categories in order of completeness:
+        no-drums → all-instruments-with-drums → drums-only
+
+    Returns:
+        dict[md5: str] -> Path of the local .mid file
+    """
+    categories = [
+        "no-drums",
+        "all-instruments-with-drums",
+        "drums-only",
+    ]
+    splits = ["training-*/", "validation-*/", "test-*/"]
+
+    md5_map = {}
+    seen = set()
+
+    for split_wildcard in splits:
+        for category in categories:
+            for fpath in local_path.glob(f"*/{split_wildcard}{category}/*/*.mid"):
+                md5 = fpath.stem
+                if md5 not in seen:
+                    seen.add(md5)
+                    md5_map[md5] = fpath
+
+    return md5_map
+
+
+def write_local_targets(target_md5s: set[str], split_name: str, output_base: Path,
+                        existing_md5s: set[str]):
+    """Copy target md5s from local GigaMIDI folder to output hex-folders.
+
+    Uses the local folder scan map (built once). For each md5:
+        - If already on disk (in existing_md5s): skip, O(1) lookup
+        - If found locally: copy file, update existing_md5s
+        - If not found locally: count as missing
+
+    Returns:
+        (written, errors, skipped_existing, missing) counts
+    """
+    total = len(target_md5s)
+    print(f"\n  [{split_name}] Copying {total:,} files from local folder...")
+
+    written = 0
+    errors = 0
+    skipped_existing = 0
+    missing = 0
+    pbar_start = time.time()
+
+    pbar = tqdm(total=total, desc=f"  {split_name}", leave=True)
+    for md5_val in target_md5s:
+        # O(1) skip check — no disk I/O
+        if existing_md5s is not None and md5_val in existing_md5s:
+            skipped_existing += 1
+            pbar.update(1)
+            continue
+
+        local_path = _local_md5_map.get(md5_val)
+        if local_path is None:
+            missing += 1
+            pbar.update(1)
+            continue
+
+        try:
+            out_folder = output_base / get_hex_folder(md5_val)
+            out_folder.mkdir(parents=True, exist_ok=True)
+            out_path = out_folder / f"{md5_val}.mid"
+            shutil.copy2(local_path, out_path)
+            if existing_md5s is not None:
+                existing_md5s.discard(md5_val)  # mark as written
+            written += 1
+        except Exception:
+            errors += 1
+
+        elapsed = time.time() - pbar_start
+        rate = (written + skipped_existing) / elapsed if elapsed > 0 else 0
+        remaining = (total - written - skipped_existing) / rate if rate > 0 else 0
+        pbar.set_postfix(
+            written=written,
+            skipped=skipped_existing,
+            missing=missing,
+            eta=f"{int(remaining)}s" if remaining else "—",
+        )
+        pbar.update(1)
+
+    pbar.close()
+    return written, errors, skipped_existing, missing
 
 
 def _parse_python_list(val: str):
@@ -588,6 +687,14 @@ def main():
              "Much faster than pure streaming for subsets with high filter selectivity.",
     )
     parser.add_argument(
+        "--local_path", type=str, default=None,
+        help="Path to extracted Final_GigaMIDI_V* folder (e.g. Final_GigaMIDI_V2.0_Final/). "
+             "When provided, files are copied from local disk instead of streamed from HuggingFace. "
+             "Much faster. Uses wildcards to match any version naming. "
+             "Can be combined with --csv_path to filter locally. "
+             "Without --csv_path, copies all files found locally.",
+    )
+    parser.add_argument(
         "--dry_run", action="store_true",
         help="Scan and print statistics without downloading or writing any files",
     )
@@ -632,7 +739,14 @@ def main():
               f"test={FULL_SPLIT_COUNTS['test']:,}")
     print("-" * 70)
 
-    if args.csv_path:
+    if args.local_path:
+        print(f"Local mode:   {args.local_path}")
+        if args.csv_path:
+            print(f"  + CSV:      {args.csv_path}")
+            print(f"  → Filter local files via CSV, then copy from local disk (no HuggingFace)")
+        else:
+            print(f"  → Copy ALL local files to output (no HuggingFace, no CSV filter)")
+    elif args.csv_path:
         print(f"CSV mode:     {args.csv_path}")
         print(f"  → CSV scan builds exact target md5 set, only matching rows fetch binary")
         print(f"  → Non-target rows: NO music download (zero network waste)")
@@ -653,8 +767,100 @@ def main():
     if existing_md5s and not args.dry_run:
         print(f"  → Will skip already-written files (idempotent, O(1) set lookup)")
 
-    if args.csv_path:
-        # ---- CSV-guided mode: filter on metadata, fetch only matched rows ----
+    if args.local_path:
+        # ---- Local folder mode: copy files directly from disk, no HuggingFace ----
+        local_base = Path(args.local_path)
+        if not local_base.exists():
+            print(f"  ERROR: Local path does not exist: {local_base}")
+            return
+
+        print(f"\n[Local mode] Scanning {local_base} for .mid files...")
+        scan_start = time.time()
+        global _local_md5_map
+        _local_md5_map = _build_local_md5_map(local_base)
+        scan_time = time.time() - scan_start
+        print(f"  → Scanned {len(_local_md5_map):,} files in {scan_time:.1f}s")
+
+        # If CSV also provided, filter locally-copied files by subset
+        if args.csv_path:
+            print(f"\n  [CSV mode] Applying subset filter to local files...")
+            target_md5s, split_counts = scan_csv_for_targets(
+                args.csv_path,
+                args.subset,
+                args.nomml_threshold,
+                args.min_tracks,
+                args.max_tracks,
+                args.sample_size,
+                args.seed,
+            )
+            total_targets = len(target_md5s)
+            # Only keep md5s that are both in CSV targets AND in local folder
+            locally_found = target_md5s & _local_md5_map.keys()
+            locally_missing = target_md5s - _local_md5_map.keys()
+            print(f"  → Total CSV target md5s: {total_targets:,}  "
+                  f"(train={split_counts['train']:,}  "
+                  f"valid={split_counts['validation']:,}  "
+                  f"test={split_counts['test']:,})")
+            print(f"  → Found locally: {len(locally_found):,}  "
+                  f"(will copy from local, no HuggingFace)")
+            if locally_missing:
+                print(f"  → Not found locally: {len(locally_missing):,}  "
+                      f"(will skip — no HuggingFace fallback in local mode)")
+            total_targets = len(locally_found)
+
+            if total_targets == 0:
+                print("  → No matching files found. Exiting.")
+                return
+
+            for split_name in ["train", "validation", "test"]:
+                if split_name == "train":
+                    targets_in_split = {m for m in locally_found if m[0].lower() in TRAIN_HASHES}
+                elif split_name == "validation":
+                    targets_in_split = {m for m in locally_found if m[0].lower() in VALID_HASHES}
+                else:
+                    targets_in_split = {m for m in locally_found if m[0].lower() in TEST_HASHES}
+
+                if not targets_in_split:
+                    print(f"\n  [{split_name}] No files in this split — skipping")
+                    continue
+
+                w, e, skipped, missing = write_local_targets(
+                    targets_in_split,
+                    split_name,
+                    output_path,
+                    existing_md5s,
+                )
+                total_written += w
+                total_errors += e
+                total_skipped += skipped
+        else:
+            # No CSV: copy ALL local files, partitioned by md5 leading char
+            all_local_md5s = set(_local_md5_map.keys())
+            print(f"  → Copying ALL {len(all_local_md5s):,} local files (no CSV filter)")
+
+            for split_name in ["train", "validation", "test"]:
+                if split_name == "train":
+                    targets_in_split = {m for m in all_local_md5s if m[0].lower() in TRAIN_HASHES}
+                elif split_name == "validation":
+                    targets_in_split = {m for m in all_local_md5s if m[0].lower() in VALID_HASHES}
+                else:
+                    targets_in_split = {m for m in all_local_md5s if m[0].lower() in TEST_HASHES}
+
+                if not targets_in_split:
+                    continue
+
+                w, e, skipped, missing = write_local_targets(
+                    targets_in_split,
+                    split_name,
+                    output_path,
+                    existing_md5s,
+                )
+                total_written += w
+                total_errors += e
+                total_skipped += skipped
+
+    elif args.csv_path:
+        # ---- CSV-guided HuggingFace streaming mode ----
         print("\n[CSV mode] Scanning metadata CSV to build target md5 set...")
         target_md5s, split_counts = scan_csv_for_targets(
             args.csv_path,
@@ -698,6 +904,7 @@ def main():
             total_written += w
             total_errors += e
             total_skipped += skipped
+
     else:
         # ---- Original streaming mode (filter on-the-fly) ----
         for split_name in ["train", "validation", "test"]:
