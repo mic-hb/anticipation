@@ -124,7 +124,9 @@ def pad(tokens, end_time=None, density=TIME_RESOLUTION):
     previous_time = TIME_OFFSET+0
     for (time, dur, note) in zip(tokens[0::3],tokens[1::3],tokens[2::3]):
         # must pad before separation, anticipation
-        assert note < CONTROL_OFFSET
+        # Note: with velocity extension, note tokens (77048+) may exceed CONTROL_OFFSET (27513),
+        # so we check against REST (77048) instead of CONTROL_OFFSET
+        assert note < REST
 
         # insert pad tokens to ensure the desired density
         while time > previous_time + density:
@@ -177,7 +179,7 @@ def anticipate(events, controls, delta=DELTA*TIME_RESOLUTION):
             controls = controls[3:] # consume this control
             control_time = controls[0] - ATIME_OFFSET if len(controls) > 0 else float('inf')
 
-        assert note < CONTROL_OFFSET
+        assert note < REST
         event_time = time - TIME_OFFSET
         tokens.extend([time, dur, note])
 
@@ -189,7 +191,7 @@ def sparsity(tokens):
     previous_time = TIME_OFFSET+0
     for (time, dur, note) in zip(tokens[0::3],tokens[1::3],tokens[2::3]):
         if note == SEPARATOR: continue
-        assert note < CONTROL_OFFSET # don't operate on interleaved sequences
+        assert note < REST # don't operate on interleaved sequences
 
         max_dt = max(max_dt, time - previous_time)
         previous_time = time
