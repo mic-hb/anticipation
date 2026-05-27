@@ -106,11 +106,10 @@ def scan_existing_output(output_path: Path) -> set[str]:
 def _build_local_md5_map(local_path: Path) -> dict[str, Path]:
     """Recursively scan local GigaMIDI folder and build md5 → local_path map.
 
-    Uses globbing with wildcards to handle arbitrary version names.
-    Pattern: {local_path}/*/training-*/{category}/{hex}/*.mid
+    Uses ** glob to skip any version folder name (e.g. V1.1, V2.0, etc.):
+        {local_path}/**/training-*/{category}/{hex}/*.mid
 
-    Example matching path:
-        Final_GigaMIDI_V2.0_Final/training-V2.0-80%/no-drums/0/81a8984f7cac6fac511e917fe6d307de.mid
+    Skips __MACOSX metadata folders and invalid/non-md5 filenames.
 
     Checks instrument categories in order of completeness:
         no-drums → all-instruments-with-drums → drums-only
@@ -118,6 +117,9 @@ def _build_local_md5_map(local_path: Path) -> dict[str, Path]:
     Returns:
         dict[md5: str] -> Path of the local .mid file
     """
+    # Ensure absolute path — Path.glob() with ** requires it
+    local_path = local_path.resolve()
+
     categories = [
         "no-drums",
         "all-instruments-with-drums",
@@ -130,8 +132,18 @@ def _build_local_md5_map(local_path: Path) -> dict[str, Path]:
 
     for split_wildcard in splits:
         for category in categories:
-            for fpath in local_path.glob(f"*/{split_wildcard}{category}/*/*.mid"):
+            pattern = f"**/{split_wildcard}{category}/*/*.mid"
+            for fpath in local_path.glob(pattern):
+                # Skip __MACOSX metadata folders
+                if "__MACOSX" in fpath.parts:
+                    continue
                 md5 = fpath.stem
+                # Skip macOS metadata files (start with ._)
+                if md5.startswith("._"):
+                    continue
+                # Validate md5: 32 hex chars
+                if len(md5) != 32 or not all(c in "0123456789abcdef" for c in md5.lower()):
+                    continue
                 if md5 not in seen:
                     seen.add(md5)
                     md5_map[md5] = fpath
