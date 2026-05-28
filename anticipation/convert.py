@@ -267,7 +267,10 @@ def compound_to_events(tokens, stats=False):
 
     # Embed velocity into note token:
     # note_with_velocity = NOTE_OFFSET + VEL_BINS * MAX_NOTE + (128*instr + pitch) * VEL_BINS + vel_bin
-    # This preserves velocity information through the tokenization pipeline
+    # This creates two distinct ranges:
+    #   - Old format: NOTE_OFFSET to NOTE_OFFSET + MAX_NOTE - 1 (11000 to 27511)
+    #   - New format: NOTE_OFFSET + VEL_BINS*MAX_NOTE to NOTE_OFFSET + VEL_BINS*MAX_NOTE + MAX_NOTE*VEL_BINS - 1 (77048 to 143095)
+    # The REST token (77048) marks the boundary between old and new format
     new_tokens = []
     for i in range(0, len(tokens), 5):
         time = tokens[i]
@@ -307,10 +310,10 @@ def events_to_compound(tokens, debug=False):
     tokens = unpad(tokens)
 
     # move all tokens to zero-offset for synthesis
-    # Note: With velocity extension, event note tokens (77048+) are >= CONTROL_OFFSET (27513),
-    # so we must check if tok >= CONTROL_OFFSET + VEL_BINS*MAX_NOTE to avoid incorrectly
-    # subtracting CONTROL_OFFSET from event tokens
-    tokens = [tok - CONTROL_OFFSET if tok >= CONTROL_OFFSET + VEL_BINS * MAX_NOTE and tok != SEPARATOR else tok
+    # With velocity extension, new event note tokens (77048 to 143095) are LESS than
+    # ANOTE_OFFSET (88049), while control tokens (>= ANOTE_OFFSET) need CONTROL_OFFSET subtracted.
+    # The check tok >= ANOTE_OFFSET correctly identifies only control tokens.
+    tokens = [tok - CONTROL_OFFSET if tok >= ANOTE_OFFSET and tok != SEPARATOR else tok
               for tok in tokens]
 
     # remove type offsets
@@ -340,19 +343,24 @@ def events_to_compound(tokens, debug=False):
     out[1::5] = tokens[1::3]
 
     # Decode velocity from note_with_velocity token
-    # note_with_velocity = VEL_BINS * MAX_NOTE + 128*instr + pitch + vel_bin
+    # note_with_velocity = NOTE_OFFSET + VEL_BINS*MAX_NOTE + (128*instr + pitch) * VEL_BINS + vel_bin
+    # At this point, NOTE_OFFSET has been subtracted (line 322), so note_with_vel is:
+    #   - New format: residual ranges VEL_BINS*MAX_NOTE to VEL_BINS*MAX_NOTE + MAX_NOTE*VEL_BINS - 1 (66048 to 131103)
+    #   - Old format: note_id ranges 0 to MAX_NOTE-1 (16511)
+    # We detect new format by checking if residual >= VEL_BINS * MAX_NOTE (66048)
     for i, note_with_vel in enumerate(tokens[2::3]):
         if note_with_vel >= VEL_BINS * MAX_NOTE:
             # New format with velocity embedded
             residual = note_with_vel - VEL_BINS * MAX_NOTE
             vel_bin = residual % VEL_BINS
-            residual = residual // VEL_BINS
-            instr = residual // 128
-            pitch = residual % 128
+            note_id = residual // VEL_BINS
+            instr = note_id // 128
+            pitch = note_id % 128
         else:
             # Old format without velocity (backwards compatibility)
-            instr = note_with_vel // 128
-            pitch = note_with_vel % 128
+            note_id = note_with_vel
+            instr = note_id // 128
+            pitch = note_id % 128
             vel_bin = 1  # default medium (bin 1 = velocity ~48)
 
         out[5*i + 2] = pitch
