@@ -68,6 +68,13 @@ LORA_CONFIGS = {
         # "all" expands to every linear layer below; kept as list for explicit PEFT compat.
         "target_modules": ["c_attn", "c_proj", "mlp.c_fc", "mlp.c_proj"],
     },
+    "L8": {
+        "rank": 32,
+        "alpha": 64,
+        "dropout": 0.0,
+        # "all" expands to every linear layer below; kept as list for explicit PEFT compat.
+        "target_modules": ["c_attn", "c_proj", "mlp.c_fc", "mlp.c_proj"],
+    },
 }
 
 # AMT/GPT-2 uses transformer.h.{layer}.attn.c_attn and transformer.h.{layer}.attn.c_proj
@@ -205,7 +212,7 @@ def parse_args():
         "--config",
         type=str,
         default=None,
-        help="LoRA config preset (L1-L7 from experiment matrix). Overrides manual settings.",
+        help="LoRA config preset (L1-L8 from experiment matrix). Overrides manual settings.",
     )
 
     # Data arguments
