@@ -566,10 +566,14 @@ def main():
     callback = CrossEntropyLossCallback()
     trainer.add_callback(callback)
 
+    # Convert "True"/"true" string to boolean for auto-detection, use path as-is
+    checkpoint = args.resume_from_checkpoint
+    if isinstance(checkpoint, str) and checkpoint.lower() in ("true", "false"):
+        checkpoint = True if checkpoint.lower() == "true" else False
+
     # Train
     logger.info("Starting training...")
-    checkpoint = args.resume_from_checkpoint
-    trainer.train(resume_from_checkpoint=checkpoint)
+    trainer.train(resume_from_checkpoint=checkpoint if checkpoint not in (None, False) else None)
 
     # Save final adapter (PEFT weights only — lightweight, resumable)
     logger.info("Saving final LoRA adapter to 'final/'...")
