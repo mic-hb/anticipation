@@ -18,7 +18,7 @@ from anticipation.vocab import SEPARATOR
 def compute_dataset_hours_arrival(datafile: str, subsample: int) -> tuple[float, int, int]:
     """
     Total music duration (hours) for lines that would be evaluated at this subsample.
-    Matches dataset-stats.py logic for arrival-time: skip SEPARATOR lines, use max_time(tokens[1:], seconds=False).
+    Sums max_time per segment after splitting packed (SEPARATOR-delimited) sequences.
     Returns (hours, lines_used, total_time_bins).
     """
     total_time_bins = 0
@@ -28,12 +28,23 @@ def compute_dataset_hours_arrival(datafile: str, subsample: int) -> tuple[float,
             if i % subsample != 0:
                 continue
             tokens = [int(t) for t in line.split()]
-            if SEPARATOR in tokens:
-                continue
             if len(tokens) < 2:
                 continue
-            total_time_bins += max_time(tokens[1:], seconds=False)
-            lines_used += 1
+            # Split into segments at SEPARATOR boundaries
+            segments = []
+            cur = [tokens[0]]
+            for t in tokens[1:]:
+                if t == SEPARATOR:
+                    if len(cur) > 1:
+                        segments.append(cur)
+                    cur = [tokens[0]]
+                else:
+                    cur.append(t)
+            if len(cur) > 1:
+                segments.append(cur)
+            for seg in segments:
+                total_time_bins += max_time(seg[1:], seconds=False)
+                lines_used += 1
     hours = total_time_bins / (TIME_RESOLUTION * 3600.0) if total_time_bins else 0.0
     return float(hours), lines_used, int(total_time_bins)
 
