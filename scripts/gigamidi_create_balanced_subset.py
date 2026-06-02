@@ -46,6 +46,7 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import mido
 from tqdm import tqdm
 
 TOKENS_PER_NOTE = 5.0
@@ -87,6 +88,59 @@ def parse_inst_groups(raw):
 
 def get_hex_folder(md5):
     return md5[0].lower()
+
+
+def midi_duration(mid):
+    if mid.ticks_per_beat == 0:
+        return 0.0
+    max_tick = 0
+    for track in mid.tracks:
+        abs_tick = 0
+        for msg in track:
+            abs_tick += msg.time
+            max_tick = max(max_tick, abs_tick)
+            if msg.type == "end_of_track":
+                break
+    us_per_tick = 500_000 / mid.ticks_per_beat
+    return max_tick * us_per_tick / 1_000_000
+
+
+def scan_midi_file(path):
+    try:
+        mid = mido.MidiFile(str(path))
+    except Exception:
+        return None
+    note_events = 0
+    for track in mid.tracks:
+        for msg in track:
+            if msg.type == "note_on" and msg.velocity > 0:
+                note_events += 1
+    dur = midi_duration(mid)
+    return {"note_events": note_events, "duration_sec": dur, "duration_hours": dur / 3600}
+
+
+def scan_output_real_stats(output_path):
+    midi_files = sorted(output_path.glob("*/*.mid"))
+    total_notes = 0
+    total_tokens = 0
+    total_hours = 0.0
+    scanned = 0
+    errors = 0
+
+    pbar = tqdm(midi_files, desc="  Scanning MIDI files", unit=" files", leave=True)
+    for fpath in pbar:
+        result = scan_midi_file(fpath)
+        if result is None:
+            errors += 1
+            continue
+        total_notes += result["note_events"]
+        total_tokens += result["note_events"] * TOKENS_PER_NOTE
+        total_hours += result["duration_hours"]
+        scanned += 1
+        pbar.set_postfix(notes=f"{total_notes:,}", hours=f"{total_hours:.1f}")
+
+    pbar.close()
+    return {"files": scanned, "errors": errors, "notes": total_notes, "tokens": total_tokens, "hours": total_hours}
 
 
 def compute_targets(strategy, pct, avail):
@@ -259,8 +313,7 @@ def write_target_md5s(target_md5s, split_name, output_base, local_md5_map, exist
     return written, errors, skipped_existing, missing
 
 
-def profile_selection(all_selected, target_tokens, group_available, total_exp_files, best_scale):
-    md5_notes = {m: 0 for m, _ in all_selected}
+def profile_selection_dryrun(all_selected, target_tokens, group_available, total_exp_files, best_scale, md5_notes):
     groups = Counter()
     for _, fgroups in all_selected:
         for gi, c in fgroups.items():
@@ -268,19 +321,22 @@ def profile_selection(all_selected, target_tokens, group_available, total_exp_fi
 
     tracks = sum(groups.values())
     files = len(all_selected)
-    tokens = 0
-    hours = 0
-    tokens_full_pct = 0
+    sum_notes = sum(md5_notes.get(m, 0) for m, _ in all_selected)
+    tokens = sum_notes * TOKENS_PER_NOTE
+    hours = tokens / EVENTS_PER_HOUR
+    tokens_full_pct = tokens / LMD_EVENTS * 100
 
     print(f"\n{SEP}")
-    print("  OUTPUT PROFILE")
+    print("  OUTPUT PROFILE (estimates — no files to scan)")
     print(f"{SEP}")
     print(f"  Scale factor:        {best_scale:.4f}")
     print(f"  Files:               {files:>10,d}")
     print(f"  Expressive tracks:   {tracks:>10,d}")
-    print(f"  Estimated tokens:    --- (requires total_notes)")
-    print(f"  % of target (50% LMD): ---")
-    print(f"  % of full LMD:       ---")
+    print(f"  Est. note events:    {sum_notes:>10,d}")
+    print(f"  Est. tokens:         {int(tokens):>10,d}")
+    print(f"  Est. hours:          {hours:>10,.1f}")
+    print(f"  % of target ({int(target_tokens/LMD_EVENTS*100)}% LMD): {tokens/target_tokens*100:>9.2f}%")
+    print(f"  % of full LMD:       {tokens_full_pct:>9.2f}%")
 
     train = sum(1 for m, _ in all_selected if m[0].lower() in TRAIN_HASHES)
     valid = sum(1 for m, _ in all_selected if m[0].lower() in VALID_HASHES)
@@ -485,11 +541,12 @@ def main():
         best_scale, base_targets, other_files, big3_only_by_cat, md5_notes)
 
     target_md5s = {m for m, _ in all_selected}
+    hours_val = tokens_val / EVENTS_PER_HOUR
     print(f"\n  Selected {len(target_md5s):,} files at scale={best_scale:.4f}")
-    print(f"  Estimated tokens: {int(tokens_val):,} ({tokens_val/target_tokens*100:.2f}% of target)")
+    print(f"  Estimated tokens: {int(tokens_val):,}  hours: {hours_val:,.1f}  ({tokens_val/target_tokens*100:.2f}% of target)")
 
     if args.dry_run:
-        profile_selection(all_selected, target_tokens, group_available, total_exp_files, best_scale)
+        profile_selection_dryrun(all_selected, target_tokens, group_available, total_exp_files, best_scale, md5_notes)
         elapsed = time.time() - start
         print(f"\n{SEP}")
         print(f"  DRY RUN COMPLETE in {elapsed:.1f}s \u2014 no files written")
@@ -629,8 +686,64 @@ def main():
 
     elapsed = time.time() - start
 
-    # ── Phase 5: Profile output ──────────────────────────────────────
-    profile_selection(all_selected, target_tokens, group_available, total_exp_files, best_scale)
+    # ── Phase 5: Real MIDI scan & profile ────────────────────────────
+    print(f"\n{SEP}")
+    print("  Phase 5: Scanning output MIDI files for real counts")
+    print(f"{SEP}")
+    real_stats = scan_output_real_stats(output_path)
+    real_tokens = real_stats["tokens"]
+    real_hours = real_stats["hours"]
+    real_notes = real_stats["notes"]
+
+    groups = Counter()
+    for _, fgroups in all_selected:
+        for gi, c in fgroups.items():
+            groups[gi] += c
+    tracks = sum(groups.values())
+    files = len(all_selected)
+    big3_final = sum(groups.get(g, 0) for g in BIG3)
+    other_final = tracks - big3_final
+
+    train = sum(1 for m, _ in all_selected if m[0].lower() in TRAIN_HASHES)
+    valid = sum(1 for m, _ in all_selected if m[0].lower() in VALID_HASHES)
+    test = sum(1 for m, _ in all_selected if m[0].lower() in TEST_HASHES)
+
+    group_file_counts = Counter()
+    for _, gdict in all_selected:
+        for gi in gdict:
+            group_file_counts[gi] += 1
+
+    print(f"\n{SEP}")
+    print("  OUTPUT PROFILE — Real MIDI Counts")
+    print(f"{SEP}")
+    print(f"  Scale factor:        {best_scale:.4f}")
+    print(f"  Files:               {files:>10,d}")
+    print(f"  Expressive tracks:   {tracks:>10,d}")
+    print(f"  Actual note events:  {real_notes:>10,d}")
+    print(f"  Actual tokens:       {int(real_tokens):>10,d}")
+    print(f"  Actual hours:        {real_hours:>10,.1f}")
+    print(f"  % of target (50% LMD): {real_tokens/target_tokens*100:>9.2f}%")
+    print(f"  % of full LMD:       {real_tokens/LMD_EVENTS*100:>9.2f}%")
+
+    print(f"\n  Splits (Lakh hex convention):")
+    print(f"    Train (0-d): {train:>10,d} ({train/files*100:>5.1f}%)")
+    print(f"    Valid (e):   {valid:>10,d} ({valid/files*100:>5.1f}%)")
+    print(f"    Test (f):    {test:>10,d} ({test/files*100:>5.1f}%)")
+
+    print(f"\n  Per-group distribution:")
+    print(f"    {'Group':<23s} {'Tracks':>8s} {'%Tracks':>8s} {'Files':>8s}")
+    print(f"    {'-'*50}")
+    for gi, tc in sorted(groups.items(), key=lambda x: -x[1]):
+        pct = tc / tracks * 100
+        fc = group_file_counts.get(gi, 0)
+        is_capped = args.strategy == "B" and gi in BIG3
+        tag = " [CAP]" if is_capped else ""
+        print(f"    {gi:<23s} {tc:>8,d} {pct:>7.2f}%{tag} {fc:>8,d}")
+    print(f"    {'-'*50}")
+    print(f"    {'TOTAL':<23s} {tracks:>8,d} {100:>7.2f}% {files:>8,d}")
+
+    print(f"\n  Big3 total:  {big3_final:>8,d} ({big3_final/tracks*100:.1f}%)")
+    print(f"  Other total: {other_final:>8,d} ({other_final/tracks*100:.1f}%)")
 
     train_count = sum(len(list(output_path.glob(f"{h}/*"))) for h in "0123456789abcd")
     valid_count = len(list(output_path.glob("e/*")))
@@ -653,6 +766,8 @@ def main():
     print(f"  Output:              {output_path}")
     print(f"{SEP}")
 
+    if real_stats["errors"] > 0:
+        print(f"\n  Note: {real_stats['errors']:,} files failed MIDI parsing during scan.")
     if total_missing > 0:
         print(f"\n  Note: {total_missing:,} target files were not found locally.")
         print(f"  Run with HuggingFace streaming (no --local_path) to fetch them.")
