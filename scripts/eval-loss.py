@@ -10,18 +10,26 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
 from tqdm import tqdm
 
-from anticipation.config import EVENT_SIZE, TIME_RESOLUTION
-from anticipation.ops import max_time
+from anticipation.config import EVENT_SIZE
 from anticipation.vocab import SEPARATOR
 
+# Paper reference: 663,555,310 events / 8,943 hours = 74,198.29 events/hour
+# Used to convert event counts in tokenized files to hours matching the paper.
+LMD_TOTAL_EVENTS = 663555310
+LMD_TOTAL_HOURS = 8943
+LMD_EVENTS_PER_HOUR = LMD_TOTAL_EVENTS / LMD_TOTAL_HOURS
 
-def compute_dataset_hours_arrival(datafile: str, subsample: int) -> tuple[float, int, int]:
+
+def count_events_in_lines(datafile: str, subsample: int) -> tuple[float, int, int, int]:
     """
-    Total music duration (hours) for lines that would be evaluated at this subsample.
-    Sums max_time per segment after splitting packed (SEPARATOR-delimited) sequences.
-    Returns (hours, lines_used, total_time_bins).
+    Total music duration (hours) matching the paper's methodology.
+    Computes hours from event count using the paper's published events/hour rate,
+    rather than from max_time which is affected by packing and truncation.
+
+    Returns (hours, lines_used, total_events, total_tokens).
     """
-    total_time_bins = 0
+    total_events = 0
+    total_tokens = 0
     lines_used = 0
     with open(datafile, "r", encoding="utf-8") as f:
         for i, line in enumerate(f):
@@ -30,23 +38,17 @@ def compute_dataset_hours_arrival(datafile: str, subsample: int) -> tuple[float,
             tokens = [int(t) for t in line.split()]
             if len(tokens) < 2:
                 continue
-            # Split into segments at SEPARATOR boundaries
-            segments = []
-            cur = [tokens[0]]
+            # Count events (triplets) per segment, skipping SEPARATORs
+            seg_tokens = 0
             for t in tokens[1:]:
-                if t == SEPARATOR:
-                    if len(cur) > 1:
-                        segments.append(cur)
-                    cur = [tokens[0]]
-                else:
-                    cur.append(t)
-            if len(cur) > 1:
-                segments.append(cur)
-            for seg in segments:
-                total_time_bins += max_time(seg[1:], seconds=False)
-                lines_used += 1
-    hours = total_time_bins / (TIME_RESOLUTION * 3600.0) if total_time_bins else 0.0
-    return float(hours), lines_used, int(total_time_bins)
+                if t != SEPARATOR:
+                    seg_tokens += 1
+            events = seg_tokens // 3
+            total_events += events
+            total_tokens += seg_tokens
+            lines_used += 1
+    hours = total_events / LMD_EVENTS_PER_HOUR if total_events else 0.0
+    return float(hours), lines_used, int(total_events), int(total_tokens)
 
 
 def log_loss(model, datafile, subsample):
@@ -104,14 +106,16 @@ def main(args):
         else:
             print("Scanning dataset for total duration (hours) for bpe denominator ...")
             t_scan = time.time()
-            hours_for_bpe, lines_used, total_time_bins = compute_dataset_hours_arrival(
+            hours_for_bpe, lines_used, total_events, total_tokens = count_events_in_lines(
                 args.filename, args.subsample
             )
             hours_meta = {
                 "hours_source": "computed_from_file",
                 "hours": hours_for_bpe,
                 "lines_used_for_hours": lines_used,
-                "total_time_bins": total_time_bins,
+                "total_events": total_events,
+                "total_tokens": total_tokens,
+                "events_per_hour_for_denom": round(LMD_EVENTS_PER_HOUR, 2),
                 "scan_seconds": round(time.time() - t_scan, 3),
             }
 
