@@ -19,10 +19,10 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-TOKENS_PER_NOTE = 5.0
+TOKENS_PER_NOTE = 3.0
 BIG3 = {"Piano", "Drums", "Guitar"}
-LMD_EVENTS = 663_163_605
-TARGET_TOKENS = LMD_EVENTS * 0.5
+LMD_EVENTS = 1_990_665_930    # total LMD tokens (actual)
+TARGET_TOKENS = int(LMD_EVENTS * 0.5)
 
 # Groups with >0 available tracks
 ALL_GROUPS = [

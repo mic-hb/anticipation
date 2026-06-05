@@ -32,10 +32,10 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-TOKENS_PER_NOTE = 5.0
+TOKENS_PER_NOTE = 3.0
 BIG3 = {"Piano", "Drums", "Guitar"}
 LMD_FILES = 178_165
-LMD_EVENTS = 663_163_605
+LMD_EVENTS = 1_990_665_930    # total LMD tokens (actual)
 LMD_NOTES = int(LMD_EVENTS / TOKENS_PER_NOTE)
 LMD_HOURS = 8943
 EVENTS_PER_HOUR = LMD_EVENTS / LMD_HOURS

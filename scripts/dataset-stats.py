@@ -51,10 +51,21 @@ if __name__ == '__main__':
                 time_lengths.append(sum(t-MIDI_TIME_OFFSET for t in tokens if t < MIDI_START_OFFSET))
                 token_counts.append(len(tokens))
             else:
-                if SEPARATOR in tokens:
-                    continue # counts are weird; just skip these
-                time_lengths.append(max_time(tokens[1:], seconds=False))
-                token_counts.append(len(tokens[1:]))
+                # Split into segments at SEPARATOR boundaries (packed sequences)
+                segments = []
+                cur = [tokens[0]]
+                for t in tokens[1:]:
+                    if t == SEPARATOR:
+                        if len(cur) > 1:
+                            segments.append(cur)
+                        cur = [tokens[0]]
+                    else:
+                        cur.append(t)
+                if len(cur) > 1:
+                    segments.append(cur)
+                for seg in segments:
+                    time_lengths.append(max_time(seg[1:], seconds=False))
+                    token_counts.append(len(seg[1:]))
 
     tokens_per_second = [TIME_RESOLUTION*tokens/float(time) for (tokens, time) in zip(token_counts, time_lengths)]
     print('Total tokens:', sum(token_counts))

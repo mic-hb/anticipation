@@ -49,10 +49,13 @@ from pathlib import Path
 import mido
 from tqdm import tqdm
 
-TOKENS_PER_NOTE = 5.0
+TOKENS_PER_NOTE = 3.0
 BIG3 = {"Piano", "Drums", "Guitar"}
+# Lakh MIDI reference (from Anticipatory Music Transformer paper):
+# 663,555,310 events → 1,990,665,930 tokens (×3 arrival-time), 8,943 hours
 LMD_FILES = 178_165
-LMD_EVENTS = 663_163_605
+LMD_EVENTS = 1_990_665_930    # total LMD tokens (actual, not estimated)
+TOKENS_PER_NOTE = 3.0          # each note → 1 event → 3 tokens arrival-time
 LMD_NOTES = int(LMD_EVENTS / TOKENS_PER_NOTE)
 LMD_HOURS = 8943
 EVENTS_PER_HOUR = LMD_EVENTS / LMD_HOURS
@@ -379,7 +382,7 @@ def main():
                         help="Subset strategy to use")
     parser.add_argument("--pct", type=float, default=None,
                         help="Parameter for strategy (C1: %% of Ethnic cap, C2: %% of each group)")
-    parser.add_argument("--target", type=float, default=50.0,
+    parser.add_argument("--target", type=float, default=10.0,
                         help="Target %% of LMD tokens (default: 50)")
     parser.add_argument("--output", type=str, required=True,
                         help="Output directory path")
